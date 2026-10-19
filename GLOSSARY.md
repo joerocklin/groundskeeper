@@ -41,5 +41,5 @@ A condition that must hold before the next Run may start, such as sufficient bat
 _Avoid_: Precondition, check, hold
 
 **Anomaly**:
-A detected fault fingerprint in Mower behaviour or telemetry.
+A detected fault fingerprint in Mower behaviour or telemetry. An Anomaly only alerts the user (or asks the Schedule to pause after the current Run); it never fails a Run or commands the Mower.
 _Avoid_: Fault, issue
