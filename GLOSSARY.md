@@ -16,6 +16,14 @@ _Avoid_: Area, yard, region
 The compass bearing of a Zone's long axis, against which Run path angles are expressed.
 _Avoid_: Orientation, heading
 
+**Channel**:
+A route the Mower travels between two Zones, or between a Zone and its dock, outside any Zone's mowing area.
+_Avoid_: Path (the stripes of a mow), passage, corridor, route
+
+**Gate**:
+A physical barrier on one or more Channels that must be open for the Mower to pass; a person opens it, or Home Assistant does where it is automated, and it is presumed closed unless known to be open.
+_Avoid_: Door, passage, fence
+
 **Run**:
 One full mow of a Zone at a specific blade height, path angle (relative to the Zone bearing), speed, and other mow settings; it carries its own status: pending, on hold, done, failed, skipped, or cancelled.
 _Avoid_: Pass, job, task, attempt
@@ -44,9 +52,9 @@ _Avoid_: Queue, sequence, task (Mammotion's term for its own app-side jobs)
 A rule that repeatedly adds a Plan to a Mower's Schedule over time, such as weekly maintenance.
 _Avoid_: Recurring schedule, repeat, cron
 
-**Gate**:
+**Check**:
 A condition that must hold before the next Run may start, such as sufficient battery, work hours, or dry grass.
-_Avoid_: Precondition, check, hold
+_Avoid_: Gate (a physical barrier), precondition, self-check (the Mower's own diagnostic)
 
 **Anomaly**:
 A detected fault fingerprint in Mower behaviour or telemetry. An Anomaly only alerts the user (or asks the Schedule to pause after the current Run); it never fails a Run or commands the Mower.
