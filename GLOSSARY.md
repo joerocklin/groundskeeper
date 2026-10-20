@@ -28,6 +28,14 @@ _Avoid_: Paused, suspended, waiting
 An ordered set of Runs for one Zone, stepping blade height down from a start height to an end height; a Plan whose start and end heights are equal is a single maintenance Run.
 _Avoid_: Scenario, recipe, program, template
 
+**Max cut**:
+The largest share of blade height a single step of a Plan may remove relative to the previous Run, which determines how many Runs a Plan derives.
+_Avoid_: Step size, cut ratio
+
+**Finishing Run**:
+The last Run of a multi-Run Plan, given slower or tighter settings to tidy blades the earlier Runs missed.
+_Avoid_: Final pass, cleanup pass
+
 **Schedule**:
 The order in which a Mower performs Runs, possibly interleaving Runs from several Plans; Runs within a Plan always keep the Plan's order. A Schedule says what comes next, never when.
 _Avoid_: Queue, sequence, task (Mammotion's term for its own app-side jobs)
