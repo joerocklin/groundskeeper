@@ -44,6 +44,18 @@ _Avoid_: Step size, cut ratio
 The last Run of a multi-Run Plan, given slower or tighter settings to tidy blades the earlier Runs missed.
 _Avoid_: Final pass, cleanup pass
 
+**Base angle**:
+The path angle, relative to the Zone bearing, on which a Plan's final Run lies when the user fixes it; otherwise the final Run's angle is drawn like the others.
+_Avoid_: Default angle, main angle
+
+**Allowed angle range**:
+The span of path angles, relative to the Zone bearing, that a Zone can be mown at without undue extra time; Run angles are drawn from it.
+_Avoid_: Angle window, angle limits
+
+**Crossing angle**:
+The minimum angle between the paths of one Run and the next, so successive Runs cut across each other's tracks.
+_Avoid_: Included angle, double-grid angle (Mammotion's second-pass angle within one Run)
+
 **Schedule**:
 The order in which a Mower performs Runs, possibly interleaving Runs from several Plans; Runs within a Plan always keep the Plan's order. A Schedule says what comes next, never when.
 _Avoid_: Queue, sequence, task (Mammotion's term for its own app-side jobs)
