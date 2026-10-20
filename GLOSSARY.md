@@ -59,3 +59,7 @@ _Avoid_: Gate (a physical barrier), precondition, self-check (the Mower's own di
 **Anomaly**:
 A detected fault fingerprint in Mower behaviour or telemetry. An Anomaly only alerts the user (or asks the Schedule to pause after the current Run); it never fails a Run or commands the Mower.
 _Avoid_: Fault, issue
+
+**Prompt**:
+A question the director puts to the user that waits for an answer; it stays pending until answered or superseded, and no clock answers it. Plain notices, such as a finished Schedule, are not Prompts.
+_Avoid_: Alert, notification (the delivery, not the question)
