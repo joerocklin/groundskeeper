@@ -297,6 +297,9 @@ async def test_reminders_replace_by_tag_and_skip_the_night(
     await hass.config.async_set_time_zone("UTC")
     freezer.move_to(datetime(2026, 10, 21, 20, 0, tzinfo=timezone.utc))
     entry, mower, _ = director
+    # a docked battery flat for hours is a separate Anomaly; keep it out of the count
+    async_get_director(hass, entry.entry_id).data["config"]["anomaly_actions"] = {
+        "charge_not_rising": "off"}
     await fail_a_run(hass, mower, freezer)
     [prompt] = async_get_director(hass, entry.entry_id).state["prompts"]
     assert len(sent(phones[PIXEL])) == 1

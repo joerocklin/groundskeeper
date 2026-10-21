@@ -115,6 +115,22 @@ ACTION_RAIN_NO = "no"
 ACTION_RAIN_YES = "yes"
 ACTION_RAIN_DONE_TODAY = "yes_done_today"
 
+PROMPT_ANOMALY = "anomaly"  # spec §11.6: Dismiss
+ACTION_DISMISS = "dismiss"
+
+DETECTOR_CHARGE = "charge_not_rising"  # spec §11.2
+DETECTOR_RUN_LONG = "run_too_long"  # spec §11.3
+DETECTORS = (DETECTOR_CHARGE, DETECTOR_RUN_LONG)
+ANOMALY_OFF = "off"  # spec §11.4: off / notify / pause, default notify
+ANOMALY_NOTIFY = "notify"
+ANOMALY_PAUSE = "pause"
+CHARGE_FULL_PCT = 95  # spec §11.9
+CHARGE_FLAT_WINDOW = timedelta(hours=2)
+RUN_LONG_FACTOR = 2
+RUN_LONG_MIN_SAMPLES = 3
+DEADLINE_ANOMALY_CHARGE = "anomaly_charge"
+DEADLINE_ANOMALY_RUN = "anomaly_run"
+
 HOLD_EXTERNAL_PAUSE = "external_pause"  # spec §7.4 causes
 HOLD_RECHARGE_STALL = "recharge_stall"
 HOLD_CONTACT_LOST = "contact_lost"
@@ -319,6 +335,14 @@ class RaisePrompt:
 
 
 @dataclass(frozen=True)
+class DismissAnomaly:
+    """`dismiss_anomaly` service / panel button (spec §11.7)."""
+
+    now: datetime
+    detector: str
+
+
+@dataclass(frozen=True)
 class SnapshotReceived:
     """An adapter snapshot."""
 
@@ -406,6 +430,7 @@ type CoreInput = (
     | ResumeRun
     | EndRun
     | AnswerPrompt
+    | DismissAnomaly
     | RaisePrompt
     | SnapshotReceived
     | SignalReceived
@@ -532,6 +557,7 @@ class Env:
     tz: tzinfo = UTC  # local time for Work hours
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
+    anomaly_actions: Mapping[str, str] = field(default_factory=dict)  # detector -> action
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +593,9 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("battery_trend", None)
     state.setdefault("height_verify", None)
     state.setdefault("prompts", [])
+    anomalies = state.setdefault("anomalies", {})  # spec §11.8, persisted
+    anomalies.setdefault("active", [])
+    anomalies.setdefault("battery", {"level": None, "rising_at": None})
     wet = state.setdefault("wet", {})  # Wet grass memory, persisted absolute (spec §9.3)
     wet.setdefault("last_wet_at", None)
     wet.setdefault("wet_now", False)
@@ -860,6 +889,8 @@ class _Machine:
                 self._end_run()
             case AnswerPrompt():
                 self._answer_prompt(event)
+            case DismissAnomaly():
+                self._dismiss_anomaly(event.detector)
             case RaisePrompt():
                 self._raise_prompt(
                     event.kind, event.subject, list(event.actions), dict(event.context)
@@ -897,6 +928,11 @@ class _Machine:
     def _arm(self, name: str, at: datetime) -> None:
         self.s["deadlines"][name] = iso(at)
         self.effects.append(ArmTimer(name, at))
+
+    def _arm_at(self, name: str, at: datetime) -> None:
+        """Arm only when the deadline moves, so a quiet snapshot has no effects."""
+        if self.s["deadlines"].get(name) != iso(at):
+            self._arm(name, at)
 
     def _cancel_deadline(self, name: str) -> None:
         if self.s["deadlines"].pop(name, None) is not None:
@@ -1334,6 +1370,13 @@ class _Machine:
 
     def _evaluate(self) -> None:
         """Re-evaluate everything that depends on state or time."""
+        self._accrue_mowing()
+        self._check_run_long()
+        self._evaluate_schedule()
+        self._remark_mowing()
+        self._evaluate_charge()
+
+    def _evaluate_schedule(self) -> None:
         self._wet_update()
         if self.status == ScheduleStatus.WAITING:
             self._evaluate_waiting()
@@ -1497,6 +1540,8 @@ class _Machine:
         ):
             self._cancel_deadline(DEADLINE_START_WINDOW)
             run["started_at"] = iso(self.now)
+            run["mowing_s"] = 0.0  # only the completing attempt counts (spec §11.3)
+            run["mow_mark"] = iso(self.now)
             run["job_ref"] = snapshot.job_ref
             self._set_run(run, RunStatus.MOWING)
             self._arm_stall(snapshot)
@@ -1654,6 +1699,8 @@ class _Machine:
         ):
             self._cancel_deadline(name)
         self._end_height_verify()
+        self._accrue_mowing()
+        run["mow_mark"] = None
         run["on_hold_reason"] = cause
         self._set_run(run, RunStatus.ON_HOLD, cause)
         if cause != HOLD_DEVICE_WORK_HOURS:  # the Mower resumes by itself
@@ -1890,21 +1937,21 @@ class _Machine:
             DEADLINE_HOLD_CLEAR_STABLE,
             DEADLINE_RECHARGE_STALL,
             DEADLINE_CONTACT_LOST,
+            DEADLINE_ANOMALY_RUN,
         ):
             self._cancel_deadline(name)
+        self._clear_anomaly(DETECTOR_RUN_LONG)  # clears when the Run ends, any status
         self.s["height_verify"] = None
         self.s["active_run_id"] = None
 
     def _finish_run(self, run: dict[str, Any]) -> None:
         """Run `done`: archive atomically, then advance the Schedule."""
+        self._accrue_mowing()
         self._clear_run_deadlines()
         run["finished_at"] = iso(self.now)
+        run["mow_mark"] = None
         self._set_run(run, RunStatus.DONE)
-        started = run.get("started_at")
-        if started is not None:
-            samples = self.learned["durations"].setdefault(run["zone_id"], [])
-            samples.append((self.now - parse(started)).total_seconds())
-            del samples[:-DURATION_SAMPLES_MAX]
+        self._add_duration_sample(run)
         self._archive_run(run)
         if next_run(self.s) is not None:
             if self.s["schedule"]["pause_requested"]:
@@ -2033,6 +2080,8 @@ class _Machine:
                 self._end_run()
         elif prompt["kind"] == PROMPT_IS_RAINING:
             self._wet_answer(event.action)
+        elif prompt["kind"] == PROMPT_ANOMALY:
+            self._dismiss_anomaly(prompt["subject"])
         elif prompt["kind"] == PROMPT_RUN_FAILED:
             # The dedicated input does the work and answers the Prompt.
             if event.action == ACTION_RETRY:
@@ -2045,6 +2094,231 @@ class _Machine:
             self._settle_prompt(prompt, event.action)
         if prompt["kind"] == PROMPT_IS_RAINING:
             self._evaluate()  # the answer changes what Wet grass reads at once
+
+    # -- Anomaly detectors (spec §11) -------------------------------------------
+
+    @property
+    def _anomalies(self) -> dict[str, Any]:
+        return self.s["anomalies"]
+
+    def _active_anomaly(self, detector: str) -> dict[str, Any] | None:
+        return next(
+            (a for a in self._anomalies["active"] if a["detector"] == detector), None
+        )
+
+    def _anomaly_action(self, detector: str) -> str:
+        return self.env.anomaly_actions.get(detector, ANOMALY_NOTIFY)
+
+    def _raise_anomaly(
+        self,
+        detector: str,
+        details: dict[str, Any],
+        run: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Observe only: tell the user and, for `pause`, ask for a soft pause."""
+        action = self._anomaly_action(detector)
+        if action == ANOMALY_OFF or self._active_anomaly(detector) is not None:
+            return
+        record = {
+            "id": self.env.new_id(),
+            "detector": detector,
+            "run_id": run["id"] if run else None,
+            "since": iso(self.now),
+            "dismissed": False,
+            "details": details,
+        }
+        self._anomalies["active"].append(record)
+        if run is not None:
+            run.setdefault("anomaly_ids", []).append(record["id"])  # history link
+        self._emit(
+            "anomaly_detected",
+            detector=detector,
+            anomaly_id=record["id"],
+            run_id=record["run_id"],
+            **details,
+        )
+        context: dict[str, Any] = {"detector": detector, **details}
+        if run is not None:
+            context.update(run_id=run["id"], plan_id=run["plan_id"], zone_name=run["zone_name"])
+        self._raise_prompt(PROMPT_ANOMALY, detector, [ACTION_DISMISS], context)
+        if action == ANOMALY_PAUSE and self.status in (
+            ScheduleStatus.WAITING,
+            ScheduleStatus.RUNNING,
+        ):
+            self.s["schedule"]["pause_requested"] = True  # soft: a Run finishes first
+            if self.status == ScheduleStatus.WAITING:
+                self._cancel_deadline(DEADLINE_STABILITY)
+                self._set_schedule(ScheduleStatus.PAUSED, "anomaly")
+
+    def _clear_anomaly(self, detector: str) -> None:
+        """The condition ended: `anomaly_cleared` only, nothing is sent."""
+        record = self._active_anomaly(detector)
+        if record is None:
+            return
+        self._anomalies["active"].remove(record)
+        self._emit(
+            "anomaly_cleared",
+            detector=detector,
+            anomaly_id=record["id"],
+            run_id=record["run_id"],
+        )
+
+    def _dismiss_anomaly(self, detector: str) -> None:
+        """Dismissed stays active (so it never re-fires) until it clears."""
+        record = self._active_anomaly(detector)
+        if record is not None:
+            record["dismissed"] = True
+        for prompt in [
+            p
+            for p in self.s["prompts"]
+            if p["kind"] == PROMPT_ANOMALY and p["subject"] == detector
+        ]:
+            self._settle_prompt(prompt, ACTION_DISMISS)
+
+    # -- Run far longer than the Zone's history (spec §11.3) -----------------
+
+    def _counting_mowing(self, run: Mapping[str, Any]) -> bool:
+        """Mowing time: `mowing` and actually mowing, so on-hold and mid-job
+        recharge time are excluded."""
+        snapshot = self._snapshot()
+        return (
+            run["status"] == RunStatus.MOWING
+            and snapshot is not None
+            and snapshot.available
+            and snapshot.activity is LawnMowerActivity.MOWING
+        )
+
+    def _accrue_mowing(self) -> None:
+        """Add the interval since the last evaluation if it was counted."""
+        run = active_run(self.s)
+        if run is None or not run.get("mow_mark"):
+            return
+        run["mowing_s"] = run.get("mowing_s", 0.0) + max(
+            0.0, (self.now - parse(run["mow_mark"])).total_seconds()
+        )
+        run["mow_mark"] = iso(self.now)
+
+    @staticmethod
+    def _speed_spacing(settings: Mapping[str, Any]) -> float:
+        return settings["speed_m_s"] * settings["spacing_cm"] / 100
+
+    def _expected_mowing_s(self, run: Mapping[str, Any]) -> float | None:
+        """Median sample / this Run's speed x spacing; None below 3 samples.
+
+        Samples of another native ref (the Zone's map was rebuilt) are ignored.
+        """
+        ref = run.get("native_ref")
+        values = sorted(
+            s["value"]
+            for s in self.learned["durations"].get(run["zone_id"], [])
+            if isinstance(s, Mapping) and s.get("native_ref") == ref
+        )
+        if len(values) < RUN_LONG_MIN_SAMPLES:
+            return None
+        mid = len(values) // 2
+        median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+        return median / self._speed_spacing(run["settings"])
+
+    def _check_run_long(self) -> None:
+        run = active_run(self.s)
+        if run is None or run["status"] != RunStatus.MOWING:
+            return
+        expected = self._expected_mowing_s(run)
+        if expected is None or run.get("mowing_s", 0.0) < RUN_LONG_FACTOR * expected:
+            return
+        self._raise_anomaly(
+            DETECTOR_RUN_LONG,
+            {
+                "expected_minutes": expected / 60,
+                "elapsed_minutes": run["mowing_s"] / 60,
+            },
+            run,
+        )
+
+    def _remark_mowing(self) -> None:
+        """Start or stop counting, and arm the moment the 2x mark is reached."""
+        run = active_run(self.s)
+        if run is None:
+            self._cancel_deadline(DEADLINE_ANOMALY_RUN)
+            return
+        if not self._counting_mowing(run):
+            run["mow_mark"] = None
+            self._cancel_deadline(DEADLINE_ANOMALY_RUN)
+            return
+        run["mow_mark"] = iso(self.now)
+        expected = self._expected_mowing_s(run)
+        if (
+            expected is None
+            or self._active_anomaly(DETECTOR_RUN_LONG) is not None
+            or self._anomaly_action(DETECTOR_RUN_LONG) == ANOMALY_OFF
+        ):
+            self._cancel_deadline(DEADLINE_ANOMALY_RUN)
+            return
+        remaining = max(0.0, RUN_LONG_FACTOR * expected - run.get("mowing_s", 0.0))
+        self._arm_at(DEADLINE_ANOMALY_RUN, self.now + timedelta(seconds=remaining))
+
+    def _add_duration_sample(self, run: Mapping[str, Any]) -> None:
+        """A `done` Run's completing attempt: `mowing_time x speed x spacing`,
+        raw settings and timestamp kept beside it (spec §11.3)."""
+        mowing_s = run.get("mowing_s")
+        if not mowing_s:
+            return
+        settings = run["settings"]
+        samples = [
+            s
+            for s in self.learned["durations"].get(run["zone_id"], [])
+            if isinstance(s, Mapping) and s.get("native_ref") == run.get("native_ref")
+        ]  # a changed native ref resets the history
+        samples.append(
+            {
+                "value": mowing_s * self._speed_spacing(settings),
+                "mowing_s": mowing_s,
+                "native_ref": run.get("native_ref"),
+                "at": iso(self.now),
+                "speed_m_s": settings["speed_m_s"],
+                "spacing_cm": settings["spacing_cm"],
+                "perimeter_laps": settings["perimeter_laps"],
+                "blade_height_mm": settings["blade_height_mm"],
+                "angle_deg": run["angle_deg"],
+            }
+        )
+        self.learned["durations"][run["zone_id"]] = samples[-DURATION_SAMPLES_MAX:]
+
+    def _evaluate_charge(self) -> None:
+        """Docked below 95 % outside a Run with the battery flat for 2 h."""
+        snapshot = self._snapshot()
+        if snapshot is None or not snapshot.available or snapshot.activity is None:
+            return  # no live evidence: neither fire nor clear
+        battery = self._anomalies["battery"]
+        level = snapshot.battery
+        if level is not None:
+            if battery["level"] is None or level > battery["level"]:
+                battery["rising_at"] = iso(self.now)
+            battery["level"] = level
+        outside = active_run(self.s) is None
+        docked = snapshot.activity is LawnMowerActivity.DOCKED
+        if not (outside and docked):
+            battery["rising_at"] = None
+        elif battery["rising_at"] is None:
+            battery["rising_at"] = iso(self.now)  # the clock starts on docking
+        flat_since = parse(battery["rising_at"]) if battery["rising_at"] else self.now
+        candidate = outside and docked and level is not None and level < CHARGE_FULL_PCT
+        stalled = candidate and self.now - flat_since >= CHARGE_FLAT_WINDOW
+        if stalled:
+            self._cancel_deadline(DEADLINE_ANOMALY_CHARGE)
+            self._raise_anomaly(
+                DETECTOR_CHARGE,
+                {
+                    "battery": level,
+                    "flat_minutes": int((self.now - flat_since).total_seconds() // 60),
+                },
+            )
+        else:
+            self._clear_anomaly(DETECTOR_CHARGE)
+            if candidate and self._anomaly_action(DETECTOR_CHARGE) != ANOMALY_OFF:
+                self._arm_at(DEADLINE_ANOMALY_CHARGE, flat_since + CHARGE_FLAT_WINDOW)
+            else:
+                self._cancel_deadline(DEADLINE_ANOMALY_CHARGE)
 
     # -- Wet grass (spec §9.3, §9.4) -------------------------------------------
 

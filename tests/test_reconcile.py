@@ -302,7 +302,8 @@ def test_idle_and_paused_schedules_are_unchanged(status):
     state, fx = reconcile(state, DOCKED)
     assert state["state"]["schedule"] == before
     assert commands(fx) == []
-    assert not events(fx, "prompt_sent")
+    # (the docked battery has been flat for 2 h by LOAD: that Anomaly is a separate rule)
+    assert not [e for e in events(fx, "prompt_sent") if e.payload["kind"] != "anomaly"]
 
 
 # -- no usable snapshot ---------------------------------------------------------------------
