@@ -189,3 +189,19 @@ def test_prompt_cards_show_title_body_and_every_action() -> None:
 
 def test_no_prompt_cards_when_none_pending() -> None:
     assert call("promptCardsHtml", []) == ""
+
+
+def test_panel_renders_the_now_tab_from_a_view() -> None:
+    import subprocess
+    from pathlib import Path
+
+    from tests.test_panel_zones import SRC
+
+    out = subprocess.run(
+        ["node", str(Path(__file__).with_name("panel_now_smoke.js")), str(SRC)],
+        check=True, capture_output=True, text=True).stdout
+    assert '<svg class="map"' in out and 'class="stripe"' in out  # stripes at the next Run's angle
+    assert "Waiting for:" in out and "Battery too low" in out
+    assert "Example Mower: Run failed" in out and "Up next" in out and "Checks" in out
+    assert 'role="dialog"' in out  # edit sheet open
+    assert 'aria-selected="true">Now' in out
