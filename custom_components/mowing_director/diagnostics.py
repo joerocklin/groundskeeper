@@ -7,6 +7,7 @@ Debug recording itself is a later ticket; #8 emits the read-only view.
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
@@ -45,7 +46,7 @@ async def async_get_config_entry_diagnostics(
     finally:
         await adapter.async_close()
 
-    return _redact(data, adapter.redact)
+    return cast(dict[str, object], _redact(data, adapter.redact))
 
 
 def _adapter_for(hass: HomeAssistant, entry: ConfigEntry) -> MowerAdapter | None:

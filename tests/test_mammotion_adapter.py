@@ -155,6 +155,45 @@ async def test_restored_unavailable_is_not_ready(hass: HomeAssistant) -> None:
     assert snapshot.activity is None
 
 
+async def test_no_states_at_all_survives(hass: HomeAssistant) -> None:
+    """Mammotion may load after Mowing Director: registry rows exist with
+    no states yet. Building and snapshotting must not crash."""
+    entry, mower = await make_director_entry(hass)  # registry only, no states
+    adapter = make_adapter(hass, entry)
+    await adapter.async_start()
+
+    snapshot = adapter.snapshot
+    assert snapshot.available is False
+    assert snapshot.activity is None
+    assert snapshot.battery is None
+    assert snapshot.blade_height_mm is None
+    assert snapshot.job_active is False
+    await adapter.async_close()
+
+
+async def test_error_already_present_at_start_is_reported_once(hass: HomeAssistant) -> None:
+    """A fault the log still carries at startup is observed once (the
+    core dedupes by time across restarts)."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "lift motor", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-15T21:46:00+00:00", {})
+    adapter = make_adapter(hass, entry)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+    await adapter.async_start()
+    await hass.async_block_till_done()
+
+    assert [s for s in recorder.signals if isinstance(s, NewError)] == [
+        NewError(
+            code="2748",
+            message="lift motor",
+            time=datetime(2026, 10, 15, 21, 46, tzinfo=UTC),
+        )
+    ]
+
+
 # -- signals ----------------------------------------------------------------
 
 
@@ -289,6 +328,28 @@ async def test_zone_task_complete_and_aborted(hass: HomeAssistant) -> None:
     )
     await hass.async_block_till_done()
     assert recorder.signals == [ZoneTaskComplete(side), ZoneTaskAborted(back)]
+
+
+async def test_task_signal_after_sensor_recreated(hass: HomeAssistant) -> None:
+    """A later job's COMPLETE for the same Zone is still reported: the
+    previous job's state must not suppress it (research §4.2 removes and
+    re-creates these sensors per job)."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    side = "1000000000000000007"
+
+    set_entity(hass, entry, mower, NAME, f"sensor:{side}_task_area", "COMPLETE", {})
+    await hass.async_block_till_done()
+    reg = er.async_get(hass)
+    reg.async_remove(
+        reg.async_get_entity_id("sensor", "mammotion", f"{NAME}_{side}_task_area")
+    )
+    await hass.async_block_till_done()
+    assert recorder.signals == [ZoneTaskComplete(side)]
+
+    # Next job: the sensor is created again and reaches COMPLETE directly.
+    set_entity(hass, entry, mower, NAME, f"sensor:{side}_task_area", "COMPLETE", {})
+    await hass.async_block_till_done()
+    assert recorder.signals == [ZoneTaskComplete(side), ZoneTaskComplete(side)]
 
 
 async def test_job_started_on_mowing_transition(hass: HomeAssistant) -> None:

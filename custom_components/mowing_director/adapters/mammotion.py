@@ -100,7 +100,9 @@ def _int_field(key: str, label: str, minimum: int, maximum: int, default: int) -
         key=key,
         label=label,
         selector=selector.NumberSelector(
-            selector.NumberSelectorConfig(min=minimum, max=maximum, step=1, mode="box")
+            selector.NumberSelectorConfig(
+                min=minimum, max=maximum, step=1, mode=selector.NumberSelectorMode.BOX
+            )
         ),
         default=default,
     )
@@ -127,7 +129,7 @@ _EXTRAS_SCHEMA: tuple[ExtrasField, ...] = (
                     selector.SelectOptionDict(value="10", label="Ultra wave + camera"),
                     selector.SelectOptionDict(value="11", label="Ultra wave + radio"),
                 ],
-                mode="dropdown",
+                mode=selector.SelectSelectorMode.DROPDOWN,
             )
         ),
         default="1",
@@ -137,13 +139,13 @@ _EXTRAS_SCHEMA: tuple[ExtrasField, ...] = (
         key="ride_boundary_distance",
         label="Ride boundary distance",
         selector=selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0.0, max=1.0, step=0.1, mode="slider")
+            selector.NumberSelectorConfig(
+                min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER
+            )
         ),
         default=0.0,
     ),
 )
-
-_NO_ZONE = ""
 
 
 def _state_of(hass: HomeAssistant, entity_id: str | None) -> str | None:
@@ -152,10 +154,6 @@ def _state_of(hass: HomeAssistant, entity_id: str | None) -> str | None:
         return None
     state = hass.states.get(entity_id)
     return None if state is None else state.state
-
-
-def _attr(state, key: str) -> Any:
-    return state.attributes.get(key) if state is not None else None
 
 
 def _number(value: str | None) -> float | None:
@@ -177,7 +175,6 @@ class MammotionAdapter:
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._hass = hass
-        self._entry = entry
         self._device_id: str = entry.data[CONF_DEVICE]
         self._name = self._device_name()
         self._sinks: list[AdapterSink] = []
@@ -253,11 +250,12 @@ class MammotionAdapter:
         """Re-derive the snapshot from current HA state."""
         activity_state = self._state("lawn_mower", "mower")
         available = activity_state not in (None, STATE_UNAVAILABLE, STATE_UNKNOWN)
-        activity: LawnMowerActivity | None
-        try:
-            activity = LawnMowerActivity(activity_state) if available else None
-        except ValueError:
-            activity = None
+        activity: LawnMowerActivity | None = None
+        if available and activity_state is not None:
+            try:
+                activity = LawnMowerActivity(activity_state)
+            except ValueError:
+                activity = None
 
         mode = self._state("sensor", "activity_mode")
         charging = self._state("binary_sensor", "charging") == "on"
@@ -413,7 +411,7 @@ class MammotionAdapter:
         self._publish()
 
     @callback
-    def _on_registry_event(self, event: Event) -> None:
+    def _on_registry_event(self, event: Event[Any]) -> None:
         del event
         # The ephemeral task sensors are created and removed as a job
         # runs, so discovery also runs on registry changes. Zone-list
@@ -421,7 +419,7 @@ class MammotionAdapter:
         self._check_task_areas()
 
     @callback
-    def _on_mammotion_event(self, event: Event) -> None:
+    def _on_mammotion_event(self, event: Event[Any]) -> None:
         """rain_stop from `mammotion_event` (research §7). Over BLE no
         event arrives; the error-sensor path covers errors there."""
         data = event.data
@@ -463,6 +461,7 @@ class MammotionAdapter:
         sensors. They are removed when the job ends, so discovery runs on
         every registry change too; entity ids are never cached."""
         reg = er.async_get(self._hass)
+        live: set[str] = set()
         for entry in er.async_entries_for_device(reg, self._device_id):
             if (
                 entry.domain != "sensor"
@@ -472,6 +471,7 @@ class MammotionAdapter:
             ):
                 continue
             zone = entry.unique_id[len(self._name) + 1 : -len("_task_area")]
+            live.add(zone)
             state = _state_of(self._hass, entry.entity_id)
             previous = self._seen_task_states.get(zone)
             self._seen_task_states[zone] = state or ""
@@ -481,6 +481,10 @@ class MammotionAdapter:
                 self._emit_signal(ZoneTaskComplete(zone))
             elif state == "ABORTED":
                 self._emit_signal(ZoneTaskAborted(zone))
+        # A re-created sensor for a finished job must report its new
+        # states, not be suppressed by the previous job's memory.
+        for zone in self._seen_task_states.keys() - live:
+            del self._seen_task_states[zone]
 
     @callback
     def _check_job_started(self) -> None:
@@ -560,11 +564,6 @@ class MammotionAdapter:
         """Not implemented until ticket #10."""
         return Refused("not_implemented")
 
-    async def set_task_enabled(self, task: str, enabled: bool) -> CommandResult:
-        """Not implemented until ticket #10."""
-        del task, enabled
-        return Refused("not_implemented")
-
     # -- catalogues (delegated to the ticket #9 catalogue) -------------------
 
     async def list_zones(self) -> list[Zone]:
@@ -615,13 +614,13 @@ class MammotionAdapter:
     def firmware_version(self) -> str | None:
         """Device firmware from the device registry (`sw_version`)."""
         device = dr.async_get(self._hass).async_get(self._device_id)
-        return device.sw_version if device else None
+        return getattr(device, "sw_version", None)
 
     @property
     def model(self) -> str | None:
         """Device model (`model_id`, e.g. `Luba2AWD5000H`)."""
         device = dr.async_get(self._hass).async_get(self._device_id)
-        return device.model_id if device else None
+        return getattr(device, "model_id", None)
 
     @property
     def source_version(self) -> str | None:
