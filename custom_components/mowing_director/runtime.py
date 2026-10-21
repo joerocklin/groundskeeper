@@ -42,6 +42,11 @@ from .core import (
     ArmTimer,
     CancelSchedule,
     CancelTimer,
+    PauseSchedule,
+    ResumeSchedule,
+    RetryRun,
+    SkipPlan,
+    StopNow,
     CommandOutcome,
     RetryRun,
     SkipPlan,
@@ -301,6 +306,15 @@ class Director:
 
     async def async_cancel(self) -> None:
         await self.dispatch(CancelSchedule)
+
+    async def async_pause(self) -> None:
+        await self.dispatch(PauseSchedule)
+
+    async def async_stop_now(self) -> None:
+        await self.dispatch(StopNow)
+
+    async def async_resume(self) -> None:
+        await self.dispatch(ResumeSchedule)
 
     async def async_retry_run(self) -> None:
         await self.dispatch(RetryRun)

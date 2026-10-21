@@ -7,6 +7,7 @@ apply. Registered once in `async_setup`, never per entry.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import voluptuous as vol
@@ -22,7 +23,8 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .core import RunStatus, ScheduleStatus, next_run
+from . import controls
+from .core import ScheduleStatus
 from .heights import HeightError
 from .plans import (
     AmbiguousZone,
@@ -75,7 +77,7 @@ def _director(hass: HomeAssistant, call: ServiceCall) -> Director:
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register `add_plan`, `start`, `cancel`, `retry_run`, `skip_plan` and `answer_prompt`."""
+    """Register `add_plan`, the Schedule controls and `answer_prompt`."""
 
     async def add_plan(call: ServiceCall) -> ServiceResponse:
         director = _director(hass, call)
@@ -132,38 +134,11 @@ def async_register_services(hass: HomeAssistant) -> None:
             )
         return response
 
-    async def start(call: ServiceCall) -> None:
-        director = _director(hass, call)
-        status = director.state["schedule"]["status"]
-        if status not in (ScheduleStatus.IDLE, ScheduleStatus.PAUSED):
-            raise _fail("schedule_already_active")
-        if next_run(director.state) is None:
-            raise _fail("nothing_to_start")
-        await director.async_start()
+    def control(action: Callable[[Director], Awaitable[None]]):
+        async def handler(call: ServiceCall) -> None:
+            await action(_director(hass, call))
 
-    async def cancel(call: ServiceCall) -> None:
-        director = _director(hass, call)
-        if director.state["schedule"]["status"] == ScheduleStatus.IDLE and not director.state["runs"]:
-            raise _fail("nothing_to_cancel")
-        await director.async_cancel()
-
-    def _require_failure(director: Director) -> None:
-        paused = director.state["schedule"]["status"] == ScheduleStatus.PAUSED
-        if not (
-            paused
-            and any(r["status"] == RunStatus.FAILED for r in director.state["runs"])
-        ):
-            raise _fail("no_failure_to_answer")
-
-    async def retry_run(call: ServiceCall) -> None:
-        director = _director(hass, call)
-        _require_failure(director)
-        await director.async_retry_run()
-
-    async def skip_plan(call: ServiceCall) -> None:
-        director = _director(hass, call)
-        _require_failure(director)
-        await director.async_skip_plan()
+        return handler
 
     async def answer_prompt(call: ServiceCall) -> None:
         director = _director(hass, call)
@@ -197,7 +172,15 @@ def async_register_services(hass: HomeAssistant) -> None:
         ),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(DOMAIN, "start", start, schema=vol.Schema(_ENTRY))
-    hass.services.async_register(DOMAIN, "cancel", cancel, schema=vol.Schema(_ENTRY))
-    hass.services.async_register(DOMAIN, "retry_run", retry_run, schema=vol.Schema(_ENTRY))
-    hass.services.async_register(DOMAIN, "skip_plan", skip_plan, schema=vol.Schema(_ENTRY))
+    for name, action in (
+        ("start", controls.async_start),
+        ("pause", controls.async_pause),
+        ("stop_now", controls.async_stop_now),
+        ("resume", controls.async_resume),
+        ("cancel", controls.async_cancel),
+        ("retry_run", controls.async_retry_run),
+        ("skip_plan", controls.async_skip_plan),
+    ):
+        hass.services.async_register(
+            DOMAIN, name, control(action), schema=vol.Schema(_ENTRY)
+        )
