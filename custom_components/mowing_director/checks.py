@@ -159,6 +159,12 @@ def _parse_window(window: Any) -> tuple[int, int]:
     return start, end
 
 
+def work_window_start(config: Mapping[str, Any], weekday: int) -> int:
+    """Minutes after midnight the Work hours window opens on `weekday` (0 = Monday)."""
+    window = config.get("days", {}).get(WEEKDAYS[weekday], DEFAULT_WINDOW)
+    return _parse_window(window)[0]
+
+
 def work_hours_open(config: Mapping[str, Any], local_now: datetime) -> bool:
     """Whether `local_now` (already in local time) is inside the day's window."""
     days = config.get("days", {})

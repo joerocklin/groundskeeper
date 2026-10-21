@@ -38,6 +38,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 from homeassistant.util import ulid as ulid_util
 
+from .notifier import Notifier
 from .prompts import async_prompt_strings, render_content
 from .adapter import (
     AdapterSignal,
@@ -174,6 +175,7 @@ class Director:
         self.entry = entry
         self.adapter = adapter
         self._store = store
+        self.notifier = Notifier(self)
         self._data: dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._timers: dict[str, CALLBACK_TYPE] = {}
@@ -622,6 +624,7 @@ class Director:
             match effect:
                 case EmitEvent():
                     self._fire(effect)
+                    await self.notifier.async_handle(effect.type, effect.payload)
                 case ArmTimer():
                     self._arm(effect.name, effect.at)
                 case CancelTimer():
@@ -654,6 +657,10 @@ class Director:
         except Exception:  # noqa: BLE001 - adapters should not raise; never re-issue
             _LOGGER.exception("Mower command raised; treating as unconfirmed")
             return Unconfirmed()
+
+    def fire_event(self, type_: str, **payload: Any) -> None:
+        """Fire a `mowing_director_event` from outside the reducer."""
+        self._fire(EmitEvent(type_, payload))
 
     def _fire(self, effect: EmitEvent) -> None:
         payload = {
@@ -766,9 +773,7 @@ class Director:
         `prompt_ignored` path (spec §12.5). Returns whether it answered."""
         prompt = self.find_prompt(prompt_id)
         if prompt is None or action not in prompt["actions"]:
-            self._fire(
-                EmitEvent("prompt_ignored", {"prompt_id": prompt_id, "action": action})
-            )
+            self.fire_event("prompt_ignored", prompt_id=prompt_id, action=action)
             return False
         await self.async_answer_prompt(prompt_id, action)
         return True
@@ -786,6 +791,11 @@ class Director:
 def async_get_director(hass: HomeAssistant, entry_id: str) -> Director | None:
     """The running Director for a Mower entry, if any."""
     return hass.data.get(DOMAIN, {}).get("director", {}).get(entry_id)
+
+
+@callback
+def async_all_directors(hass: HomeAssistant) -> list[Director]:
+    return list(hass.data.get(DOMAIN, {}).get("director", {}).values())
 
 
 @callback
