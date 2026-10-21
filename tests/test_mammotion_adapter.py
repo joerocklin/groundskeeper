@@ -7,6 +7,7 @@ service is ever called.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
@@ -321,4 +322,91 @@ async def test_zones_changed_on_registry_and_rekey(hass: HomeAssistant) -> None:
     hass.states.async_set(entity_id, "on", {"hash": 8888888888888888})
     await hass.async_block_till_done()
     assert recorder.signals.count(ZonesChanged()) == 2
+
+
+# -- limits (spec §3.6) ------------------------------------------------------
+
+
+async def test_limits_come_from_the_entities(hass: HomeAssistant) -> None:
+    """Height/spacing/speed ranges are read from the number entities'
+    attributes, not hard-coded (ExampleSite H variant: 55-100 mm step 1)."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    adapter = make_adapter(hass, entry)
+
+    limits = adapter.limits
+    assert (limits.height_min_mm, limits.height_max_mm, limits.height_step_mm) == (55, 100, 1)
+    assert limits.has_height_readback is True
+    assert limits.height_readback_resolution_mm == 5
+    assert (limits.spacing_min_cm, limits.spacing_max_cm) == (20.0, 35.0)
+    assert (limits.speed_min_m_s, limits.speed_max_m_s) == (0.2, 0.6)
+    assert limits.min_start_battery_pct == 15
+    assert (limits.recharge_battery_pct, limits.resume_battery_pct) == (20, 50)
+
+
+async def test_limits_follow_a_different_device(hass: HomeAssistant) -> None:
+    """A standard (non-H) variant's number entity gives 25-70 mm; the
+    adapter must report that instead."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(
+        hass,
+        entry,
+        mower,
+        NAME,
+        "number:blade_height",
+        "30",
+        {"min_value": 25, "max_value": 70, "step": 1, "unit_of_measurement": "mm"},
+    )
+    adapter = make_adapter(hass, entry)
+    assert (adapter.limits.height_min_mm, adapter.limits.height_max_mm) == (25, 70)
+
+
+async def test_smart_recharge_and_resume_are_none(hass: HomeAssistant) -> None:
+    """The smart switches are authoritative: on means the number entity
+    shows a stale 30/100 and the level is None (spec §3.6)."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(hass, entry, mower, NAME, "switch:smart_recharge_level", "on", {})
+    set_entity(hass, entry, mower, NAME, "switch:smart_resume_level", "on", {})
+    set_entity(hass, entry, mower, NAME, "number:recharge_level", "30", {})
+    set_entity(hass, entry, mower, NAME, "number:resume_level", "100", {})
+    adapter = make_adapter(hass, entry)
+    assert adapter.limits.recharge_battery_pct is None
+    assert adapter.limits.resume_battery_pct is None
+
+
+async def test_extras_schema_declares_the_mammotion_settings(hass: HomeAssistant) -> None:
+    """The seven spec §3.5 extras are declared with HA selectors and
+    defaults that are valid `start_mow` inputs."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    adapter = make_adapter(hass, entry)
+
+    schema = {field.key: field for field in adapter.limits.extras_schema}
+    assert set(schema) == {
+        "border_mode",
+        "obstacle_laps",
+        "channel_mode",
+        "toward_included_angle",
+        "ultra_wave",
+        "auto_change_direction",
+        "ride_boundary_distance",
+    }
+    for field in adapter.limits.extras_schema:
+        assert field.label
+        # Panel renders and serialises the selector generically.
+        serialised = field.selector.serialize()
+        assert json.loads(json.dumps(serialised)) == serialised
+
+    # Defaults are native ints/floats, valid for start_mow (contract test
+    # feeds them straight into RunSettings.extras).
+    assert schema["border_mode"].default == 0
+    assert schema["obstacle_laps"].default == 0
+    assert schema["channel_mode"].default == 0
+    assert schema["toward_included_angle"].default == 90
+    # Select options are strings; the adapter converts to the native int.
+    assert schema["ultra_wave"].default == "1"
+    assert schema["auto_change_direction"].default == 0
+    assert schema["ride_boundary_distance"].default == 0.0
 

@@ -32,7 +32,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 from homeassistant.util import dt as dt_util
 
 from ..adapter import (
@@ -40,6 +40,7 @@ from ..adapter import (
     AdapterSink,
     Channel,
     CommandResult,
+    ExtrasField,
     JobStarted,
     Limits,
     Movement,
@@ -86,6 +87,60 @@ _RAIN_STOP_CODE = 1003
 
 # Readback granularity of the height sensor, mm (spec §3.6, live-verified).
 _HEIGHT_READBACK_MM = 5
+
+# The app and the device both refuse a start below 15 % (error 2700).
+_MIN_START_BATTERY_PCT = 15
+
+
+def _int_field(key: str, label: str, minimum: int, maximum: int, default: int) -> ExtrasField:
+    """One integer extras setting; the value round-trips as an int, which
+    is what `start_mow`'s schema takes."""
+    return ExtrasField(
+        key=key,
+        label=label,
+        selector=selector.NumberSelector(
+            selector.NumberSelectorConfig(min=minimum, max=maximum, step=1, mode="box")
+        ),
+        default=default,
+    )
+
+
+# The adapter-owned Run settings (spec §3.5). Defaults are valid
+# `start_mow` inputs: ints for the int fields, and `toward_included_angle`
+# only matters when `channel_mode` is the double grid.
+_EXTRAS_SCHEMA: tuple[ExtrasField, ...] = (
+    _int_field("border_mode", "Border/grid order", 0, 1, 0),
+    _int_field("obstacle_laps", "No-go zone laps", 0, 4, 0),
+    _int_field("channel_mode", "Cutting path mode", 0, 3, 0),
+    _int_field("toward_included_angle", "Double-grid angle", -180, 180, 90),
+    ExtrasField(
+        # DetectionStrategy values only; a free number would allow invalid codes.
+        key="ultra_wave",
+        label="Obstacle detection",
+        selector=selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[
+                    selector.SelectOptionDict(value="0", label="Off"),
+                    selector.SelectOptionDict(value="1", label="Ultra wave"),
+                    selector.SelectOptionDict(value="2", label="Radio wave"),
+                    selector.SelectOptionDict(value="10", label="Ultra wave + camera"),
+                    selector.SelectOptionDict(value="11", label="Ultra wave + radio"),
+                ],
+                mode="dropdown",
+            )
+        ),
+        default="1",
+    ),
+    _int_field("auto_change_direction", "Auto change direction", 0, 1, 0),
+    ExtrasField(
+        key="ride_boundary_distance",
+        label="Ride boundary distance",
+        selector=selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0.0, max=1.0, step=0.1, mode="slider")
+        ),
+        default=0.0,
+    ),
+)
 
 _NO_ZONE = ""
 
@@ -447,8 +502,47 @@ class MammotionAdapter:
 
     @property
     def limits(self) -> Limits:
-        """Device limits (spec §3.6)."""
-        raise NotImplementedError  # the limits slice fills this in
+        """Device limits, read from the number entities (spec §3.6).
+
+        The `number.*` attributes carry the device limits (the H variant
+        reports 55-100 mm step 1); when an entity is missing the
+        documented service range stands in, never a per-Mower constant.
+        """
+        height = self._number_attrs("blade_height")
+        spacing = self._number_attrs("path_spacing")
+        speed = self._number_attrs("working_speed")
+        return Limits(
+            height_min_mm=int(height.get("min_value", 15)),
+            height_max_mm=int(height.get("max_value", 100)),
+            height_step_mm=int(height.get("step", 1)),
+            has_height_readback=True,  # the blade_height sensor is the readback
+            height_readback_resolution_mm=_HEIGHT_READBACK_MM,
+            spacing_min_cm=float(spacing.get("min_value", 20)),
+            spacing_max_cm=float(spacing.get("max_value", 35)),
+            speed_min_m_s=float(speed.get("min_value", 0.2)),
+            speed_max_m_s=float(speed.get("max_value", 0.6)),
+            extras_schema=_EXTRAS_SCHEMA,
+            min_start_battery_pct=_MIN_START_BATTERY_PCT,
+            recharge_battery_pct=self._level("recharge_level", "smart_recharge_level"),
+            resume_battery_pct=self._level("resume_level", "smart_resume_level"),
+        )
+
+    @callback
+    def _number_attrs(self, key: str) -> dict[str, Any]:
+        entity_id = self._entity_id("number", key)
+        state = self._hass.states.get(entity_id) if entity_id else None
+        return dict(state.attributes) if state is not None else {}
+
+    @callback
+    def _level(self, number_key: str, smart_key: str) -> int | None:
+        """Configured battery level; None when the smart switch is on.
+
+        The smart switch is authoritative: while on, the number entity
+        keeps a stale 30/100 (research/mammotion-work-hours-and-battery.md §2.2).
+        """
+        if self._state("switch", smart_key) == "on":
+            return None
+        return _int(self._state("number", number_key))
 
     # -- commands (ticket #10) ----------------------------------------------
 
