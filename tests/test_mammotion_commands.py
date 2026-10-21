@@ -19,7 +19,11 @@ from homeassistant.exceptions import (
     ServiceValidationError,
 )
 from homeassistant.helpers import device_registry as dr, entity_registry as er
-from pytest_homeassistant_custom_component.common import async_mock_service
+from pytest_homeassistant_custom_component.common import (
+    MockModule,
+    async_mock_service,
+    mock_integration,
+)
 
 from custom_components.mowing_director.adapter import (
     Accepted,
@@ -561,3 +565,181 @@ async def test_refresh_maps_a_press_failure(hass: HomeAssistant) -> None:
     )
     assert await adapter.refresh() == Unconfirmed()
     assert len(presses) == 1
+
+
+# -- resume_run version strategy (spec §3.4/§3.8, research §2) ----------------
+
+
+def install_continue_button(hass: HomeAssistant) -> str:
+    """Registry-install the `{NAME}_continue_last_job` button."""
+    return set_entity(
+        hass, None, mower_device(hass), NAME, "button:continue_last_job", "unknown"
+    )
+
+
+async def test_resume_from_pause_uses_start_mowing_once(hass: HomeAssistant) -> None:
+    """PAUSE + breakpoint: plain `lawn_mower.start_mowing` resumes the
+    job on every version (research §2). Exactly one call."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_PAUSE")
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    assert await adapter.resume_run() == Accepted()
+    assert len(starts) == 1
+
+
+async def test_resume_from_ready_with_a_live_job_uses_start_mowing(
+    hass: HomeAssistant,
+) -> None:
+    """READY while a per-Zone task sensor still exists means a
+    breakpoint is waiting (job_active): resume is allowed."""
+    adapter = await make_command_adapter(hass)
+    set_entity(
+        hass, None, mower_device(hass), NAME, f"sensor:{SIDE_YARD}_task_area", "RUNNING"
+    )
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    assert await adapter.resume_run() == Accepted()
+    assert len(starts) == 1
+
+
+async def test_resume_without_a_live_job_is_refused_without_a_call(
+    hass: HomeAssistant,
+) -> None:
+    """Plain `start_mowing` when NOT mid-job plans a fresh job from the
+    ON switches (research §2): pre-check job_active and refuse with zero
+    calls."""
+    adapter = await make_command_adapter(hass)
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    result = await adapter.resume_run()
+    assert isinstance(result, Refused)
+    assert starts == []
+
+
+async def test_resume_during_a_recharge_pause_is_refused(hass: HomeAssistant) -> None:
+    """CHARGING_PAUSE: the mower is mid-charge; resume is refused, no
+    call (research §2 resume)."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_CHARGING_PAUSE")
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    assert await adapter.resume_run() == Refused("recharging")
+    assert starts == []
+
+
+async def test_resume_from_a_random_mode_is_refused(hass: HomeAssistant) -> None:
+    """WORKING (or any other mode): nothing to resume; refused, no
+    call."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_WORKING")
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    result = await adapter.resume_run()
+    assert isinstance(result, Refused)
+    assert starts == []
+
+
+async def test_resume_typeerror_falls_back_to_the_continue_button(
+    hass: HomeAssistant,
+) -> None:
+    """v0.6.19+ bug: plain `start_mowing` raises TypeError after the
+    route query was sent (research §2). The adapter must NOT re-call
+    start_mowing; it presses `continue_last_job` instead - one start
+    attempt plus one press."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_PAUSE")
+    button = install_continue_button(hass)
+    starts = async_mock_service(
+        hass, "lawn_mower", "start_mowing",
+        raise_exception=TypeError(
+            "async_send_command() got multiple values for argument 'priority'"
+        ),
+    )
+    presses = async_mock_service(hass, "button", "press")
+    assert await adapter.resume_run() == Accepted()
+    assert len(starts) == 1
+    assert len(presses) == 1
+    assert presses[0].data == {"entity_id": [button]}
+
+
+async def test_resume_typeerror_without_the_button_is_unconfirmed(
+    hass: HomeAssistant,
+) -> None:
+    """After the TypeError the route query was already sent upstream, so
+    with no button to fall back on the outcome is unknown: unconfirmed,
+    never a retry (ADR 0002)."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_PAUSE")
+    starts = async_mock_service(
+        hass, "lawn_mower", "start_mowing",
+        raise_exception=TypeError("got multiple values for argument 'priority'"),
+    )
+    presses = async_mock_service(hass, "button", "press")
+    assert await adapter.resume_run() == Unconfirmed()
+    assert len(starts) == 1
+    assert presses == []
+
+
+async def test_resume_on_v0_6_19_presses_the_button_directly(
+    hass: HomeAssistant,
+) -> None:
+    """Installed Mammotion-HA >= 0.6.19: the plain resume path is known
+    broken, so press `continue_last_job` directly and never call
+    start_mowing (issue #10 AC)."""
+    adapter = await make_command_adapter(hass)
+    mock_integration(
+        hass, MockModule("mammotion", partial_manifest={"version": "0.6.19"}), built_in=False
+    )
+    await adapter.async_start()
+    set_mode(hass, "MODE_PAUSE")
+    button = install_continue_button(hass)
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    presses = async_mock_service(hass, "button", "press")
+    assert await adapter.resume_run() == Accepted()
+    assert starts == []
+    assert len(presses) == 1
+    assert presses[0].data == {"entity_id": [button]}
+
+
+async def test_resume_on_v0_6_19_without_the_button_is_refused_not_ready(
+    hass: HomeAssistant,
+) -> None:
+    """The 0.6.19+ path needs the button; without it, refuse not-ready
+    rather than take the known-broken path. Zero calls."""
+    adapter = await make_command_adapter(hass)
+    mock_integration(
+        hass, MockModule("mammotion", partial_manifest={"version": "0.6.19"}), built_in=False
+    )
+    await adapter.async_start()
+    set_mode(hass, "MODE_PAUSE")
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    presses = async_mock_service(hass, "button", "press")
+    assert await adapter.resume_run() == Refused("mammotion_not_ready")
+    assert starts == []
+    assert presses == []
+
+
+async def test_resume_on_v0_6_18_still_uses_start_mowing(hass: HomeAssistant) -> None:
+    """The installed version is the live ExampleSite one (0.6.18): the plain
+    resume path works there, so use it - the button is not needed."""
+    adapter = await make_command_adapter(hass)
+    mock_integration(
+        hass, MockModule("mammotion", partial_manifest={"version": "0.6.18"}), built_in=False
+    )
+    await adapter.async_start()
+    set_mode(hass, "MODE_PAUSE")
+    starts = async_mock_service(hass, "lawn_mower", "start_mowing")
+    assert await adapter.resume_run() == Accepted()
+    assert len(starts) == 1
+
+
+async def test_resume_maps_a_start_mowing_failure(hass: HomeAssistant) -> None:
+    """A resume_failed mode-wait timeout on start_mowing is
+    unconfirmed, exactly one call (ADR 0002)."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_PAUSE")
+    starts = async_mock_service(
+        hass, "lawn_mower", "start_mowing",
+        raise_exception=HomeAssistantError(
+            "resume wait expired", translation_domain="mammotion",
+            translation_key="resume_failed",
+        ),
+    )
+    assert await adapter.resume_run() == Unconfirmed()
+    assert len(starts) == 1

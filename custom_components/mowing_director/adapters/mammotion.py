@@ -727,8 +727,69 @@ class MammotionAdapter:
         return await self._call("lawn_mower", service, {"entity_id": [entity_id]})
 
     async def resume_run(self) -> CommandResult:
-        """Not implemented until ticket #10 lands in slices."""
-        return Refused("not_implemented")
+        """Resume a held job, choosing a path that works on the installed
+        Mammotion-HA (spec §3.4, research §2).
+
+        Pre-check: only PAUSE, or READY while a breakpoint is live
+        (`job_active`), may resume. Plain `start_mowing` when NOT
+        mid-job plans a fresh job from the ON switches, and CHARGING_PAUSE
+        is a recharge the core owns, so both are refused with zero calls.
+
+        v0.6.19+ upstream bug: the READY-breakpoint branch of
+        `async_start_mowing` calls
+        `async_send_command("start_job", "todev_taskctrl_ack", priority=...)`
+        and the second positional binds to `priority` -> TypeError,
+        raised AFTER the route query was sent. On >= 0.6.19 press
+        `continue_last_job` instead; on older (or unknown) versions try
+        `start_mowing` and fall back to the button on TypeError. The
+        fallback never re-calls `start_mowing` (ADR 0002).
+        """
+        mode = self._state("sensor", "activity_mode")
+        if mode == "MODE_CHARGING_PAUSE":
+            return Refused("recharging")
+        if mode == "MODE_READY":
+            if not self._job_active(mode):
+                return Refused("no job to resume")
+        elif mode != "MODE_PAUSE":
+            return Refused(f"nothing to resume in mode {mode!r}")
+
+        if self._resume_via_button():
+            button = self._entity_id("button", "continue_last_job")
+            if button is None:
+                return Refused("mammotion_not_ready")
+            return await self._call("button", "press", {"entity_id": [button]})
+
+        entity_id = self._entity_id("lawn_mower", "mower")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+        try:
+            result = await self._call(
+                "lawn_mower", "start_mowing", {"entity_id": [entity_id]}
+            )
+        except TypeError:
+            # The v0.6.19+ positional-collision bug fired after the
+            # route query was sent: fall back to the button, never
+            # re-call start_mowing.
+            button = self._entity_id("button", "continue_last_job")
+            if button is None:
+                # A command was already sent and its outcome is unknown.
+                return Unconfirmed()
+            return await self._call("button", "press", {"entity_id": [button]})
+        return result
+
+    @callback
+    def _resume_via_button(self) -> bool:
+        """True when the installed Mammotion-HA has the broken plain
+        resume path (>= 0.6.19); unknown versions degrade to trying it."""
+        version = self._source_version
+        if version is None:
+            return False
+        parts = version.split(".")
+        try:
+            parsed = tuple(int(part) for part in parts[:3])
+        except ValueError:
+            return False
+        return parsed >= (0, 6, 19)
 
     async def refresh(self) -> CommandResult:
         """Press `button.{name}_refresh_status`: fresh telemetry at
