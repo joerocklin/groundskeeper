@@ -259,6 +259,7 @@ class ZoneSync:
         async with self._lock:
             cfg = await self._config()
             gone = {z["id"] for z in cfg["zones"] if z["missing"]}
+            self._drop_samples(gone)
             cfg["zones"] = [z for z in cfg["zones"] if z["id"] not in gone]
             cfg["plans"] = [
                 p for p in cfg.get("plans", []) if p.get("zone_id") not in gone
@@ -267,6 +268,31 @@ class ZoneSync:
                 c
                 for c in cfg["channels"]
                 if c["end_a"] not in gone and c["end_b"] not in gone
+            ]
+            await self._store.async_save(self._data)
+            self._update_issue(cfg["zones"])
+
+    def _drop_samples(self, zone_ids: set[str]) -> None:
+        """A deleted Zone's duration samples go with it (spec §14.6)."""
+        durations = self._data.get("learned", {}).get("durations", {})
+        for zone_id in zone_ids:
+            durations.pop(zone_id, None)
+
+    async def async_delete_zone(self, zone_id: str) -> None:
+        """Delete one `missing` Zone with its samples, overrides, Plans and
+        Channels; history keeps the copied name. KeyError / ValueError."""
+        async with self._lock:
+            cfg = await self._config()
+            zone = next((z for z in cfg["zones"] if z["id"] == zone_id), None)
+            if zone is None:
+                raise KeyError(zone_id)
+            if not zone["missing"]:
+                raise ValueError("only a missing Zone can be deleted")
+            self._drop_samples({zone_id})
+            cfg["zones"] = [z for z in cfg["zones"] if z["id"] != zone_id]
+            cfg["plans"] = [p for p in cfg.get("plans", []) if p.get("zone_id") != zone_id]
+            cfg["channels"] = [
+                c for c in cfg["channels"] if zone_id not in (c["end_a"], c["end_b"])
             ]
             await self._store.async_save(self._data)
             self._update_issue(cfg["zones"])
