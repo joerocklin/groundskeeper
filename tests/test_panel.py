@@ -111,6 +111,11 @@ def test_frontend_smoke() -> None:
         assert f"'{tab}'" in src
     assert "mowing_director/subscribe" in src
     assert "mowing_director/list_mowers" in src
+    for cmd in (
+        "get_zones", "refresh_zones", "set_zone_hidden", "set_zone_bearing",
+        "reset_zone_bearing", "set_zone_range", "reset_zone_range",
+    ):
+        assert cmd in src
     assert "760px" in src  # columns stack below ~760 px (spec §16.1)
 
 

@@ -339,3 +339,30 @@ async def test_unknown_zone_raises(hass) -> None:
     _, sync, _z = await _with_polygon(hass)
     with pytest.raises(KeyError):
         await sync.async_set_bearing("nope", 10)
+
+
+# -- Zones tab data (issue #28) ----------------------------------------------
+
+
+async def test_ws_get_zones_gives_the_zones_tab_everything(hass, hass_ws_client) -> None:
+    mower, sync, zones = await _with_polygon(hass)
+    entry_id = hass.config_entries.async_entries(DOMAIN)[0].entry_id
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "mowing_director/get_zones", "entry_id": entry_id})
+    msg = await ws.receive_json()
+    assert msg["success"]
+    front, back = msg["result"]["zones"]
+    assert (front["name"], front["hidden"], front["missing"]) == ("Front Lawn", False, False)
+    assert front["polygon"]["type"] == "Polygon"
+    assert front["bearing"]["status"] == "ready"
+    assert front["estimates"]["base"]["time_s"] > 0
+    assert back["bearing"]["status"] == "pending" and back["estimates"] is None
+    ends = {frozenset((c["end_a"], c["end_b"])) for c in msg["result"]["channels"]}
+    assert frozenset((front["id"], "dock")) in ends
+
+
+async def test_ws_get_zones_unknown_mower(hass, hass_ws_client) -> None:
+    await _with_polygon(hass)
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "mowing_director/get_zones", "entry_id": "nope"})
+    assert (await ws.receive_json())["error"]["code"] == "not_found"

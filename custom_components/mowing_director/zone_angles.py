@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .angle_range import DEFAULT_TOLERANCE, Basis, estimate_angle_range
+from dataclasses import asdict
+
+from .angle_range import DEFAULT_TOLERANCE, Basis, estimate_angle_range, estimate_at
 from .zone_bearing import zone_bearing
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -84,3 +86,30 @@ def refresh_zone_angles(zone: dict, settings: dict) -> dict:
         "tolerance_override": override,
     }
     return zone
+
+
+def angle_estimates(zone: dict) -> dict | None:
+    """Estimated mow time at the base angle and at each edge of the Zone's
+    effective Allowed angle range (spec 5.4), for the panel.
+
+    Each entry is `{time_s, stripe_count, stripe_length}`; the edges are None
+    when the range is `full`. None overall while the bearing or range is
+    unset. Uses the basis stored on the record, so it matches the range."""
+    rec = zone.get("angle_range") or {}
+    rng = rec.get("angle_range")
+    bearing = (zone.get("bearing") or {}).get("value")
+    ring = _ring(zone.get("polygon"))
+    if bearing is None or ring is None or rng in (None, "unset"):
+        return None
+    basis = Basis(**rec["basis"])
+
+    def at(rel: float) -> dict:
+        return asdict(estimate_at(ring, bearing, rel, basis=basis))
+
+    if rng == "full":
+        return {"base": at(0.0), "min_edge": None, "max_edge": None}
+    return {
+        "base": at(0.0),
+        "min_edge": at(rng["min"]),
+        "max_edge": at(rng["max"]),
+    }

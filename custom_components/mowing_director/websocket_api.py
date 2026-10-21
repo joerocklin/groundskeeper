@@ -63,6 +63,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_refresh_zones)
     websocket_api.async_register_command(hass, ws_set_zone_hidden)
+    websocket_api.async_register_command(hass, ws_get_zones)
     for cmd in (
         ws_get_zone_angles,
         ws_set_zone_bearing,
@@ -149,6 +150,22 @@ async def ws_refresh_zones(
     await sync.async_sync()
     async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/get_zones", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_get_zones(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Zones and Channels for the Zones & Gates tab map and list (spec §16.3)."""
+    sync = async_get_zone_sync(hass, msg["entry_id"])
+    if sync is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    connection.send_result(msg["id"], await sync.async_zone_view())
 
 
 @websocket_api.require_admin

@@ -27,7 +27,7 @@ from homeassistant.util import ulid as ulid_util
 
 from .adapter import AdapterSignal, MowerAdapter, Zone, ZonesChanged
 from .const import DOMAIN
-from .zone_angles import refresh_zone_angles
+from .zone_angles import angle_estimates, refresh_zone_angles
 
 ISSUE_MISSING_ZONES = "missing_zones_{}"
 
@@ -212,6 +212,14 @@ class ZoneSync:
         return list((await self._config())["channels"])
 
     # -- operations ---------------------------------------------------------
+
+    async def async_zone_view(self) -> dict:
+        """Zones (with estimated angle times) and Channels for the panel."""
+        cfg = await self._config()
+        zones = await self._hass.async_add_executor_job(
+            lambda: [{**z, "estimates": angle_estimates(z)} for z in cfg["zones"]]
+        )
+        return {"zones": zones, "channels": list(cfg["channels"])}
 
     async def async_sync(self) -> None:
         """Run one sync: Zones, then Channels, then the Repairs issue."""
