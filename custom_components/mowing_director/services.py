@@ -39,6 +39,8 @@ ATTR_ZONE = "zone"
 ATTR_START_HEIGHT = "start_height_mm"
 ATTR_END_HEIGHT = "end_height_mm"
 ATTR_START = "start"
+ATTR_PROMPT_ID = "prompt_id"
+ATTR_ACTION = "action"
 
 _ENTRY = {vol.Optional(ATTR_CONFIG_ENTRY_ID): str}
 
@@ -73,7 +75,7 @@ def _director(hass: HomeAssistant, call: ServiceCall) -> Director:
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register `add_plan`, `start`, `cancel`, `retry_run` and `skip_plan`."""
+    """Register `add_plan`, `start`, `cancel`, `retry_run`, `skip_plan` and `answer_prompt`."""
 
     async def add_plan(call: ServiceCall) -> ServiceResponse:
         director = _director(hass, call)
@@ -163,6 +165,23 @@ def async_register_services(hass: HomeAssistant) -> None:
         _require_failure(director)
         await director.async_skip_plan()
 
+    async def answer_prompt(call: ServiceCall) -> None:
+        director = _director(hass, call)
+        prompt = director.find_prompt(call.data[ATTR_PROMPT_ID])
+        if prompt is None:
+            raise _fail("prompt_not_pending")
+        if call.data[ATTR_ACTION] not in prompt["actions"]:
+            raise _fail("prompt_action_invalid", action=call.data[ATTR_ACTION])
+        await director.async_answer_prompt(prompt["prompt_id"], call.data[ATTR_ACTION])
+
+    hass.services.async_register(
+        DOMAIN,
+        "answer_prompt",
+        answer_prompt,
+        schema=vol.Schema(
+            {**_ENTRY, vol.Required(ATTR_PROMPT_ID): str, vol.Required(ATTR_ACTION): str}
+        ),
+    )
     hass.services.async_register(
         DOMAIN,
         "add_plan",

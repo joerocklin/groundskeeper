@@ -651,3 +651,123 @@ def test_stall_deadline_due_but_fresh_movement_wins_over_the_clock():
     state, _ = step(state, SnapshotReceived(at(3699), moving(progress=6)))
     state, _ = step(state, TimerFired(at(3702)))
     assert run_status(state) == ["mowing"]
+
+
+# -- Prompts (spec §12, ticket #17) ---------------------------------------------
+
+from custom_components.mowing_director.core import AnswerPrompt, RaisePrompt  # noqa: E402
+
+
+def prompt_env(entry_id="entry1"):
+    ids = iter(f"PROMPT{i}" for i in range(1, 100))
+    return replace(ENV, entry_id=entry_id, new_id=lambda: next(ids))
+
+
+def prompts(state):
+    return state["state"]["prompts"]
+
+
+def test_run_failure_raises_a_pending_failure_prompt():
+    env = prompt_env()
+    state = initial_core_state()
+    plan, runs = make_plan()
+    state, _ = step(state, AddPlan(at(0), plan, runs, start=True), env)
+    state, _ = step(state, SnapshotReceived(at(0), DOCKED), env)
+    state, _ = step(state, TimerFired(at(61)), env)
+    state, fx = step(state, CommandOutcome(at(62), "p1-r1", "start_run", Refused("no")), env)
+
+    [prompt] = prompts(state)
+    assert prompt["prompt_id"] == "PROMPT1"
+    assert prompt["kind"] == "run_failed"
+    assert prompt["subject"] is None
+    assert prompt["tag"] == "mowdir_entry1_run_failed"
+    assert prompt["actions"] == ["retry", "skip_plan", "abort"]
+    assert prompt["status"] == "pending"
+    assert prompt["sent_at"] == at(62).isoformat()
+    assert prompt["next_reminder_at"] == at(62 + 3600).isoformat()
+    ctx = prompt["context"]
+    assert ctx["zone_name"] == "Front Lawn" and ctx["plan_id"] == "p1"
+    assert (ctx["n"], ctx["m"], ctx["height_mm"]) == (1, 1, 70)
+    assert ctx["reason"] == "did_not_start"
+    [sent] = events(fx, "prompt_sent")
+    assert sent.payload["prompt_id"] == "PROMPT1"
+    assert sent.payload["kind"] == "run_failed"
+
+
+def failed_with_prompt(n=1):
+    env = prompt_env()
+    state = initial_core_state()
+    plan, runs = make_plan(n=n)
+    state, _ = step(state, AddPlan(at(0), plan, runs, start=True), env)
+    state, _ = step(state, SnapshotReceived(at(0), DOCKED), env)
+    state, _ = step(state, TimerFired(at(61)), env)
+    state, _ = step(state, CommandOutcome(at(62), "p1-r1", "start_run", Refused("no")), env)
+    return state, env
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_status"),
+    [
+        (lambda pid: RetryRun(at(100)), "waiting"),
+        (lambda pid: SkipPlan(at(100)), "idle"),
+        (lambda pid: CancelSchedule(at(100)), "idle"),
+        (lambda pid: AnswerPrompt(at(100), pid, "retry"), "waiting"),
+        (lambda pid: AnswerPrompt(at(100), pid, "skip_plan"), "idle"),
+        (lambda pid: AnswerPrompt(at(100), pid, "abort"), "idle"),
+    ],
+)
+def test_every_answer_path_answers_the_failure_prompt_once(answer, expected_status):
+    state, env = failed_with_prompt()
+    state, fx = step(state, answer("PROMPT1"), env)
+    assert prompts(state) == []
+    assert state["state"]["schedule"]["status"] == expected_status
+    [answered] = events(fx, "prompt_answered")
+    assert answered.payload["prompt_id"] == "PROMPT1"
+    assert answered.payload["kind"] == "run_failed"
+    assert answered.payload["action"] in {"retry", "skip_plan", "abort"}
+
+
+def test_answering_a_prompt_twice_changes_nothing():
+    state, env = failed_with_prompt()
+    state, _ = step(state, AnswerPrompt(at(100), "PROMPT1", "retry"), env)
+    after, fx = step(state, AnswerPrompt(at(101), "PROMPT1", "skip_plan"), env)
+    assert after == state and not fx
+
+
+def test_answering_with_an_action_the_prompt_does_not_offer_changes_nothing():
+    state, env = failed_with_prompt()
+    after, fx = step(state, AnswerPrompt(at(100), "PROMPT1", "resume"), env)
+    assert after == state and not fx
+
+
+def test_a_new_prompt_of_same_kind_and_subject_supersedes_the_old_one():
+    state, env = failed_with_prompt()
+    state, fx = step(state, RaisePrompt(at(200), "gate", "g1", ["closed"], {}), env)
+    state, fx = step(state, RaisePrompt(at(201), "gate", "g1", ["closed"], {}), env)
+    gate = [p for p in prompts(state) if p["kind"] == "gate"]
+    assert [p["prompt_id"] for p in gate] == ["PROMPT3"]
+    assert gate[0]["tag"] == "mowdir_entry1_gate_g1"
+    # an older prompt of the same kind is stale: answering it is a no-op
+    after, fx = step(state, AnswerPrompt(at(202), "PROMPT2", "closed"), env)
+    assert after == state and not fx
+
+
+def test_prompts_of_different_kinds_or_subjects_coexist():
+    state, env = failed_with_prompt()
+    state, _ = step(state, RaisePrompt(at(200), "gate", "g1", ["closed"], {}), env)
+    state, _ = step(state, RaisePrompt(at(201), "gate", "g2", ["closed"], {}), env)
+    assert [p["tag"] for p in prompts(state)] == [
+        "mowdir_entry1_run_failed",
+        "mowdir_entry1_gate_g1",
+        "mowdir_entry1_gate_g2",
+    ]
+
+
+def test_a_second_failure_after_retry_leaves_a_single_failure_prompt():
+    state, env = failed_with_prompt()
+    state, _ = step(state, RetryRun(at(100)), env)
+    state, _ = step(state, TimerFired(at(200)), env)  # re-evaluate; checks pass
+    state, _ = step(state, SnapshotReceived(at(201), DOCKED), env)
+    state, _ = step(state, TimerFired(at(262)), env)
+    state, _ = step(state, CommandOutcome(at(263), "p1-r1", "start_run", Refused("no")), env)
+    assert [p["prompt_id"] for p in prompts(state)] == ["PROMPT2"]

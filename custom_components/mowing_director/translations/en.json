@@ -124,6 +124,51 @@
     },
     "no_failure_to_answer": {
       "message": "No failed Run is waiting for a decision."
+    },
+    "prompt_headline_run_failed": {
+      "message": "Run failed"
+    },
+    "prompt_zone": {
+      "message": "Zone: {zone}"
+    },
+    "prompt_plan_single": {
+      "message": "Plan: {height} mm"
+    },
+    "prompt_plan_range": {
+      "message": "Plan: {start} to {end} mm"
+    },
+    "prompt_run": {
+      "message": "Run {n} of {m} at {height} mm"
+    },
+    "prompt_reason_did_not_start": {
+      "message": "The Mower did not start the Run."
+    },
+    "prompt_reason_zone_missing": {
+      "message": "The Zone is no longer on the Mower's map."
+    },
+    "prompt_reason_stopped_off_dock": {
+      "message": "The Mower stopped away from its dock."
+    },
+    "prompt_reason_stalled": {
+      "message": "The Mower stopped making progress."
+    },
+    "prompt_reason_error": {
+      "message": "The Mower reported an error."
+    },
+    "prompt_reason_externally_aborted": {
+      "message": "The Run was stopped from outside Mowing Director."
+    },
+    "prompt_reason_superseded": {
+      "message": "Another job started on the Mower."
+    },
+    "prompt_reason_height_not_reached": {
+      "message": "Blade didn't reach {height} mm"
+    },
+    "prompt_not_pending": {
+      "message": "That Prompt is no longer waiting for an answer."
+    },
+    "prompt_action_invalid": {
+      "message": "That Prompt does not offer the action \"{action}\"."
     }
   },
   "entity": {
@@ -153,6 +198,9 @@
       },
       "next_run": {
         "name": "Next Run"
+      },
+      "pending_prompts": {
+        "name": "Pending Prompts"
       }
     }
   },
@@ -230,6 +278,24 @@
         "config_entry_id": {
           "name": "Mower",
           "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "answer_prompt": {
+      "name": "Answer Prompt",
+      "description": "Answer any pending Prompt with one of its actions.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        },
+        "prompt_id": {
+          "name": "Prompt",
+          "description": "The id of the pending Prompt."
+        },
+        "action": {
+          "name": "Action",
+          "description": "One of the Prompt's actions, for example retry, skip_plan or abort."
         }
       }
     }
