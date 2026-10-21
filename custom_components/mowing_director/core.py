@@ -39,6 +39,7 @@ from .checks import (
     POLICY_PAUSE,
     TYPE_BATTERY,
     TYPE_CUSTOM,
+    TYPE_GATE_OPEN,
     TYPE_MOWER_READY,
     TYPE_WET_GRASS,
     TYPE_WORK_HOURS,
@@ -49,6 +50,7 @@ from .checks import (
     work_hours_open,
     work_window_start,
 )
+from .gates import believed_open
 from .adapter import (
     AdapterSignal,
     CommandKind,
@@ -114,6 +116,13 @@ PROMPT_IS_RAINING = "is_raining"  # spec §9.4: No / Yes / Yes, done for today
 ACTION_RAIN_NO = "no"
 ACTION_RAIN_YES = "yes"
 ACTION_RAIN_DONE_TODAY = "yes_done_today"
+
+PROMPT_GATE = "gate"  # spec §10: I opened it / Closed / Skip Plan (at Run start)
+PROMPT_GATE_CLOSE = "gate_close"  # spec §10: through, close <Gate>
+ACTION_GATE_OPENED = "opened"
+ACTION_GATE_CLOSED = "closed"
+DEADLINE_GATE_VERIFY = "gate_verify:"  # + Gate id: open action verified by state
+GATE_OPEN_VERIFY = timedelta(minutes=2)  # spec §10
 
 HOLD_EXTERNAL_PAUSE = "external_pause"  # spec §7.4 causes
 HOLD_RECHARGE_STALL = "recharge_stall"
@@ -357,6 +366,25 @@ class ChecksEdited:
 
 
 @dataclass(frozen=True)
+class GatesEdited:
+    """Gates (or the Channels and Zones they derive from) changed (spec §4.7).
+
+    The caller has already changed `Env.gates` and `Env.gated_zones`.
+    """
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class SetGateFlag:
+    """The manual "Open" flag of a Gate without a state entity (spec §4.7)."""
+
+    now: datetime
+    gate_id: str
+    open: bool
+
+
+@dataclass(frozen=True)
 class WetGrassDoneToday:
     """`wet_grass_done_today` service / panel button (spec §9.4): Wet grass
     fails until the next Work hours start plus the morning dry-out."""
@@ -389,6 +417,8 @@ class Reconcile:
 
 type CoreInput = (
     Reconcile
+    | GatesEdited
+    | SetGateFlag
     | AddPlan
     | EditRun
     | DeleteRun
@@ -445,6 +475,15 @@ class ResumeRunEffect:
 
 
 @dataclass(frozen=True)
+class GateActionEffect:
+    """Run a Gate's stored open or close action (spec §10). Not a Mower command."""
+
+    gate_id: str
+    which: str  # "open" or "close"
+    run_id: str
+
+
+@dataclass(frozen=True)
 class EmitEvent:
     """A `mowing_director_event` (the runner adds the entry and device ids)."""
 
@@ -467,7 +506,9 @@ class CancelTimer:
     name: str
 
 
-type Effect = StartRunEffect | AbortRunEffect | ResumeRunEffect | EmitEvent | ArmTimer | CancelTimer
+type Effect = (
+    StartRunEffect | AbortRunEffect | ResumeRunEffect | GateActionEffect | EmitEvent | ArmTimer | CancelTimer
+)
 
 
 @dataclass(frozen=True)
@@ -530,6 +571,11 @@ class Env:
     custom_results: Mapping[str, str | None] = field(default_factory=dict)
     wet: WetInputs = field(default_factory=WetInputs)
     tz: tzinfo = UTC  # local time for Work hours
+    # Gates (gates.py records), the Gates each Zone lies behind, and the state of
+    # each linked state entity (resolved by the runtime; gates with an entity only)
+    gates: tuple[Mapping[str, Any], ...] = ()
+    gated_zones: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    gate_entities: Mapping[str, str | None] = field(default_factory=dict)
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
 
@@ -567,6 +613,8 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("battery_trend", None)
     state.setdefault("height_verify", None)
     state.setdefault("prompts", [])
+    state.setdefault("gate_flags", {})  # Gate id -> manual Open flag (spec §4.7)
+    state.setdefault("gate_crossings", {})  # Gate id -> crossing expected (spec §10)
     wet = state.setdefault("wet", {})  # Wet grass memory, persisted absolute (spec §9.3)
     wet.setdefault("last_wet_at", None)
     wet.setdefault("wet_now", False)
@@ -750,6 +798,7 @@ def evaluate_checks(
     battery_pending: bool = False,
     local_now: datetime | None = None,
     wet_reasons: list[str] | None = None,
+    gate_reasons: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Failing Checks as `[{"check": id, "reason"}]`; empty means every Check passes.
 
@@ -788,6 +837,9 @@ def evaluate_checks(
             case "wet_grass":
                 if rec["enabled"]:
                     reasons.extend(wet_reasons or [])
+            case "gate_open":
+                if rec["enabled"]:
+                    reasons.extend(gate_reasons or [])
             case "custom":
                 if rec["enabled"]:
                     reason = env.custom_results.get(check, "unavailable")
@@ -876,6 +928,11 @@ class _Machine:
                 self._fire_due_reminders()
             case ChecksEdited():
                 self._checks_edited(event)
+            case GatesEdited():
+                self._evaluate()
+            case SetGateFlag():
+                self.s["gate_flags"][event.gate_id] = event.open
+                self._evaluate()
             case WetGrassDoneToday():
                 self._wet_done_today()
             case Reconcile():
@@ -1335,6 +1392,7 @@ class _Machine:
     def _evaluate(self) -> None:
         """Re-evaluate everything that depends on state or time."""
         self._wet_update()
+        self._gate_drop_stale()
         if self.status == ScheduleStatus.WAITING:
             self._evaluate_waiting()
         elif self.status == ScheduleStatus.RUNNING:
@@ -1358,15 +1416,12 @@ class _Machine:
             self._cancel_deadline(DEADLINE_STABILITY)
             self._fail_run(run, "zone_missing", abort=False)
             return
-        failing = evaluate_checks(
-            snapshot,
-            zone,
-            self.env,
-            self.s["blocking_error"],
-            battery_pending=self.s["battery_pending"],
-            local_now=self.now.astimezone(self.env.tz),
-            wet_reasons=self._wet_reasons(),
-        )
+        failing = self._failing_checks(snapshot, zone, run)
+        if failing and all(item["check"] == "gate_open" for item in failing):
+            # Only a closed Gate holds the Run: now is the time to open it, so
+            # the user is not asked while something else would hold it anyway.
+            self._gate_act(run)
+            failing = self._failing_checks(snapshot, zone, run)
         self.s["waiting_on"] = failing
         if not self._run_check_clocks(failing):
             return  # a Check timed out with policy `pause`
@@ -1378,6 +1433,20 @@ class _Machine:
             self._arm(DEADLINE_STABILITY, self.now + STABILITY_WINDOW)
         elif self._deadline_due(DEADLINE_STABILITY):
             self._start_run(run, zone)
+
+    def _failing_checks(
+        self, snapshot: Snapshot, zone: ZoneView, run: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        return evaluate_checks(
+            snapshot,
+            zone,
+            self.env,
+            self.s["blocking_error"],
+            battery_pending=self.s["battery_pending"],
+            local_now=self.now.astimezone(self.env.tz),
+            wet_reasons=self._wet_reasons(),
+            gate_reasons=self._gate_reasons(run),
+        )
 
     def _tick(self) -> None:
         """The 60 s Check tick: armed when absent or due, never slid by events."""
@@ -1461,6 +1530,7 @@ class _Machine:
         self._cancel_deadline(DEADLINE_STABILITY)
         self.s["waiting_on"] = []
         self.s["battery_pending"] = False
+        self._gate_begin_crossings(run)
         run["native_ref"] = zone.native_ref
         run["starting_at"] = iso(self.now)
         self.s["active_run_id"] = run["id"]
@@ -1499,6 +1569,7 @@ class _Machine:
             run["started_at"] = iso(self.now)
             run["job_ref"] = snapshot.job_ref
             self._set_run(run, RunStatus.MOWING)
+            self._gate_crossing_ended(run)
             self._arm_stall(snapshot)
             self._begin_height_verify(run, snapshot)
             return
@@ -2033,6 +2104,8 @@ class _Machine:
                 self._end_run()
         elif prompt["kind"] == PROMPT_IS_RAINING:
             self._wet_answer(event.action)
+        elif prompt["kind"] == PROMPT_GATE:
+            self._gate_answer(prompt, event.action)
         elif prompt["kind"] == PROMPT_RUN_FAILED:
             # The dedicated input does the work and answers the Prompt.
             if event.action == ACTION_RETRY:
@@ -2043,8 +2116,184 @@ class _Machine:
                 self._cancel()
         if prompt in self.s["prompts"]:  # no dedicated side effect applied
             self._settle_prompt(prompt, event.action)
-        if prompt["kind"] == PROMPT_IS_RAINING:
-            self._evaluate()  # the answer changes what Wet grass reads at once
+        if prompt["kind"] in (PROMPT_IS_RAINING, PROMPT_GATE):
+            self._evaluate()  # the answer changes what a Check reads at once
+
+    # -- Gates (spec §4.7, §9.2, §10) --------------------------------------------
+
+    def _gate_records(self) -> dict[str, Mapping[str, Any]]:
+        return {g["id"]: g for g in self.env.gates}
+
+    def _gate_check_on(self) -> bool:
+        return any(r["type"] == TYPE_GATE_OPEN and r["enabled"] for r in self.env.checks)
+
+    def _gate_ids(self, run: Mapping[str, Any]) -> list[str]:
+        """The Gates the Run's Zone lies behind; none when the Check is off."""
+        if not self._gate_check_on():
+            return []
+        known = self._gate_records()
+        return [g for g in self.env.gated_zones.get(run["zone_id"], ()) if g in known]
+
+    def _gate_is_open(self, gate: Mapping[str, Any]) -> bool:
+        """Believed state: linked entity, else the manual flag, else closed."""
+        return believed_open(
+            entity_state=self.env.gate_entities.get(gate["id"]),
+            has_entity=bool(gate.get("state_entity")),
+            flag=self.s["gate_flags"].get(gate["id"], False),
+        )
+
+    def _gate_context(self, gate: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
+        return {**self._run_context(run, ""), "gate_id": gate["id"],
+                "gate_name": gate["name"]}
+
+    def _gate_prompts(self, gate_id: str, kind: str = PROMPT_GATE) -> list[dict[str, Any]]:
+        return [p for p in self.s["prompts"] if p["kind"] == kind and p["subject"] == gate_id]
+
+    def _gate_begin(self, gate: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
+        crossing = self.s["gate_crossings"].get(gate["id"])
+        if crossing is None:
+            crossing = self.s["gate_crossings"][gate["id"]] = {
+                "run_id": run["id"], "since": iso(self.now),
+            }
+            self._emit(
+                "gate_crossing_expected",
+                gate_id=gate["id"], gate_name=gate["name"], plan_id=run["plan_id"],
+                run_id=run["id"], zone_id=run["zone_id"], zone_name=run["zone_name"],
+            )
+        return crossing
+
+    def _gate_begin_crossings(self, run: Mapping[str, Any]) -> None:
+        """A Run on a gated Zone always crosses its Gates going out."""
+        records = self._gate_records()
+        for gate_id in self._gate_ids(run):
+            self._gate_begin(records[gate_id], run)
+
+    def _gate_reasons(self, run: dict[str, Any]) -> list[str]:
+        """Reasons the Gate open Check fails for the head Run; settles the Gate
+        Prompt of a Gate that now reads open."""
+        records = self._gate_records()
+        reasons: list[str] = []
+        for gate_id in self._gate_ids(run):
+            gate = records[gate_id]
+            if self._gate_is_open(gate):
+                self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+                for prompt in self._gate_prompts(gate_id):
+                    self._settle_prompt(prompt, "gate_open")
+            else:
+                reasons.append(f"gate_closed:{gate['name']}")
+        return reasons
+
+    def _gate_act(self, run: dict[str, Any]) -> None:
+        """Every other Check passes: expect the crossing, then run the open
+        action, verify it, or notify (spec §10)."""
+        records = self._gate_records()
+        for gate_id in self._gate_ids(run):
+            gate = records[gate_id]
+            if not self._gate_is_open(gate):
+                self._gate_closed(gate, self._gate_begin(gate, run), run)
+
+    def _gate_closed(
+        self, gate: Mapping[str, Any], crossing: dict[str, Any], run: dict[str, Any]
+    ) -> None:
+        """Run the open action, verify it, or notify (spec §10)."""
+        gate_id = gate["id"]
+        if gate.get("open_action") and "action_ran" not in crossing:
+            crossing["action_ran"] = iso(self.now)
+            self.effects.append(GateActionEffect(gate_id, "open", run["id"]))
+            if gate.get("state_entity"):
+                self._arm(DEADLINE_GATE_VERIFY + gate_id, self.now + GATE_OPEN_VERIFY)
+            else:
+                self.s["gate_flags"][gate_id] = True  # nothing to verify against
+            return
+        if gate.get("state_entity") and "action_ran" in crossing and not crossing.get("fallback"):
+            if not self._deadline_due(DEADLINE_GATE_VERIFY + gate_id):
+                return
+            self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+            crossing["fallback"] = True
+            self._emit(
+                "gate_open_action_failed",
+                gate_id=gate_id, gate_name=gate["name"], plan_id=run["plan_id"],
+                run_id=run["id"], zone_id=run["zone_id"], zone_name=run["zone_name"],
+            )
+        if (gate.get("notify") or crossing.get("fallback")) and not crossing.get("prompted"):
+            crossing["prompted"] = True
+            self._raise_prompt(
+                PROMPT_GATE, gate_id,
+                [ACTION_GATE_OPENED, ACTION_GATE_CLOSED, ACTION_SKIP_PLAN],
+                self._gate_context(gate, run),
+            )
+
+    def _gate_drop_stale(self) -> None:
+        """Forget crossings whose Run is no longer the head or active Run, or
+        whose Gate is gone. Nothing went through, so nothing is reset."""
+        live: set[str] = set()
+        active = active_run(self.s)
+        if active is not None:
+            live.add(active["id"])
+        if self.status == ScheduleStatus.WAITING and (head := next_run(self.s)) is not None:
+            live.add(head["id"])
+        records = self._gate_records()
+        for gate_id, crossing in list(self.s["gate_crossings"].items()):
+            if crossing["run_id"] in live and gate_id in records:
+                continue
+            del self.s["gate_crossings"][gate_id]
+            self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+            for prompt in self._gate_prompts(gate_id):
+                self._settle_prompt(prompt, "stale")
+
+    def _gate_crossing_ended(self, run: Mapping[str, Any]) -> None:
+        """The Mower is mowing in the gated Zone: close behind it (spec §10)."""
+        records = self._gate_records()
+        for gate_id, crossing in list(self.s["gate_crossings"].items()):
+            if crossing["run_id"] != run["id"]:
+                continue
+            del self.s["gate_crossings"][gate_id]
+            self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+            for prompt in self._gate_prompts(gate_id):
+                self._settle_prompt(prompt, "crossed")
+            self.s["gate_flags"][gate_id] = False
+            gate = records.get(gate_id)
+            if gate is None:
+                continue
+            self._emit(
+                "gate_crossing_ended",
+                gate_id=gate_id, gate_name=gate["name"], plan_id=run["plan_id"],
+                run_id=run["id"], zone_id=run["zone_id"], zone_name=run["zone_name"],
+            )
+            if gate.get("close_action"):
+                self.effects.append(GateActionEffect(gate_id, "close", run["id"]))
+            elif gate.get("notify"):
+                self._raise_prompt(
+                    PROMPT_GATE_CLOSE, gate_id, [ACTION_GATE_CLOSED],
+                    self._gate_context(gate, run),
+                )
+
+    def _gate_answer(self, prompt: Mapping[str, Any], action: str) -> None:
+        gate_id = prompt["subject"]
+        if action == ACTION_GATE_OPENED:
+            self.s["gate_flags"][gate_id] = True
+        elif action == ACTION_GATE_CLOSED:
+            self.s["gate_flags"][gate_id] = False
+        elif action == ACTION_SKIP_PLAN:
+            self._skip_waiting_plan()
+
+    def _skip_waiting_plan(self) -> None:
+        """Gate Prompt Skip Plan: the head Run's Plan is skipped (spec §6.3)."""
+        head = next_run(self.s) if self.status == ScheduleStatus.WAITING else None
+        if head is None:
+            return
+        self._cancel_deadline(DEADLINE_STABILITY)
+        for run in [r for r in self.s["runs"] if r["plan_id"] == head["plan_id"]]:
+            if run["status"] == RunStatus.PENDING:
+                run["finished_at"] = iso(self.now)
+                self._set_run(run, RunStatus.SKIPPED)
+            self._archive_run(run)
+        self.s["waiting_on"] = []
+        self._gate_drop_stale()
+        if next_run(self.s) is not None:
+            self._evaluate()
+        else:
+            self._set_schedule(ScheduleStatus.IDLE, "skip_plan")
 
     # -- Wet grass (spec §9.3, §9.4) -------------------------------------------
 
