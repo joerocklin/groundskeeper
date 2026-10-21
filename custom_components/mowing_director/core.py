@@ -43,6 +43,7 @@ from .adapter import (
     Movement,
     NewError,
     Position,
+    RainStop,
     RunSettings,
     SelfCheckReason,
     Snapshot,
@@ -61,12 +62,27 @@ DEADLINE_DONE_STABLE = "done_stable"
 DEADLINE_STOPPED_STABLE = "stopped_stable"
 DEADLINE_STALL = "stall"
 DEFAULT_STALL_WINDOW = timedelta(minutes=60)  # spec §7.3, §19
+DEADLINE_PAUSE_STABLE = "pause_stable"
+DEADLINE_HOLD_CLEAR_STABLE = "hold_clear_stable"
+DEADLINE_RECHARGE_STALL = "recharge_stall"
+DEADLINE_CONTACT_LOST = "contact_lost"
+RECHARGE_STALL_WINDOW = timedelta(minutes=60)  # spec §7.4, §19
+CONTACT_LOST_GRACE = timedelta(minutes=10)  # spec §7.4, §19
 PROMPT_REMINDER_AFTER = timedelta(hours=1)  # spec §12.4: first reminder at +1 h
 
 PROMPT_RUN_FAILED = "run_failed"  # spec §12.1: Retry / Skip Plan / Abort
 ACTION_RETRY = "retry"
 ACTION_SKIP_PLAN = "skip_plan"
 ACTION_ABORT = "abort"
+
+PROMPT_RUN_ON_HOLD = "run_on_hold"  # spec §12.1: Resume / End Run
+ACTION_RESUME = "resume"
+ACTION_END_RUN = "end_run"
+
+HOLD_EXTERNAL_PAUSE = "external_pause"  # spec §7.4 causes
+HOLD_RECHARGE_STALL = "recharge_stall"
+HOLD_CONTACT_LOST = "contact_lost"
+HOLD_DEVICE_WORK_HOURS = "device_work_hours"
 
 
 class ScheduleStatus(StrEnum):
@@ -147,6 +163,20 @@ class SkipPlan:
 
 
 @dataclass(frozen=True)
+class ResumeRun:
+    """`resume_run` service: answer an on-hold Run with Resume (spec §13.2)."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class EndRun:
+    """`end_run` service: answer an on-hold Run with End Run (spec §13.2)."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
 class AnswerPrompt:
     """Answer a pending Prompt by id from any path (spec §12.5, §12.12)."""
 
@@ -209,6 +239,8 @@ type CoreInput = (
     | CancelSchedule
     | RetryRun
     | SkipPlan
+    | ResumeRun
+    | EndRun
     | AnswerPrompt
     | RaisePrompt
     | SnapshotReceived
@@ -240,6 +272,13 @@ class AbortRunEffect:
 
 
 @dataclass(frozen=True)
+class ResumeRunEffect:
+    """Command: ask the Mower to continue its paused job."""
+
+    run_id: str
+
+
+@dataclass(frozen=True)
 class EmitEvent:
     """A `mowing_director_event` (the runner adds the entry and device ids)."""
 
@@ -262,7 +301,7 @@ class CancelTimer:
     name: str
 
 
-type Effect = StartRunEffect | AbortRunEffect | EmitEvent | ArmTimer | CancelTimer
+type Effect = StartRunEffect | AbortRunEffect | ResumeRunEffect | EmitEvent | ArmTimer | CancelTimer
 
 
 @dataclass(frozen=True)
@@ -327,6 +366,7 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("blocking_error", None)
     state.setdefault("waiting_on", [])
     state.setdefault("stall_movement", None)
+    state.setdefault("battery_trend", None)
     state.setdefault("prompts", [])
     history = dict(data.get("history") or {})
     history.setdefault("runs", [])
@@ -520,6 +560,10 @@ class _Machine:
                 self._retry()
             case SkipPlan():
                 self._skip_plan()
+            case ResumeRun():
+                self._resume_run()
+            case EndRun():
+                self._end_run()
             case AnswerPrompt():
                 self._answer_prompt(event)
             case RaisePrompt():
@@ -644,6 +688,8 @@ class _Machine:
                 self._evaluate_starting(run)
             elif run["status"] == RunStatus.MOWING:
                 self._evaluate_mowing(run)
+            elif run["status"] == RunStatus.ON_HOLD:
+                self._evaluate_on_hold(run)
 
     def _evaluate_waiting(self) -> None:
         run = next_run(self.s)
@@ -716,6 +762,18 @@ class _Machine:
         snapshot = self._snapshot()
         if snapshot is None:
             return
+        # Contact lost: the Run state is frozen for the 10 min grace (clocks
+        # keep running but nothing is decided from stale evidence); then hold.
+        if not snapshot.available or snapshot.activity is None:
+            if self._stable(DEADLINE_CONTACT_LOST, True, CONTACT_LOST_GRACE):
+                self._enter_hold(run, HOLD_CONTACT_LOST)
+            return
+        self._cancel_deadline(DEADLINE_CONTACT_LOST)
+        # The Mower's own non-work window began mid-job: it pauses itself and
+        # resumes by itself; nobody needs to act (spec §7.4).
+        if snapshot.job_active and snapshot.self_check is SelfCheckReason.DEVICE_NON_WORK_HOURS:
+            self._enter_hold(run, HOLD_DEVICE_WORK_HOURS)
+            return
         # returning/docked + job_active false, stable 60 s. With job_active
         # true it is a breakpoint or mid-job recharge: the Run continues.
         # Progress is never a done signal (it reads 0 when idle).
@@ -731,7 +789,170 @@ class _Machine:
         if self._stable(DEADLINE_STOPPED_STABLE, stopped):
             self._fail_run(run, "stopped_off_dock", abort=False)
             return
+        if self._external_pause(snapshot):
+            self._enter_hold(run, HOLD_EXTERNAL_PAUSE)
+            return
+        if self._recharge_stalled(snapshot):
+            self._enter_hold(run, HOLD_RECHARGE_STALL)
+            return
         self._evaluate_stall(run, snapshot)
+
+    # -- On hold (spec §7.4) -------------------------------------------------
+
+    def _external_pause(self, snapshot: Snapshot) -> bool:
+        """A pause the director did not command, not a recharge, stable 60 s.
+
+        Attribution is by the command log: the director's own `pause_run`
+        (none is issued in phase 1) is never an external pause.
+        """
+        commanded = any(c["command"] == "pause_run" for c in self.s["command_log"])
+        paused = (
+            snapshot.activity is LawnMowerActivity.PAUSED
+            and snapshot.job_active
+            and not snapshot.recharging
+            and not commanded
+        )
+        return self._stable(DEADLINE_PAUSE_STABLE, paused)
+
+    def _recharge_stalled(self, snapshot: Snapshot) -> bool:
+        """Battery not risen for 60 min while `recharging` (spec §7.4)."""
+        if not snapshot.recharging:
+            self.s["battery_trend"] = None
+            self._cancel_deadline(DEADLINE_RECHARGE_STALL)
+            return False
+        trend = self.s["battery_trend"]
+        if snapshot.battery is not None and (
+            trend is None or snapshot.battery > trend["battery"]
+        ):
+            self.s["battery_trend"] = {"battery": snapshot.battery, "since": iso(self.now)}
+            self._arm(DEADLINE_RECHARGE_STALL, self.now + RECHARGE_STALL_WINDOW)
+            return False
+        return self._deadline_due(DEADLINE_RECHARGE_STALL)
+
+    def _enter_hold(self, run: dict[str, Any], cause: str) -> None:
+        for name in (
+            DEADLINE_DONE_STABLE,
+            DEADLINE_STOPPED_STABLE,
+            DEADLINE_STALL,
+            DEADLINE_PAUSE_STABLE,
+            DEADLINE_CONTACT_LOST,
+            DEADLINE_RECHARGE_STALL,
+        ):
+            self._cancel_deadline(name)
+        run["on_hold_reason"] = cause
+        self._set_run(run, RunStatus.ON_HOLD, cause)
+        if cause != HOLD_DEVICE_WORK_HOURS:  # the Mower resumes by itself
+            self._raise_prompt(
+                PROMPT_RUN_ON_HOLD,
+                None,
+                [ACTION_RESUME, ACTION_END_RUN],
+                self._run_context(run, cause),
+                remind=True,
+            )
+
+    def _leave_hold(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        """The cause cleared: `mowing` again, stall window re-armed."""
+        self._cancel_deadline(DEADLINE_HOLD_CLEAR_STABLE)
+        run.pop("on_hold_reason", None)
+        self._answer_kind(PROMPT_RUN_ON_HOLD, "cleared")
+        self._set_run(run, RunStatus.MOWING)
+        self._arm_stall(snapshot)
+        self.s["battery_trend"] = None
+        self._evaluate_mowing(run)
+
+    def _on_hold_run(self) -> dict[str, Any] | None:
+        run = active_run(self.s)
+        if run is not None and run["status"] == RunStatus.ON_HOLD:
+            return run
+        return None
+
+    def _resume_run(self) -> None:
+        """Resume: send `resume_run`; the Run stays on hold until the cause
+        clears (spec §6.3). The command is logged so it is attributable."""
+        run = self._on_hold_run()
+        if run is None:
+            return
+        self._answer_kind(PROMPT_RUN_ON_HOLD, ACTION_RESUME)
+        self._log_command(
+            {
+                "command": "resume_run",
+                "run_id": run["id"],
+                "issued_at": iso(self.now),
+                "result": None,
+            }
+        )
+        self.effects.append(ResumeRunEffect(run["id"]))
+
+    def _end_run(self) -> None:
+        """End Run: `abort_run`, and the Run fails "ended by user"."""
+        run = self._on_hold_run()
+        if run is None:
+            return
+        self._answer_kind(PROMPT_RUN_ON_HOLD, ACTION_END_RUN)
+        run.pop("on_hold_reason", None)
+        self._fail_run(run, "ended_by_user", abort=True)
+
+    def _rain_stop(self) -> None:
+        """The Mower ended the job for rain: not a failure (spec §7.5).
+
+        The Run returns to `pending` and the Schedule to `waiting`, with no
+        command. The Wet grass confirm-or-ask flow hooks onto this transition.
+        """
+        run = active_run(self.s)
+        if run is None or run["status"] not in (RunStatus.MOWING, RunStatus.ON_HOLD):
+            return
+        self._clear_run_deadlines()
+        self._cancel_deadline(DEADLINE_STABILITY)
+        self._answer_kind(PROMPT_RUN_ON_HOLD, "rain_stop")
+        run.pop("on_hold_reason", None)
+        run.pop("started_at", None)
+        self.s["battery_trend"] = None
+        self._set_run(run, RunStatus.PENDING, "rain_stop")
+        self._set_schedule(ScheduleStatus.WAITING, "rain_stop")
+        self._evaluate()
+
+    def _evaluate_on_hold(self, run: dict[str, Any]) -> None:
+        snapshot = self._snapshot()
+        if snapshot is None:
+            return
+        cause = run.get("on_hold_reason")
+        if cause == HOLD_RECHARGE_STALL:
+            trend = self.s["battery_trend"]
+            if (
+                trend is not None
+                and snapshot.battery is not None
+                and snapshot.battery > trend["battery"]
+            ):
+                self._leave_hold(run, snapshot)
+        elif cause == HOLD_CONTACT_LOST:
+            if snapshot.available and snapshot.activity is not None:
+                self._leave_hold(run, snapshot)  # normal rules re-evaluate
+        elif cause == HOLD_DEVICE_WORK_HOURS:
+            resumed = (
+                snapshot.activity is LawnMowerActivity.MOWING
+                and snapshot.job_active
+                and snapshot.self_check is not SelfCheckReason.DEVICE_NON_WORK_HOURS
+            )
+            if self._stable(DEADLINE_HOLD_CLEAR_STABLE, resumed):
+                self._leave_hold(run, snapshot)
+        elif cause == HOLD_EXTERNAL_PAUSE:
+            resumed = snapshot.activity is LawnMowerActivity.MOWING and snapshot.job_active
+            if self._stable(DEADLINE_HOLD_CLEAR_STABLE, resumed):
+                self._leave_hold(run, snapshot)
+
+    def _run_context(self, run: Mapping[str, Any], reason: str) -> dict[str, Any]:
+        plan = self.s["plans"].get(run["plan_id"]) or {}
+        return {
+            "zone_name": run["zone_name"],
+            "plan_id": run["plan_id"],
+            "run_id": run["id"],
+            "n": run["index"],
+            "m": run["of"],
+            "height_mm": run["height_mm"],
+            "plan_start_height_mm": plan.get("start_height_mm", run["height_mm"]),
+            "plan_end_height_mm": plan.get("end_height_mm", run["height_mm"]),
+            "reason": reason,
+        }
 
     def _arm_stall(self, snapshot: Snapshot) -> None:
         self.s["stall_movement"] = movement_to_dict(snapshot)
@@ -749,8 +970,10 @@ class _Machine:
         elif self._deadline_due(DEADLINE_STALL):
             self._fail_run(run, "stalled", abort=True)
 
-    def _stable(self, name: str, holds: bool) -> bool:
-        """True once `holds` has held for the 60 s stability window (spec §7.7).
+    def _stable(
+        self, name: str, holds: bool, window: timedelta = STABILITY_WINDOW
+    ) -> bool:
+        """True once `holds` has held for `window` (60 s stability, spec §7.7).
 
         The first holding snapshot arms the window, any non-holding one
         cancels it (flicker), and the window counts only when it is due.
@@ -759,7 +982,7 @@ class _Machine:
             self._cancel_deadline(name)
             return False
         if name not in self.s["deadlines"]:
-            self._arm(name, self.now + STABILITY_WINDOW)
+            self._arm(name, self.now + window)
             return False
         return self._deadline_due(name)
 
@@ -795,6 +1018,8 @@ class _Machine:
             run = self._mowing_run()
             if run is not None and signal.zone == run.get("native_ref"):
                 self._fail_run(run, "externally_aborted", abort=False)
+        elif isinstance(signal, RainStop):
+            self._rain_stop()
         elif isinstance(signal, JobStarted):
             run = self._mowing_run()
             if run is not None and self._is_external_job(run, signal):
@@ -817,7 +1042,11 @@ class _Machine:
 
     def _command_outcome(self, event: CommandOutcome) -> None:
         for entry in reversed(self.s["command_log"]):
-            if entry["run_id"] == event.run_id and entry["result"] is None:
+            if (
+                entry["run_id"] == event.run_id
+                and entry["command"] == event.command
+                and entry["result"] is None
+            ):
                 entry["result"] = event.result.kind.value
                 break
         run = next((r for r in self.s["runs"] if r["id"] == event.run_id), None)
@@ -833,7 +1062,16 @@ class _Machine:
     # -- Run endings --------------------------------------------------------
 
     def _clear_run_deadlines(self) -> None:
-        for name in (DEADLINE_START_WINDOW, DEADLINE_DONE_STABLE, DEADLINE_STOPPED_STABLE, DEADLINE_STALL):
+        for name in (
+            DEADLINE_START_WINDOW,
+            DEADLINE_DONE_STABLE,
+            DEADLINE_STOPPED_STABLE,
+            DEADLINE_STALL,
+            DEADLINE_PAUSE_STABLE,
+            DEADLINE_HOLD_CLEAR_STABLE,
+            DEADLINE_RECHARGE_STALL,
+            DEADLINE_CONTACT_LOST,
+        ):
             self._cancel_deadline(name)
         self.s["active_run_id"] = None
 
@@ -864,22 +1102,11 @@ class _Machine:
         if abort:
             self.effects.append(AbortRunEffect(reason))
         self._set_schedule(ScheduleStatus.PAUSED, reason)
-        plan = self.s["plans"].get(run["plan_id"]) or {}
         self._raise_prompt(
             PROMPT_RUN_FAILED,
             None,
             [ACTION_RETRY, ACTION_SKIP_PLAN, ACTION_ABORT],
-            {
-                "zone_name": run["zone_name"],
-                "plan_id": run["plan_id"],
-                "run_id": run["id"],
-                "n": run["index"],
-                "m": run["of"],
-                "height_mm": run["height_mm"],
-                "plan_start_height_mm": plan.get("start_height_mm", run["height_mm"]),
-                "plan_end_height_mm": plan.get("end_height_mm", run["height_mm"]),
-                "reason": reason,
-            },
+            self._run_context(run, reason),
             remind=True,
         )
 
@@ -948,7 +1175,12 @@ class _Machine:
         )
         if prompt is None or event.action not in prompt["actions"]:
             return  # already answered, stale or not offered: nothing happens
-        if prompt["kind"] == PROMPT_RUN_FAILED:
+        if prompt["kind"] == PROMPT_RUN_ON_HOLD:
+            if event.action == ACTION_RESUME:
+                self._resume_run()
+            else:
+                self._end_run()
+        elif prompt["kind"] == PROMPT_RUN_FAILED:
             # The dedicated input does the work and answers the Prompt.
             if event.action == ACTION_RETRY:
                 self._retry()
@@ -1012,6 +1244,7 @@ class _Machine:
         """Abort: every Run leaves `state`, the Schedule is `idle` and empty."""
         active = active_run(self.s)
         self._answer_kind(PROMPT_RUN_FAILED, ACTION_ABORT)
+        self._answer_kind(PROMPT_RUN_ON_HOLD, "cancelled")
         self._clear_run_deadlines()
         self._cancel_deadline(DEADLINE_STABILITY)
         for run in list(self.s["runs"]):

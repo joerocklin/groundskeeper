@@ -22,7 +22,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .core import RunStatus, ScheduleStatus, next_run
+from .core import RunStatus, ScheduleStatus, active_run, next_run
 from .heights import HeightError
 from .plans import (
     AmbiguousZone,
@@ -75,7 +75,8 @@ def _director(hass: HomeAssistant, call: ServiceCall) -> Director:
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register `add_plan`, `start`, `cancel`, `retry_run`, `skip_plan` and `answer_prompt`."""
+    """Register `add_plan`, `start`, `cancel`, `retry_run`, `skip_plan`, `resume_run`,
+    `end_run` and `answer_prompt`."""
 
     async def add_plan(call: ServiceCall) -> ServiceResponse:
         director = _director(hass, call)
@@ -165,6 +166,21 @@ def async_register_services(hass: HomeAssistant) -> None:
         _require_failure(director)
         await director.async_skip_plan()
 
+    def _require_on_hold(director: Director) -> None:
+        run = active_run(director.state)
+        if run is None or run["status"] != RunStatus.ON_HOLD:
+            raise _fail("no_hold_to_answer")
+
+    async def resume_run(call: ServiceCall) -> None:
+        director = _director(hass, call)
+        _require_on_hold(director)
+        await director.async_resume_run()
+
+    async def end_run(call: ServiceCall) -> None:
+        director = _director(hass, call)
+        _require_on_hold(director)
+        await director.async_end_run()
+
     async def answer_prompt(call: ServiceCall) -> None:
         director = _director(hass, call)
         prompt = director.find_prompt(call.data[ATTR_PROMPT_ID])
@@ -201,3 +217,5 @@ def async_register_services(hass: HomeAssistant) -> None:
     hass.services.async_register(DOMAIN, "cancel", cancel, schema=vol.Schema(_ENTRY))
     hass.services.async_register(DOMAIN, "retry_run", retry_run, schema=vol.Schema(_ENTRY))
     hass.services.async_register(DOMAIN, "skip_plan", skip_plan, schema=vol.Schema(_ENTRY))
+    hass.services.async_register(DOMAIN, "resume_run", resume_run, schema=vol.Schema(_ENTRY))
+    hass.services.async_register(DOMAIN, "end_run", end_run, schema=vol.Schema(_ENTRY))

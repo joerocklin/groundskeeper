@@ -86,3 +86,19 @@ answer_prompt:
       example: retry
       selector:
         text:
+
+resume_run:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+end_run:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
