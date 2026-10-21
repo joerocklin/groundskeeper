@@ -1002,10 +1002,6 @@ class MowingDirectorPanel extends HTMLElement {
     });
   }
 
-  _lengthUnit() {
-    return (this._hass.config && this._hass.config.unit_system && this._hass.config.unit_system.length) || 'km';
-  }
-
   // One Schedule command. Errors and edit warnings show in a notice; the
   // backend pushes a fresh snapshot, which reloads the Schedule.
   async _scheduleCmd(type, extra = {}) {
