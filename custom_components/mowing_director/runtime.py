@@ -22,7 +22,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
+from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
 from .prompts import async_prompt_strings, render_content
@@ -35,7 +37,6 @@ from .adapter import (
 )
 from .const import DOMAIN, EVENT_TYPE
 from .core import (
-    DEADLINE_STABILITY,
     AbortRunEffect,
     AddPlan,
     AnswerPrompt,
@@ -55,6 +56,7 @@ from .core import (
     SkipPlan,
     CoreInput,
     EmitEvent,
+    Reconcile,
     Env,
     SignalReceived,
     SnapshotReceived,
@@ -73,6 +75,29 @@ from .store import MowerStore
 _LOGGER = logging.getLogger(__name__)
 
 DELAYED_SAVE_S = 60  # spec §14.4
+WAIT_FOR_MOWER_S = 300  # spec §8 item 2: max wait for the first usable snapshot
+
+
+def snapshot_usable(snapshot: Snapshot) -> bool:
+    """A snapshot the Run rules can be tested against."""
+    return snapshot.available and snapshot.activity is not None
+
+
+def store_usable(data: dict[str, Any]) -> bool:
+    """Whether the persisted Schedule/Run state has the shape the reducer reads."""
+    state = data.get("state")
+    if state is None:
+        return True  # first install: nothing persisted yet
+    if not isinstance(state, dict):
+        return False
+    runs = state.get("runs", [])
+    return (
+        isinstance(runs, list)
+        and all(isinstance(r, dict) and "status" in r and "id" in r for r in runs)
+        and isinstance(state.get("plans", {}), dict)
+        and isinstance(state.get("schedule", {}), dict)
+        and isinstance(state.get("deadlines", {}), dict)
+    )
 _CORE_KEYS = ("state", "learned", "history")
 # Changes to only these never need an awaited save (spec §14.4).
 
@@ -93,10 +118,16 @@ class _Sink:
 
     @callback
     def on_snapshot(self, snapshot: Snapshot) -> None:
+        if self._director.frozen:
+            self._director.on_frozen_snapshot(snapshot)
+            return
         self._director.submit(lambda now: SnapshotReceived(now, snapshot))
 
     @callback
     def on_signal(self, signal: AdapterSignal) -> None:
+        if self._director.frozen:
+            self._director.on_frozen_signal(signal)
+            return
         self._director.submit(lambda now: SignalReceived(now, signal))
 
 
@@ -120,6 +151,12 @@ class Director:
         self._listeners: list[Callable[[], None]] = []
         self._unsub_adapter: CALLBACK_TYPE | None = None
         self._closed = False
+        # Wait-for-Mower (spec §8): frozen from load until reconciled.
+        self.frozen = True
+        self._loaded_at = dt_util.utcnow()
+        self._frozen_signals: list[AdapterSignal] = []
+        self._wait_cancel: CALLBACK_TYPE | None = None
+        self._cancel_started: CALLBACK_TYPE | None = None
 
     # -- read access ----------------------------------------------------------
 
@@ -189,29 +226,100 @@ class Director:
     # -- lifecycle --------------------------------------------------------------
 
     async def async_load(self) -> None:
-        """Load state, re-arm timers from it, observe the adapter. No commands."""
+        """Load state, observe the adapter, then reconcile once HA has started.
+
+        Start, reload and re-enable take this one path (spec §8). The reducer
+        stays frozen and no timer is armed until `_reconcile`; nothing here
+        commands the Mower.
+        """
         data = await self._store.async_data()
         self._data = data
+        self._loaded_at = dt_util.utcnow()
+        self._check_store(data)
         data.update(normalise_core_state(data))
-        # The stability window is state-derived evidence: downtime does not
-        # count towards it, so it restarts after a load.
-        data["state"]["deadlines"].pop(DEADLINE_STABILITY, None)
-        for name, at in data["state"]["deadlines"].items():
-            self._arm(name, parse(at))
         async_set_run_active_provider(self.hass, self.entry.entry_id, self.run_active)
         self._unsub_adapter = self.adapter.subscribe(_Sink(self))
         await self.adapter.async_start()
-        await self.dispatch(
-            lambda now: SnapshotReceived(now, self.adapter.snapshot)
+        if self.hass.is_running:
+            await self._begin_wait()
+        else:
+            self._cancel_started = async_at_started(self.hass, self._begin_wait)
+
+    def _check_store(self, data: dict[str, Any]) -> None:
+        """An unusable Store: Repairs, Schedule idle and empty (spec §14.7)."""
+        issue_id = f"store_unusable_{self.entry.entry_id}"
+        if store_usable(data):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        _LOGGER.error("Unreadable Schedule state for %s; reset to idle", self.entry.title)
+        data["state"] = {}
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="store_unusable",
+            translation_placeholders={"mower": self.entry.title},
         )
+
+    def on_frozen_snapshot(self, snapshot: Snapshot) -> None:
+        """First usable snapshot ends the wait, if it has begun."""
+        if self._wait_cancel is not None and snapshot_usable(snapshot):
+            self.entry.async_create_task(
+                self.hass, self._reconcile(snapshot), "mowing_director reconcile"
+            )
+
+    def on_frozen_signal(self, signal: AdapterSignal) -> None:
+        self._frozen_signals.append(signal)
+
+    async def _begin_wait(self, _hass: HomeAssistant | None = None) -> None:
+        """HA has started: wait up to 5 min for the first usable snapshot."""
+        if self._closed or not self.frozen:
+            return
+        self._cancel_started = None
+        if snapshot_usable(self.adapter.snapshot):
+            await self._reconcile(self.adapter.snapshot)
+            return
+
+        @callback
+        def _gave_up(_now: datetime) -> None:
+            self._wait_cancel = None
+            latest = self.adapter.snapshot
+            self.entry.async_create_task(
+                self.hass,
+                self._reconcile(latest if snapshot_usable(latest) else None),
+                "mowing_director reconcile",
+            )
+
+        self._wait_cancel = async_call_later(self.hass, WAIT_FOR_MOWER_S, _gave_up)
+
+    async def _reconcile(self, snapshot: Snapshot | None) -> None:
+        """Run the §8.1 decision table once, then arm timers from the result."""
+        if self._closed or not self.frozen:
+            return
+        self.frozen = False
+        if self._wait_cancel is not None:
+            self._wait_cancel()
+            self._wait_cancel = None
+        signals = tuple(self._frozen_signals)
+        self._frozen_signals.clear()
+        await self.dispatch(
+            lambda now: Reconcile(now, self._loaded_at, snapshot, signals)
+        )
+        async with self._lock:
+            for name, at in self.state["deadlines"].items():
+                self._arm(name, parse(at))
 
     @callback
     def async_unload(self) -> None:
         """Stop timers and observation. Never commands the Mower."""
         self._closed = True
-        if self._unsub_adapter:
-            self._unsub_adapter()
-            self._unsub_adapter = None
+        for cancel in (self._wait_cancel, self._cancel_started, self._unsub_adapter):
+            if cancel:
+                cancel()
+        self._wait_cancel = self._cancel_started = self._unsub_adapter = None
         for cancel in self._timers.values():
             cancel()
         self._timers.clear()
