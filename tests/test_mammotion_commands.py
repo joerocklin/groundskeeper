@@ -18,7 +18,7 @@ from homeassistant.exceptions import (
     ServiceNotSupported,
     ServiceValidationError,
 )
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import async_mock_service
 
 from custom_components.mowing_director.adapter import (
@@ -28,7 +28,7 @@ from custom_components.mowing_director.adapter import (
     Unconfirmed,
 )
 from custom_components.mowing_director.adapters.mammotion import MammotionAdapter
-from tests.mammotion_states import install_baseline, install_zone_switches
+from tests.mammotion_states import install_baseline, install_zone_switches, set_entity
 
 from .test_mammotion_adapter import NAME, make_adapter, make_director_entry
 
@@ -501,3 +501,63 @@ async def test_abort_run_returns_the_dock_result_when_dock_fails(
     assert len(stops) == 1
     assert len(docks) == 1
     assert order == [("lawn_mower", "stop"), ("lawn_mower", "dock")]
+
+
+# -- refresh (spec §3.4, decision A8) -----------------------------------------
+
+
+def mower_device(hass: HomeAssistant):
+    """The fake Mammotion Mower device, via the lawn_mower registry entry."""
+    reg = er.async_get(hass)
+    entry = reg.async_get(reg.async_get_entity_id("lawn_mower", "mammotion", f"{NAME}_mower"))
+    assert entry is not None
+    device = dr.async_get(hass).async_get(entry.device_id)
+    assert device is not None
+    return device
+
+
+def button_id(hass: HomeAssistant, key: str) -> str:
+    """The entity_id of the registry `{NAME}_{key}` button."""
+    entity_id = er.async_get(hass).async_get_entity_id("button", "mammotion", f"{NAME}_{key}")
+    assert entity_id is not None
+    return entity_id
+
+
+async def test_refresh_presses_the_refresh_status_button(hass: HomeAssistant) -> None:
+    """refresh requests fresh telemetry by pressing the Mammotion
+    `{name}_refresh_status` button (research §2)."""
+    adapter = await make_command_adapter(hass)
+    set_entity(
+        hass, None, mower_device(hass), NAME, "button:refresh_status", "unknown"
+    )
+    presses = async_mock_service(hass, "button", "press")
+    assert await adapter.refresh() == Accepted()
+    assert len(presses) == 1
+    assert presses[0].data == {"entity_id": [button_id(hass, "refresh_status")]}
+
+
+async def test_refresh_without_the_button_is_refused_not_ready(hass: HomeAssistant) -> None:
+    """No refresh button in the registry (entry not loaded): refused with
+    a not-ready reason, zero calls."""
+    adapter = await make_command_adapter(hass)
+    presses = async_mock_service(hass, "button", "press")
+    assert await adapter.refresh() == Refused("mammotion_not_ready")
+    assert presses == []
+
+
+async def test_refresh_maps_a_press_failure(hass: HomeAssistant) -> None:
+    """A refresh press that fails with command_unconfirmed is
+    unconfirmed, exactly one press (ADR 0002)."""
+    adapter = await make_command_adapter(hass)
+    set_entity(
+        hass, None, mower_device(hass), NAME, "button:refresh_status", "unknown"
+    )
+    presses = async_mock_service(
+        hass, "button", "press",
+        raise_exception=HomeAssistantError(
+            "did not confirm", translation_domain="mammotion",
+            translation_key="command_unconfirmed",
+        ),
+    )
+    assert await adapter.refresh() == Unconfirmed()
+    assert len(presses) == 1

@@ -731,8 +731,12 @@ class MammotionAdapter:
         return Refused("not_implemented")
 
     async def refresh(self) -> CommandResult:
-        """Not implemented until ticket #10 lands in slices."""
-        return Refused("not_implemented")
+        """Press `button.{name}_refresh_status`: fresh telemetry at
+        Priority.USER (spec §3.4, decision A8)."""
+        entity_id = self._entity_id("button", "refresh_status")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+        return await self._call("button", "press", {"entity_id": [entity_id]})
 
     # -- catalogues (delegated to the ticket #9 catalogue) -------------------
 
