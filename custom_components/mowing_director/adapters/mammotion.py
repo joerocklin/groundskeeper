@@ -19,6 +19,7 @@ and the per-Zone task sensors are created and removed while a job runs.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -200,6 +201,11 @@ def _number(value: str | None) -> float | None:
 def _int(value: str | None) -> int | None:
     number = _number(value)
     return None if number is None else int(number)
+
+
+# `source_version` as a comparable tuple; anything unparseable (a dev
+# checkout) degrades to the TypeError belt instead of a guess.
+_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
 
 
 def _fold_toward(bearing_deg: float) -> int:
@@ -781,16 +787,12 @@ class MammotionAdapter:
     @callback
     def _resume_via_button(self) -> bool:
         """True when the installed Mammotion-HA has the broken plain
-        resume path (>= 0.6.19); unknown versions degrade to trying it."""
-        version = self._source_version
-        if version is None:
+        resume path (>= 0.6.19); unknown versions degrade to trying it
+        with the TypeError belt."""
+        match = _VERSION.match(self._source_version or "")
+        if match is None:
             return False
-        parts = version.split(".")
-        try:
-            parsed = tuple(int(part) for part in parts[:3])
-        except ValueError:
-            return False
-        return parsed >= (0, 6, 19)
+        return tuple(int(part) for part in match.groups()) >= (0, 6, 19)
 
     async def refresh(self) -> CommandResult:
         """Press `button.{name}_refresh_status`: fresh telemetry at
