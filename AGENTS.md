@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues tracked as markdown files under `.scratch/` in this repo. See `docs/agents/issue-tracker.md`.
+Issues tracked in GitHub Issues (`joerocklin/groundskeeper`) via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
