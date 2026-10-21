@@ -53,3 +53,19 @@ cancel:
       selector:
         config_entry:
           integration: mowing_director
+
+retry_run:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+skip_plan:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director

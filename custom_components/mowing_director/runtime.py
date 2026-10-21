@@ -41,6 +41,8 @@ from .core import (
     CancelSchedule,
     CancelTimer,
     CommandOutcome,
+    RetryRun,
+    SkipPlan,
     CoreInput,
     EmitEvent,
     Env,
@@ -295,6 +297,12 @@ class Director:
 
     async def async_cancel(self) -> None:
         await self.dispatch(CancelSchedule)
+
+    async def async_retry_run(self) -> None:
+        await self.dispatch(RetryRun)
+
+    async def async_skip_plan(self) -> None:
+        await self.dispatch(SkipPlan)
 
 
 @callback

@@ -22,7 +22,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .core import ScheduleStatus, next_run
+from .core import RunStatus, ScheduleStatus, next_run
 from .heights import HeightError
 from .plans import (
     AmbiguousZone,
@@ -73,7 +73,7 @@ def _director(hass: HomeAssistant, call: ServiceCall) -> Director:
 
 
 def async_register_services(hass: HomeAssistant) -> None:
-    """Register `add_plan`, `start` and `cancel`."""
+    """Register `add_plan`, `start`, `cancel`, `retry_run` and `skip_plan`."""
 
     async def add_plan(call: ServiceCall) -> ServiceResponse:
         director = _director(hass, call)
@@ -145,6 +145,24 @@ def async_register_services(hass: HomeAssistant) -> None:
             raise _fail("nothing_to_cancel")
         await director.async_cancel()
 
+    def _require_failure(director: Director) -> None:
+        paused = director.state["schedule"]["status"] == ScheduleStatus.PAUSED
+        if not (
+            paused
+            and any(r["status"] == RunStatus.FAILED for r in director.state["runs"])
+        ):
+            raise _fail("no_failure_to_answer")
+
+    async def retry_run(call: ServiceCall) -> None:
+        director = _director(hass, call)
+        _require_failure(director)
+        await director.async_retry_run()
+
+    async def skip_plan(call: ServiceCall) -> None:
+        director = _director(hass, call)
+        _require_failure(director)
+        await director.async_skip_plan()
+
     hass.services.async_register(
         DOMAIN,
         "add_plan",
@@ -162,3 +180,5 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(DOMAIN, "start", start, schema=vol.Schema(_ENTRY))
     hass.services.async_register(DOMAIN, "cancel", cancel, schema=vol.Schema(_ENTRY))
+    hass.services.async_register(DOMAIN, "retry_run", retry_run, schema=vol.Schema(_ENTRY))
+    hass.services.async_register(DOMAIN, "skip_plan", skip_plan, schema=vol.Schema(_ENTRY))

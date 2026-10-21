@@ -121,6 +121,9 @@
     },
     "nothing_to_cancel": {
       "message": "The Schedule is already idle and empty."
+    },
+    "no_failure_to_answer": {
+      "message": "No failed Run is waiting for a decision."
     }
   },
   "entity": {
@@ -203,6 +206,26 @@
     "cancel": {
       "name": "Cancel",
       "description": "Abort: cancel every Run and empty the Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "retry_run": {
+      "name": "Retry Run",
+      "description": "Answer a failed Run with Retry: it returns to the head of the Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "skip_plan": {
+      "name": "Skip Plan",
+      "description": "Answer a failed Run with Skip Plan: the Plan's remaining Runs are skipped.",
       "fields": {
         "config_entry_id": {
           "name": "Mower",
