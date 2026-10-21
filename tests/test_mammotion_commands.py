@@ -10,7 +10,6 @@ asserts exactly one service call.
 from __future__ import annotations
 
 import pytest
-from homeassistant.const import CONF_DEVICE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     HomeAssistantError,
@@ -27,6 +26,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.mowing_director.adapter import (
     Accepted,
+    JobStarted,
     Refused,
     RunSettings,
     Unconfirmed,
@@ -743,3 +743,77 @@ async def test_resume_maps_a_start_mowing_failure(hass: HomeAssistant) -> None:
     )
     assert await adapter.resume_run() == Unconfirmed()
     assert len(starts) == 1
+
+
+# -- the v0.6.18 false-500, verify-by-state (ADR 0002, trace fixture) ---------
+
+
+async def test_false_500_start_is_unconfirmed_then_state_reports_the_start(
+    hass: HomeAssistant,
+) -> None:
+    """The v0.6.18 shape (trace examplesite_2026_10_18_stepdown_run.json):
+    `start_mow` raises command_unconfirmed although the job usually
+    started. The adapter returns unconfirmed after EXACTLY ONE call, and
+    the core's verify-by-state half works: when state moves to mowing,
+    the adapter emits JobStarted."""
+    adapter = await make_command_adapter(hass)
+    received: list = []
+    unsubscribe = adapter.subscribe(_RecordingSink(received))
+    try:
+        calls = async_mock_service(
+            hass, "mammotion", "start_mow",
+            raise_exception=HomeAssistantError(
+                "start did not confirm", translation_domain="mammotion",
+                translation_key="command_unconfirmed",
+            ),
+        )
+        assert await adapter.start_run(SIDE_YARD, settings()) == Unconfirmed()
+        assert len(calls) == 1  # never re-issued (ADR 0002)
+
+        # The job started anyway: drive the states a real start produces.
+        set_mode(hass, "MODE_WORKING")
+        reg = er.async_get(hass)
+        mower_entity = reg.async_get_entity_id("lawn_mower", "mammotion", f"{NAME}_mower")
+        assert mower_entity is not None
+        hass.states.async_set(mower_entity, "mowing", {})
+        await hass.async_block_till_done()
+
+        started = [s for s in received if isinstance(s, JobStarted)]
+        assert len(started) == 1
+    finally:
+        unsubscribe()
+
+
+class _RecordingSink:
+    """Records adapter signals."""
+
+    def __init__(self, signals: list) -> None:
+        self._signals = signals
+
+    def on_snapshot(self, snapshot) -> None:
+        """Ignore snapshot pushes; only signals matter here."""
+
+    def on_signal(self, signal) -> None:
+        """Record a signal."""
+        self._signals.append(signal)
+
+
+# -- services not loaded at all (issue #10 AC) --------------------------------
+
+
+async def test_all_commands_refuse_not_ready_without_any_services(
+    hass: HomeAssistant,
+) -> None:
+    """Mammotion services not yet loaded: every command comes back
+    refused with a not-ready reason, never an exception (the mode
+    pre-checks pass here; the ServiceNotFound arm does the work)."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "MODE_PAUSE")  # lets resume_run reach its call path
+    for result in [
+        await adapter.start_run(SIDE_YARD, settings()),
+        await adapter.abort_run(),
+        await adapter.dock(),
+        await adapter.resume_run(),
+        await adapter.refresh(),
+    ]:
+        assert result == Refused("mammotion_not_ready")
