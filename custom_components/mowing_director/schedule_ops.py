@@ -27,6 +27,7 @@ from .plans import (
     build_plan,
     find_zone,
     height_limits,
+    redraw_plan,
     rederive_plan,
 )
 from .run_settings import SettingsError, validate_overrides
@@ -57,6 +58,7 @@ def _run_view(run: dict[str, Any]) -> dict[str, Any]:
         "run_id": run["id"],
         "height_mm": run["height_mm"],
         "angle_deg": run["angle_deg"],
+        "provisional": bool(run.get("angle_draw", {}).get("provisional")),
         "n": run["index"],
         "m": run["of"],
     }
@@ -246,3 +248,62 @@ async def rederive(
         raise ScheduleError("invalid_settings", error=str(err)) from None
     await director.async_replace_plan(built.plan, built.runs)
     return {"plan_id": plan_id, "runs": [_run_view(r) for r in built.runs], "warnings": built.warnings}
+
+
+def _zone_of(director: Director, zone_id: str) -> dict[str, Any] | None:
+    return next((z for z in _config(director).get("zones", []) if z["id"] == zone_id), None)
+
+
+def _redraw(
+    director: Director, plan_id: str, *, provisional_only: bool, rng: random.Random | None
+):
+    plan = director.state["plans"].get(plan_id)
+    zone = _zone_of(director, plan["zone_id"]) if plan else None
+    if plan is None or zone is None:
+        return None
+    return redraw_plan(
+        plan, _plan_runs(director, plan_id), zone=zone, config=_config(director),
+        limits=director.adapter.limits, now=dt_util.utcnow(),
+        history_runs=_history_runs(director), rng=rng, provisional_only=provisional_only,
+    )
+
+
+async def reroll_angles(
+    director: Director, plan_id: str, rng: random.Random | None = None
+) -> dict[str, Any]:
+    """"Re-roll angles": redraw every angle of a not-started Plan (spec §5.5)."""
+    plan = director.state["plans"].get(plan_id)
+    if plan is None:
+        raise ScheduleError("remove_plan_unknown_plan", plan_id=plan_id)
+    started = any(r["plan_id"] == plan_id for r in _history_runs(director))
+    if started or any(
+        r["status"] != "pending" for r in director.state["runs"] if r["plan_id"] == plan_id
+    ):
+        raise ScheduleError("plan_started", plan_id=plan_id)
+    if _zone_of(director, plan["zone_id"]) is None:
+        raise ScheduleError("unknown_zone", zone=plan["zone_id"])
+    _, runs, warnings = _redraw(director, plan_id, provisional_only=False, rng=rng)
+    await director.async_redraw_angles(plan_id, runs)
+    return {"plan_id": plan_id, "runs": [_run_view(r) for r in runs], "warnings": warnings}
+
+
+async def redraw_provisional(
+    director: Director, zone_id: str, rng: random.Random | None = None
+) -> list[str]:
+    """The Zone's range arrived: redraw every pending, unedited, provisional Run
+    on it and note the Plan (spec §5.5). Returns the ids of the Plans changed."""
+    changed: list[str] = []
+    for plan_id in [p for p, v in director.state["plans"].items() if v["zone_id"] == zone_id]:
+        result = _redraw(director, plan_id, provisional_only=True, rng=rng)
+        if result is None:
+            continue
+        plan, runs, warnings = result
+        live = {r["id"] for r in director.state["runs"]}
+        redrawn = [
+            r for r in runs
+            if r["id"] in live and not r.get("angle_edited")
+            and not r["angle_draw"]["provisional"]
+        ]
+        await director.async_redraw_angles(plan_id, redrawn, plan.get("note"), warnings)
+        changed.append(plan_id)
+    return changed

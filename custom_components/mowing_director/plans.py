@@ -240,29 +240,33 @@ def redraw_plan(
     """
     runs = [dict(r) for r in runs]
     rng_now = (zone.get("angle_range") or {}).get("angle_range", "unset")
+    pending = [r for r in runs if r.get("status", "pending") == "pending"]
     if provisional_only:
+        if rng_now == "unset":
+            return None
         targets = [
-            r for r in runs
+            r for r in pending
             if r.get("angle_draw", {}).get("provisional") and not r.get("angle_edited")
         ]
-        if not targets or rng_now == "unset":
+        if not targets:
             return None
+    else:
+        targets = pending
     base = resolve_run_settings(limits, config, zone, plan_settings=plan.get("settings"))
     draw = _draw(zone, config, base, len(runs), plan.get("base_angle"), history_runs, now, rng)
     record = draw.to_dict()
     warnings = list(draw.warnings)
     for i, run in enumerate(runs):
-        if provisional_only and run not in targets:
-            if run.get("angle_edited") and isinstance(rng_now, dict) and not (
-                rng_now["min"] <= run["angle_deg"] <= rng_now["max"]
-            ):
-                warnings.append(
-                    f"Run {run['index']}: edited angle is outside the allowed range"
-                )
-            continue
-        run["angle_deg"] = draw.angles[i]
-        run["angle_draw"] = record
-        run.pop("angle_edited", None)
+        if run in targets:
+            run["angle_deg"] = draw.angles[i]
+            run["angle_draw"] = record
+            run.pop("angle_edited", None)
+        elif (
+            provisional_only and run in pending and run.get("angle_edited")
+            and isinstance(rng_now, dict)
+            and not rng_now["min"] <= run["angle_deg"] <= rng_now["max"]
+        ):
+            warnings.append(f"Run {run['index']}: edited angle is outside the allowed range")
     new_plan = dict(plan)
     if provisional_only:
         new_plan["note"] = "angles_redrawn_for_range"
