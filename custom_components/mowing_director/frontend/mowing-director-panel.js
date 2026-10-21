@@ -374,6 +374,7 @@ class MowingDirectorPanel extends HTMLElement {
     this._tab = 'now';
     this._zoneView = { zones: [], channels: [] };
     this._zoneId = null;
+    this._gateDraft = null; // Gate being created or edited, with its picked Channels
     this._unsub = null;
     this._started = false;
   }
@@ -441,6 +442,8 @@ class MowingDirectorPanel extends HTMLElement {
 
   _zonesTab() {
     const { zones, channels } = this._zoneView;
+    const gates = this._zoneView.gates || [];
+    const draft = this._gateDraft;
     const unit = (this._hass.config && this._hass.config.unit_system && this._hass.config.unit_system.length) || 'km';
     const sel = zones.find((z) => z.id === this._zoneId) || null;
     const bearing = sel && sel.bearing && sel.bearing.value;
@@ -448,9 +451,47 @@ class MowingDirectorPanel extends HTMLElement {
       ? `<section class="card"><h2>${esc(sel.name)}</h2>
           ${bearingHtml(sel)}${rangeHtml(sel, unit)}</section>`
       : '';
+    const entityIds = this._hass && this._hass.states
+      ? Object.keys(this._hass.states).filter((e) => /^(binary_sensor|cover|lock)\./.test(e)).sort() : [];
+    const gateCard = `<section class="card"><h2>Gates</h2>
+        ${draft ? gateEditorHtml(draft, this._zoneView, entityIds) : gateListHtml(this._zoneView, null)}</section>`;
     return `<section class="card"><h2>Zones &amp; Channels</h2>
-        ${renderMap(zones, channels, { selectedZoneId: sel && sel.id, stripeZoneId: sel && sel.id, angle: bearing })}
-        ${zoneListHtml(zones, sel && sel.id)}</section>${detail}`;
+        ${renderMap(zones, channels, {
+          selectedZoneId: sel && sel.id, stripeZoneId: sel && sel.id, angle: bearing,
+          gates, pickedChannelIds: draft ? draft.channels : undefined })}
+        ${draft ? '<p>Tap Channels on the map to put the Gate on them.</p>' : ''}
+        ${zoneListHtml(zones, sel && sel.id)}</section>${detail}${gateCard}`;
+  }
+
+  // Copy the editor's inputs into the draft before anything re-renders.
+  _readGateDraft(root) {
+    const d = this._gateDraft;
+    const el = (id) => root.querySelector(id);
+    if (!d || !el('#gate-name')) return;
+    d.name = el('#gate-name').value;
+    d.state_entity_id = el('#gate-state-entity').value;
+    d.open_action = el('#gate-open-action').value;
+    d.close_action = el('#gate-close-action').value;
+    d.notify = el('#gate-notify').checked;
+  }
+
+  async _saveGate(root) {
+    this._readGateDraft(root);
+    const d = this._gateDraft;
+    const { payload, error } = gatePayload(d);
+    if (error) { d.error = error; this._render(); return; }
+    try {
+      await this._hass.connection.sendMessagePromise(d.id
+        ? { type: 'mowing_director/update_gate', entry_id: this._entryId, gate_id: d.id, changes: payload }
+        : { type: 'mowing_director/create_gate', entry_id: this._entryId, ...payload });
+    } catch (err) {
+      d.error = err.message || String(err);
+      this._render();
+      return;
+    }
+    this._gateDraft = null;
+    await this._loadZones();
+    this._render();
   }
 
   _wireZones(root) {
@@ -465,11 +506,32 @@ class MowingDirectorPanel extends HTMLElement {
         this._render();
       });
     });
+    root.querySelectorAll('[data-pick]').forEach((el) => {
+      el.addEventListener('click', () => {
+        if (!this._gateDraft) return;
+        this._readGateDraft(root);
+        this._gateDraft.channels = toggleChannel(this._gateDraft.channels, el.dataset.pick);
+        this._render();
+      });
+    });
     root.querySelectorAll('[data-act]').forEach((el) => {
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         const zone_id = this._zoneId;
         switch (el.dataset.act) {
+          case 'new-gate': this._gateDraft = gateDraft(null); this._render(); break;
+          case 'edit-gate':
+            this._gateDraft = gateDraft((this._zoneView.gates || []).find((g) => g.id === el.dataset.gate));
+            this._render(); break;
+          case 'cancel-gate': this._gateDraft = null; this._render(); break;
+          case 'save-gate': this._saveGate(root); break;
+          case 'delete-gate': {
+            const gate_id = this._gateDraft && this._gateDraft.id;
+            if (!gate_id) break;
+            this._gateDraft = null;
+            this._zoneCmd('delete_gate', { gate_id });
+            break;
+          }
           case 'refresh-zones': this._zoneCmd('refresh_zones'); break;
           case 'toggle-hidden':
             this._zoneCmd('set_zone_hidden', { zone_id: el.dataset.zone, hidden: el.checked }); break;
@@ -496,6 +558,7 @@ class MowingDirectorPanel extends HTMLElement {
   }
 
   _render() {
+    this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
     const mowerOptions = this._mowers
       .map((m) => `<option value="${esc(m.entry_id)}"${m.entry_id === this._entryId ? ' selected' : ''}>${esc(m.title)}</option>`)
       .join('');
