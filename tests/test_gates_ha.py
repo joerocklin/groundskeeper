@@ -232,3 +232,17 @@ async def test_gate_restart_keeps_gates_and_the_waiting_crossing(
     msg = await ws(hass, hass_ws_client, entry, "list_gates")
     assert [g["id"] for g in msg["result"]["gates"]] == [gate["id"]]
     assert hass.states.get(eid(hass, "binary_sensor", entry, gate, "crossing_expected")).state == "on"
+
+
+async def test_gate_views_show_the_state_entity_id_for_the_panel(
+    hass, hass_ws_client, setup
+) -> None:
+    """The Store keeps a registry id; the panel needs the entity_id to display it."""
+    entry, _ = setup
+    reg = er.async_get(hass).async_get_or_create("binary_sensor", "t", "gate_contact2",
+                                                 suggested_object_id="gate_contact2")
+    await make_gate(hass, hass_ws_client, entry, state_entity=reg.entity_id)
+    msg = await ws(hass, hass_ws_client, entry, "get_zones")
+    [gate] = msg["result"]["gates"]
+    assert gate["state_entity"] == reg.id
+    assert gate["state_entity_id"] == reg.entity_id
