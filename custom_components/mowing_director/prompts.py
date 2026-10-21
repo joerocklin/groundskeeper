@@ -44,6 +44,9 @@ def render_content(
     lines: list[str] = []
     if "zone_name" in ctx:
         lines.append(strings["prompt_zone"].format(zone=ctx["zone_name"]))
+    if "gate_name" in ctx:
+        headline = headline.replace("{gate}", str(ctx["gate_name"]))
+        lines.append(strings["prompt_gate"].format(gate=ctx["gate_name"]))
     if "plan_start_height_mm" in ctx:
         start, end = ctx["plan_start_height_mm"], ctx["plan_end_height_mm"]
         if start == end:

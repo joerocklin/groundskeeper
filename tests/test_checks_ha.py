@@ -70,7 +70,7 @@ async def test_list_checks_returns_the_built_ins(hass, hass_ws_client, setup) ->
     entry, _ = setup
     msg = await ws(hass, hass_ws_client, entry, "list_checks")
     by_id = {c["id"]: c for c in msg["result"]["checks"]}
-    assert set(by_id) == {"mower_ready", "zone_ready", "battery", "work_hours", "wet_grass"}
+    assert set(by_id) == {"mower_ready", "zone_ready", "battery", "work_hours", "wet_grass", "gate_open"}
     assert by_id["battery"]["enabled"] is False
 
 

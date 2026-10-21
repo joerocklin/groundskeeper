@@ -82,7 +82,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     """Register the websocket commands (once, from `async_setup`)."""
     websocket_api.async_register_command(hass, ws_list_mowers)
     websocket_api.async_register_command(hass, ws_get_state)
-    for command in (ws_list_checks, ws_create_check, ws_update_check, ws_delete_check):
+    for command in (ws_list_checks, ws_create_check, ws_update_check, ws_delete_check,
+                    ws_list_gates, ws_create_gate, ws_update_gate, ws_delete_gate):
         websocket_api.async_register_command(hass, command)
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_refresh_zones)
@@ -206,7 +207,11 @@ async def ws_get_zones(
     if sync is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
         return
-    connection.send_result(msg["id"], await sync.async_zone_view())
+    view = await sync.async_zone_view()
+    director = async_get_director(hass, msg["entry_id"])
+    if director is not None:
+        view = {**view, **director.gate_views()}
+    connection.send_result(msg["id"], view)
 
 
 @websocket_api.require_admin
@@ -811,6 +816,94 @@ async def ws_delete_check(hass, connection, msg) -> None:
         return {}
 
     await _checks_call(hass, connection, msg, call)
+
+
+# -- Gates (spec §4.7) ---------------------------------------------------------------
+
+_GATE_FIELDS = {
+    vol.Optional("name"): str,
+    vol.Optional("channels"): [str],
+    vol.Optional("state_entity"): vol.Any(str, None),
+    vol.Optional("open_action"): vol.Any([dict], None),
+    vol.Optional("close_action"): vol.Any([dict], None),
+    vol.Optional("notify"): vol.Any(bool, None),
+}
+
+
+async def _gates_call(hass, connection, msg, call) -> None:
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        result = await call(director)
+    except (StopIteration, KeyError):
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Gate")
+        return
+    except ValueError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/list_gates", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_list_gates(hass, connection, msg) -> None:
+    """Gates with believed state, the Zones behind them and unrouted Zones."""
+    await _gates_call(hass, connection, msg, lambda d: _ready(d.gate_views()))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/create_gate",
+        vol.Required("entry_id"): str,
+        **{vol.Required(k.schema) if k.schema in ("name", "channels") else k: v
+           for k, v in _GATE_FIELDS.items()},
+    }
+)
+@websocket_api.async_response
+async def ws_create_gate(hass, connection, msg) -> None:
+    """Declare a Gate on one or more Channels."""
+    fields = {k: v for k, v in msg.items() if k not in ("id", "type", "entry_id")}
+    await _gates_call(hass, connection, msg, lambda d: d.async_create_gate(fields))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/update_gate",
+        vol.Required("entry_id"): str,
+        vol.Required("gate_id"): str,
+        vol.Required("changes"): vol.Schema(_GATE_FIELDS),
+    }
+)
+@websocket_api.async_response
+async def ws_update_gate(hass, connection, msg) -> None:
+    await _gates_call(
+        hass, connection, msg, lambda d: d.async_update_gate(msg["gate_id"], msg["changes"])
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/delete_gate",
+        vol.Required("entry_id"): str,
+        vol.Required("gate_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_delete_gate(hass, connection, msg) -> None:
+    async def call(director):
+        await director.async_delete_gate(msg["gate_id"])
+        return {}
+
+    await _gates_call(hass, connection, msg, call)
 
 
 # -- Notification targets and category toggles (spec §12.1, §12.3) -----------------
