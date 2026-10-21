@@ -150,8 +150,8 @@ class Notifier:
                     prompt["tag"],
                 )
             return
-        data = self._data(category, prompt["tag"], url, strings,
-                          urgent=prompt["kind"] in URGENT_KINDS)
+        urgent = prompt["kind"] in URGENT_KINDS or bool(prompt["context"].get("urgent"))
+        data = self._data(category, prompt["tag"], url, strings, urgent=urgent)
         data["actions"] = [
             {
                 "action": action_id(prompt["prompt_id"], action),

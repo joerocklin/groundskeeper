@@ -381,3 +381,23 @@ async def test_check_timeout_event_becomes_a_check_wait_notice(
     assert note["title"] == "Example Mower: Check timed out"
     assert note["message"] == "Wet grass is blocking the Schedule: rain_detected"
     assert note["data"]["tag"] == f"mowdir_{entry.entry_id}_check_timeout_wet_grass"
+
+
+async def test_gate_urgent_resend_is_time_sensitive_but_the_first_warning_is_not(
+    hass, director, phones
+) -> None:
+    from custom_components.mowing_director.core import RaisePrompt
+
+    entry, _, _ = director
+    d = async_get_director(hass, entry.entry_id)
+    ctx = {"gate_id": "g1", "gate_name": "Fence gate", "crossing": "back"}
+    for urgent in (False, True):
+        await d.dispatch(lambda now, u=urgent: RaisePrompt(
+            now, "gate", "g1", ("opened", "closed"), {**ctx, "urgent": u}))
+        await hass.async_block_till_done()
+    first, second = sent(phones[PIXEL])
+    assert "push" not in first["data"]
+    assert second["data"]["push"]["interruption-level"] == "time-sensitive"
+    assert second["data"]["priority"] == "high"
+    assert "come back through this Gate" in second["message"]
+    assert first["data"]["tag"] == second["data"]["tag"]  # replaces the earlier one
