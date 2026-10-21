@@ -31,12 +31,17 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceNotFound,
+    ServiceValidationError,
+)
 from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 from homeassistant.loader import IntegrationNotFound, async_get_integration
 from homeassistant.util import dt as dt_util
 
 from ..adapter import (
+    Accepted,
     AdapterSignal,
     AdapterSink,
     Channel,
@@ -52,6 +57,7 @@ from ..adapter import (
     RunSettings,
     SelfCheckReason,
     Snapshot,
+    Unconfirmed,
     Zone,
     ZoneTaskAborted,
     ZoneTaskComplete,
@@ -91,6 +97,31 @@ _HEIGHT_READBACK_MM = 5
 
 # The app and the device both refuse a start below 15 % (error 2700).
 _MIN_START_BATTERY_PCT = 15
+
+# Upstream 500 keys whose outcome is unknown: the command may still have
+# been carried out (`command_unconfirmed`, research §2) or a 60 s mode
+# wait expired after the command was sent (`*_failed`).
+_UNCONFIRMED_KEYS = frozenset(
+    {
+        "command_unconfirmed",
+        "pause_failed",
+        "start_failed",
+        "resume_failed",
+        "dock_failed",
+        "dock_cancel_failed",
+    }
+)
+# Upstream 500 keys that are definite nos (research §3).
+_REFUSED_KEYS = frozenset(
+    {
+        "device_not_ready",
+        "account_in_use",
+        "api_limit_exceeded",
+        "device_not_in_account",
+        "command_failed",
+        "no_job_to_continue",
+    }
+)
 
 
 def _int_field(key: str, label: str, minimum: int, maximum: int, default: int) -> ExtrasField:
@@ -543,25 +574,63 @@ class MammotionAdapter:
 
     # -- commands (ticket #10) ----------------------------------------------
 
+    async def _call(
+        self, domain: str, service: str, data: dict[str, Any]
+    ) -> CommandResult:
+        """One service call, mapped to the closed command union (spec §3.3).
+
+        Every command path goes through here exactly once: the adapter
+        never re-issues (ADR 0002), so the mapping is the only retry
+        question that ever gets asked, and the answer is always no.
+        Catch order matters - `ServiceNotFound` and
+        `ServiceNotSupported` both subclass `ServiceValidationError`.
+        """
+        try:
+            await self._hass.services.async_call(
+                domain, service, data, blocking=True
+            )
+        except ServiceNotFound:
+            # The Mammotion entry has not loaded its services yet.
+            return Refused("mammotion_not_ready")
+        except ServiceValidationError as err:
+            # 400: a definite no (also covers ServiceNotSupported).
+            return Refused(str(err))
+        except HomeAssistantError as err:
+            key = err.translation_key
+            if key in _UNCONFIRMED_KEYS:
+                # 500 command_unconfirmed or an expired 60 s mode wait:
+                # the command may still have been carried out.
+                return Unconfirmed()
+            if key in _REFUSED_KEYS:
+                return Refused(str(err) or key)
+            # Unknown 500: outcome unknown, never retry (ADR 0002).
+            return Unconfirmed()
+        return Accepted()
+
     async def start_run(self, zone: str, settings: RunSettings) -> CommandResult:
-        """Not implemented until ticket #10."""
+        """Not implemented until ticket #10 lands in slices."""
         del zone, settings
         return Refused("not_implemented")
 
     async def abort_run(self) -> CommandResult:
-        """Not implemented until ticket #10."""
+        """Not implemented until ticket #10 lands in slices."""
         return Refused("not_implemented")
 
     async def dock(self) -> CommandResult:
-        """Not implemented until ticket #10."""
-        return Refused("not_implemented")
+        """`lawn_mower.dock`: return to the dock (spec §3.4)."""
+        entity_id = self._entity_id("lawn_mower", "mower")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+        return await self._call(
+            "lawn_mower", "dock", {"entity_id": [entity_id]}
+        )
 
     async def resume_run(self) -> CommandResult:
-        """Not implemented until ticket #10."""
+        """Not implemented until ticket #10 lands in slices."""
         return Refused("not_implemented")
 
     async def refresh(self) -> CommandResult:
-        """Not implemented until ticket #10."""
+        """Not implemented until ticket #10 lands in slices."""
         return Refused("not_implemented")
 
     # -- catalogues (delegated to the ticket #9 catalogue) -------------------
