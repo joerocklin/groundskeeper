@@ -1,0 +1,5 @@
+# Never re-issue a Mower command; verify by state
+
+When a Mower command's outcome is unknown (`unconfirmed`, i.e. a 500 or a timeout), the director never sends it again. It watches adapter snapshots until the outcome is visible, and fails the Run when a window expires. Restart reconciliation follows the same rule: it never re-sends `start_run`. A retry looks like the obvious fix, but Mammotion's `start_mow` replaces any running job, and on Mammotion-HA v0.6.18 it reports a false 500 even when the job started. A blind retry can therefore restart or overwrite a job the Mower is already running. The cost is that an occasional Run fails "did not start" when a retry might have worked. Retry stays a user decision. The reducer's write-ahead "command intent" record, the start window and the reconcile decision table all rest on this rule.
+
+Sources: [Mower adapter seam](../../.scratch/phase1-spec/issues/06-mower-adapter-seam.md) §4, [Run outcome detection](../../.scratch/phase1-spec/issues/09-run-outcome-detection.md) §1, [Restart reconciliation](../../.scratch/phase1-spec/issues/11-restart-reconciliation.md) §4.
