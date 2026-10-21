@@ -55,9 +55,9 @@ from ..adapter import (
     Zone,
     ZoneTaskAborted,
     ZoneTaskComplete,
-    ZonesChanged,
 )
 from ..heights import from_display
+from .mammotion_catalogue import MammotionCatalogue
 
 MAMMOTION = "mammotion"
 
@@ -183,6 +183,7 @@ class MammotionAdapter:
         self._sinks: list[AdapterSink] = []
         self._unsubs: list[CALLBACK_TYPE] = []
         self._listening = False
+        self._catalogue = MammotionCatalogue(hass, self._device_id, self._emit_signal)
         self._snapshot = self._derive_snapshot()
         self._seen_error_times: set[datetime] = set()
         self._error_pair: tuple[str, str] = ("", "")
@@ -190,7 +191,6 @@ class MammotionAdapter:
         self._was_mowing = (
             self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
         )
-        self._zone_hashes = frozenset(self._zone_switches())
         self._source_version: str | None = None
 
     # -- discovery ---------------------------------------------------------
@@ -387,6 +387,8 @@ class MammotionAdapter:
         self._unsubs.append(
             self._hass.bus.async_listen("mammotion_event", self._on_mammotion_event)
         )
+        # The catalogue owns Zone-list change detection (ticket #9).
+        self._catalogue.async_start()
 
     @callback
     def _emit_signal(self, signal: AdapterSignal) -> None:
@@ -408,16 +410,15 @@ class MammotionAdapter:
         self._check_errors()
         self._check_task_areas()
         self._check_job_started()
-        self._check_zones_changed()
         self._publish()
 
     @callback
     def _on_registry_event(self, event: Event) -> None:
         del event
-        # Zone switches are created/re-keyed/removed in the registry, and
-        # the ephemeral task sensors vanish at job end; re-check both.
+        # The ephemeral task sensors are created and removed as a job
+        # runs, so discovery also runs on registry changes. Zone-list
+        # changes are the catalogue's own detection.
         self._check_task_areas()
-        self._check_zones_changed()
 
     @callback
     def _on_mammotion_event(self, event: Event) -> None:
@@ -492,16 +493,6 @@ class MammotionAdapter:
             )
         self._was_mowing = mowing
 
-    @callback
-    def _check_zones_changed(self) -> None:
-        """ZonesChanged when the Zone hash set changes (map rebuild,
-        re-keyed switches)."""
-        hashes = frozenset(self._zone_switches())
-        if hashes == self._zone_hashes:
-            return
-        self._zone_hashes = hashes
-        self._emit_signal(ZonesChanged())
-
     @property
     def limits(self) -> Limits:
         """Device limits, read from the number entities (spec §3.6).
@@ -574,33 +565,23 @@ class MammotionAdapter:
         del task, enabled
         return Refused("not_implemented")
 
-    # -- catalogues (read-only state; geometry is ticket #9's service) ------
+    # -- catalogues (delegated to the ticket #9 catalogue) -------------------
 
     async def list_zones(self) -> list[Zone]:
-        """Zones from the Zone switches: hash, name, no polygon."""
-        return [
-            Zone(ref, self._switch_name(entry), None)
-            for ref, entry in self._zone_switches().items()
-        ]
+        """Zones as (native_ref, name, polygon or None)."""
+        return await self._catalogue.list_zones()
 
     async def list_channels(self) -> list[Channel]:
-        """Channels need `get_geojson`, which starts a 5-minute report
-        stream; ticket #10 wires them through the catalogue."""
-        return [Channel(Channel.DOCK, Channel.DOCK, Channel.DOCK)]
+        """Channels from `get_geojson` path features (0 = dock)."""
+        return await self._catalogue.list_channels()
 
     async def list_native_tasks(self) -> list[NativeTask]:
-        """Native tasks come from `mammotion.get_tasks` (ticket #10)."""
-        return [NativeTask("dock", "dock", True)]
+        """The Mower's own scheduler, read-only."""
+        return await self._catalogue.list_native_tasks()
 
-    @callback
-    def _switch_name(self, entry: er.RegistryEntry) -> str:
-        state = self._hass.states.get(entry.entity_id)
-        return (
-            entry.name
-            or entry.original_name
-            or (state.attributes.get("friendly_name") if state else None)
-            or entry.entity_id
-        )
+    async def set_task_enabled(self, task: str, enabled: bool) -> CommandResult:
+        """Enable/disable one native task (Repairs fix flow)."""
+        return await self._catalogue.set_task_enabled(task, enabled)
 
     # -- lifecycle and metadata (spec §3.8, §15) -----------------------------
 
@@ -619,6 +600,7 @@ class MammotionAdapter:
 
     async def async_close(self) -> None:
         """Stop observing; never commands the Mower."""
+        self._catalogue.async_stop()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()

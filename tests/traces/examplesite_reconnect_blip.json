@@ -1,0 +1,33 @@
+{
+  "source": "HAND-BUILT from research records, not a raw REST dump. Facts come from private research notes section 3 (the removed inches number entity) and section 4.2 (entities go unavailable/unknown when the coordinator has no data), plus the handoff log's 404 on number.example_mower_blade_height_inches.",
+  "scenario": "Reconnect blip: the height readback sensor goes unknown, then briefly reports a false 100 (a stale/placeholder write after reconnect), then returns to the true 3.1496 in (80 mm). The adapter must report None during the blip, never 100 mm as a real readback, and must recover.",
+  "device_name": "Luba-SERIAL1",
+  "notes": [
+    "While the coordinator is offline or has no data the sensor is unavailable/unknown (mammotion-ha-surface.md section 4.2).",
+    "A non-numeric state ('false') is what the handoff saw from the removed inches entity; the adapter treats any non-numeric readback as None.",
+    "100 mm is the top of the H-variant range; a placeholder at the range end must not be trusted as a readback when the value is not numeric."
+  ],
+  "steps": [
+    {
+      "at": "2026-10-18T21:43:15+00:00",
+      "note": "connection drops: readback goes unknown",
+      "states": {
+        "sensor:blade_height": ["unknown", {}]
+      }
+    },
+    {
+      "at": "2026-10-18T21:43:16+00:00",
+      "note": "blip: a false non-numeric 100-style write arrives (handoff: entity reads None/false)",
+      "states": {
+        "sensor:blade_height": ["false", {}]
+      }
+    },
+    {
+      "at": "2026-10-18T21:43:40+00:00",
+      "note": "reconnected: the true readback returns",
+      "states": {
+        "sensor:blade_height": ["3.1496", {"unit_of_measurement": "in"}]
+      }
+    }
+  ]
+}
