@@ -33,6 +33,7 @@ from homeassistant.const import (
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
+from homeassistant.loader import IntegrationNotFound, async_get_integration
 from homeassistant.util import dt as dt_util
 
 from ..adapter import (
@@ -190,6 +191,7 @@ class MammotionAdapter:
             self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
         )
         self._zone_hashes = frozenset(self._zone_switches())
+        self._source_version: str | None = None
 
     # -- discovery ---------------------------------------------------------
 
@@ -605,6 +607,12 @@ class MammotionAdapter:
     async def async_start(self) -> None:
         """Begin observing the Mower."""
         self._ensure_listening()
+        try:
+            integration = await async_get_integration(self._hass, MAMMOTION)
+        except IntegrationNotFound:
+            self._source_version = None
+        else:
+            self._source_version = str(integration.version) if integration.version else None
         self._check_errors()
         self._check_task_areas()
         self._publish()
@@ -635,8 +643,12 @@ class MammotionAdapter:
 
     @property
     def source_version(self) -> str | None:
-        """Installed Mammotion-HA version (spec §3.8); None if unknown."""
-        return None
+        """Installed Mammotion-HA version (spec §3.8); None if unknown.
+
+        Resolved once in `async_start` - the protocol member is a
+        property, so the lookup cannot be awaited on access.
+        """
+        return self._source_version
 
     @property
     def redact(self) -> list[str]:

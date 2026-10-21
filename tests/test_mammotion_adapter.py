@@ -15,7 +15,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    MockModule,
+    mock_integration,
+)
 
 from custom_components.mowing_director.adapter import (
     JobStarted,
@@ -409,4 +413,43 @@ async def test_extras_schema_declares_the_mammotion_settings(hass: HomeAssistant
     assert schema["ultra_wave"].default == "1"
     assert schema["auto_change_direction"].default == 0
     assert schema["ride_boundary_distance"].default == 0.0
+
+
+# -- metadata (spec §3.8, §15) ------------------------------------------------
+
+
+async def test_metadata_from_device_and_integration(hass: HomeAssistant) -> None:
+    """model/firmware come from the device registry; source_version from
+    the installed mammotion integration; redact carries the serial."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    dr.async_get(hass).async_update_device(
+        mower.id, model_id="Luba2AWD5000H", sw_version="1.30.31.19"
+    )
+    adapter = make_adapter(hass, entry)
+
+    assert adapter.model == "Luba2AWD5000H"
+    assert adapter.firmware_version == "1.30.31.19"
+    assert adapter.source_domain == "mammotion"
+    # The serial is the part after the dash in the device name.
+    assert "SERIAL1" in adapter.redact
+    assert NAME in adapter.redact
+
+    # No `mammotion` integration is installed in these fakes, so the
+    # version is None rather than a crash (IntegrationNotFound).
+    assert adapter.source_version is None
+
+
+async def test_source_version_reads_the_installed_integration(hass: HomeAssistant) -> None:
+    """With a `mammotion` integration present, its version is exposed as a
+    string for the "too old" Repairs check (spec §3.8)."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    mock_integration(
+        hass, MockModule("mammotion", partial_manifest={"version": "0.6.18"}), built_in=False
+    )
+    adapter = make_adapter(hass, entry)
+    await adapter.async_start()
+    assert adapter.source_version == "0.6.18"
+    await adapter.async_close()
 
