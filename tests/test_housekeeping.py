@@ -131,7 +131,8 @@ async def test_dismissed_issue_is_re_raised_only_when_the_set_changes(hass) -> N
     await hk.async_check_automations()  # same set, e.g. next restart
     assert _issue(hass, issue_id).dismissed_version is not None
 
-    await _automation(hass, _watching("a1", ent.entity_id), _watching("a2", ent.entity_id))
+    # A second automation appears (automation reload is not under test).
+    hk._conflicting_automations = lambda: ["automation.a1", "automation.a2"]
     await hk.async_check_automations()  # set changed
     assert _issue(hass, issue_id).dismissed_version is None
 

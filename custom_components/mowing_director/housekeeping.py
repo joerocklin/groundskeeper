@@ -65,6 +65,50 @@ class Housekeeping:
     async def async_check_all(self) -> None:
         """Every check; runs on load."""
         await self.async_check_native_schedule()
+        await self.async_check_automations()
+
+    def _conflicting_automations(self) -> list[str]:
+        """Automations that reference the Mower's device or its entities."""
+        device_id = self._entry.data.get(CONF_DEVICE)
+        if not device_id:
+            return []
+        found = set(automations_with_device(self._hass, device_id))
+        for entity in er.async_entries_for_device(
+            er.async_get(self._hass), device_id, include_disabled_entities=True
+        ):
+            found.update(automations_with_entity(self._hass, entity.entity_id))
+        return sorted(found)
+
+    async def async_check_automations(self) -> None:
+        """Raise the informational "conflicting automations" issue.
+
+        Persistent, so a dismissal survives restarts; the last-seen set is
+        kept in `learned` and the issue is only re-raised (dismissal reset)
+        when that set changes. The director never edits automations and the
+        issue names none of them.
+        """
+        issue_id = ISSUE_CONFLICTING_AUTOMATIONS.format(self._entry.entry_id)
+        current = self._conflicting_automations()
+        data = await self._store.async_load()
+        learned = data.setdefault("learned", {})
+        previous = learned.get("conflicting_automations")
+        if current != previous:
+            learned["conflicting_automations"] = current
+            await self._store.async_save(data)
+            ir.async_delete_issue(self._hass, DOMAIN, issue_id)
+        if not current:
+            return
+        if ir.async_get(self._hass).async_get_issue(DOMAIN, issue_id) is None:
+            ir.async_create_issue(
+                self._hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                is_persistent=True,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="conflicting_automations",
+                translation_placeholders={"count": str(len(current))},
+            )
 
     async def async_enabled_task_names(self) -> str:
         """Names of the enabled native tasks, for display."""
