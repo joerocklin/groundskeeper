@@ -74,3 +74,8 @@ def _work_hours_always_open(request, monkeypatch):
         monkeypatch.setattr(
             "custom_components.mowing_director.checks.DEFAULT_WINDOW", ("00:00", "00:00")
         )
+    if "test_wet_grass" not in request.module.__name__:
+        # Likewise the morning dry-out (spec §9.3) depends on sunrise.
+        monkeypatch.setattr(
+            "custom_components.mowing_director.checks.DEFAULT_MORNING_DRY_OUT", False
+        )
