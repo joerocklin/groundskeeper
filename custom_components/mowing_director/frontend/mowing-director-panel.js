@@ -63,6 +63,35 @@ const STYLE = `
   .tag.missing { background: var(--error-color, #db4437); color: #fff; }
   .warn { color: var(--warning-color, #b26a00); }
   input[type=number] { width: 5em; font: inherit; }
+  /* -- Now tab (spec §16.2) -- */
+  svg .zone.highlight { fill-opacity: .55; stroke-width: 4; stroke: var(--accent-color, #ff9800); }
+  .now-status { display: flex; flex-direction: column; gap: 8px; }
+  .now-status .state { font-size: 18px; font-weight: 500; }
+  .now-status dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; }
+  .now-status dt { color: var(--secondary-text-color); }
+  .now-status dd { margin: 0; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btns button, .run-row button, .prompt-card button, .sheet button { font: inherit; padding: 8px 14px; min-height: 40px;
+    border-radius: 8px; border: 1px solid var(--divider-color); background: var(--card-background-color);
+    color: var(--primary-text-color); cursor: pointer; }
+  .btns button.danger, .prompt-card button[data-action=abort] { color: var(--error-color, #db4437); }
+  button:disabled { opacity: .35; cursor: default; }
+  ul.runs { list-style: none; margin: 0; padding: 0; }
+  ul.runs li.run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 4px; border-radius: 6px; cursor: pointer; }
+  ul.runs li.run.selected { background: var(--secondary-background-color); }
+  ul.runs .what { flex: 1; min-width: 10em; }
+  ul.runs .what small { display: block; color: var(--secondary-text-color); }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill { font-size: 13px; padding: 3px 10px; border-radius: 12px; background: var(--secondary-background-color); }
+  .pill.ok { background: var(--success-color, #43a047); color: #fff; }
+  .pill.failing { background: var(--error-color, #db4437); color: #fff; }
+  .prompt-card { border-left: 4px solid var(--warning-color, #ffa600); padding-left: 12px; margin: 8px 0; }
+  .prompt-card h3 { margin: 0 0 4px; font-size: 16px; }
+  .prompt-card p { margin: 2px 0; }
+  .sheet { position: fixed; inset: auto 0 0 0; max-width: 480px; margin: 0 auto; z-index: 5;
+    background: var(--card-background-color); border-radius: 16px 16px 0 0; padding: 16px;
+    box-shadow: 0 -4px 24px rgba(0,0,0,.35); }
+  .sheet label { display: block; margin: 8px 0; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
 `;
 
@@ -367,6 +396,151 @@ function gateListHtml(view, selectedId) {
   return `<ul class="zones gates">${rows || '<li class="empty">No Gates declared.</li>'}</ul>${unrouted}${thresholds}
     <p><button data-act="new-gate">Add Gate</button></p>`;
 }
+
+// -- Now tab helpers (spec §16.2) ----------------------------------------------
+// Pure string builders over the `get_now` / `subscribe_now` view.
+
+const fmtHeight = (mm, lengthUnit) =>
+  (lengthUnit === 'mi' ? `${Math.round((mm / 25.4) * 100) / 100} in` : `${num(mm)} mm`);
+
+const REASONS = {
+  battery_low: 'Battery too low to start',
+  below_threshold: 'Battery below the Check threshold',
+  outside_work_hours: 'Outside work hours',
+  unavailable: 'Mower unavailable',
+  unknown_state: 'Mower state unknown',
+  job_active: 'The Mower already has a job running',
+  new_error: 'The Mower reported an error',
+  device_non_work_hours: 'Outside the Mower\'s own work hours',
+  bearing_unset: 'Zone bearing not set',
+  zone_missing: 'The Zone is missing',
+  start_failed: 'The Mower did not start',
+  ended_by_user: 'Ended by you',
+};
+const reasonText = (r) => REASONS[r] || String(r || 'unknown').replace(/_/g, ' ');
+
+const STATUS_LABEL = { idle: 'Idle', waiting: 'Waiting', running: 'Running', paused: 'Paused' };
+const CTL_LABEL = {
+  pause: 'Pause after Run', stop_now: 'Stop now', done_today: 'Done for today',
+  resume: 'Resume', retry: 'Retry', skip_plan: 'Skip Plan', abort: 'Abort',
+  resume_run: 'Resume Run', end_run: 'End Run',
+};
+const ACTION_LABEL = {
+  retry: 'Retry', skip_plan: 'Skip Plan', abort: 'Abort', resume: 'Resume', end_run: 'End Run',
+  no: 'No', yes: 'Yes', yes_done_today: 'Yes, done for today', opened: 'I opened it',
+  closed: 'Closed', dismiss: 'Dismiss',
+};
+const actionLabel = (a) => ACTION_LABEL[a] || String(a).replace(/_/g, ' ');
+
+// The panel confirms Abort (spec §16.3); other actions go straight through.
+const confirmText = (action) => (action === 'abort'
+  ? 'Abort? This cancels the whole Schedule: every pending Run is removed.' : null);
+
+// Map options: stripes at the next Run's absolute angle (the active Run's while
+// one is mowing); tapping a Run highlights its Zone.
+function nowMapOpts(view, highlightRunId) {
+  const head = view.current_run || view.next_run;
+  const picked = (view.up_next || []).find((r) => r.run_id === highlightRunId);
+  return {
+    stripeZoneId: head ? head.zone_id : undefined,
+    angle: head ? head.angle_deg : undefined,
+    currentZoneId: view.current_zone_id || null,
+    highlightZoneId: picked ? picked.zone_id : null,
+  };
+}
+
+const ctlButton = (ctl, extra = '') =>
+  `<button data-ctl="${ctl}"${extra}${ctl === 'abort' || ctl === 'stop_now' ? ' class="danger"' : ''}>${CTL_LABEL[ctl]}</button>`;
+
+function statusCardHtml(view, lengthUnit) {
+  const c = view.current_run;
+  const has = (ctl) => (view.controls || []).includes(ctl);
+  let body = '';
+  if (c) {
+    body += `<dl><dt>Zone</dt><dd>${esc(c.zone_name)}</dd>
+      <dt>Height</dt><dd>${fmtHeight(c.height_mm, lengthUnit)}</dd>
+      <dt>Angle</dt><dd>${fmtDeg(c.angle_deg)}</dd>
+      <dt>Progress</dt><dd>Run ${esc(c.n)} of ${esc(c.of)}</dd>
+      <dt>Battery</dt><dd>${c.battery == null ? 'unknown' : `${esc(c.battery)} %`}</dd>
+      <dt>Height check</dt><dd>${esc(String(c.height_check || 'pending').replace(/_/g, ' '))}</dd></dl>`;
+    if (c.status === 'on_hold') {
+      body += `<p class="warn">On hold: ${esc(reasonText(c.on_hold_reason))}.</p>`;
+    }
+  }
+  if (view.status === 'waiting') {
+    const w = view.waiting_on || [];
+    body += w.length
+      ? `<p>Waiting for:</p><ul class="waiting">${w.map((x) => `<li><strong>${esc(x.name)}</strong>: ${esc(reasonText(x.reason))}</li>`).join('')}</ul>`
+      : '<p>Waiting for the Mower to settle before starting.</p>';
+  }
+  if (view.status === 'paused' && view.failure) {
+    const f = view.failure;
+    body += `<p class="warn">Run ${esc(f.n)} of ${esc(f.of)} (${esc(f.zone_name)}) failed: ${esc(reasonText(f.reason))}.</p>`;
+  } else if (view.status === 'paused' && view.paused_reason) {
+    body += `<p>Paused: ${esc(reasonText(view.paused_reason))}.</p>`;
+  }
+  if (view.pause_requested && view.status !== 'paused') body += '<p class="hint">Pausing after this Run.</p>';
+  const order = ['pause', 'stop_now', 'resume_run', 'end_run', 'retry', 'skip_plan', 'resume', 'abort', 'done_today'];
+  const btns = order.filter(has).map((ctl) => ctlButton(ctl)).join('');
+  return `<div class="now-status"><div class="state">${esc(STATUS_LABEL[view.status] || view.status)}</div>${body}
+    ${btns ? `<div class="btns">${btns}</div>` : ''}</div>`;
+}
+
+// Position (among the pending Runs) a ↑/↓ press moves the Run to.
+function movePosition(rows, runId, dir) {
+  const i = rows.findIndex((r) => r.run_id === runId);
+  return dir === 'up' ? i - 1 : i + 1;
+}
+
+function upNextHtml(view, lengthUnit, selectedRunId) {
+  const rows = (view.up_next || []).map((r) => `<li data-run="${esc(r.run_id)}" class="run${r.run_id === selectedRunId ? ' selected' : ''}">
+      <span class="what"><strong>${esc(r.zone_name)}</strong>
+        <small>Run ${esc(r.n)} of ${esc(r.of)} · ${fmtHeight(r.height_mm, lengthUnit)} · ${fmtDeg(r.angle_deg)}</small></span>
+      <span class="run-row"><button data-act="move-up" data-run="${esc(r.run_id)}" aria-label="Move earlier"${r.can_up ? '' : ' disabled'}>↑</button>
+      <button data-act="move-down" data-run="${esc(r.run_id)}" aria-label="Move later"${r.can_down ? '' : ' disabled'}>↓</button>
+      <button data-act="run-menu" data-run="${esc(r.run_id)}" aria-label="Edit or delete">⋯</button></span></li>`).join('');
+  return `<ul class="runs">${rows || '<li class="empty">No Runs coming up.</li>'}</ul>
+    <p><button data-act="add-plan">+ Plan</button></p>`;
+}
+
+// Bottom sheet for one pending Run. `state` carries { warnings, error } from the
+// last save; values are shown and entered in HA units.
+function runSheetHtml(run, lengthUnit, state) {
+  const h = lengthUnit === 'mi' ? Math.round((run.height_mm / 25.4) * 100) / 100 : num(run.height_mm);
+  const st = state || {};
+  return `<div class="sheet" role="dialog" aria-label="Edit Run" data-run="${esc(run.run_id)}">
+    <h3>${esc(run.zone_name)}, Run ${esc(run.n)} of ${esc(run.of)}</h3>
+    <label>Height (${lengthUnit === 'mi' ? 'in' : 'mm'}) <input id="run-height" type="number" step="any" value="${h}"></label>
+    <label>Angle (°) <input id="run-angle" type="number" step="any" value="${num(run.angle_deg)}"></label>
+    ${(st.warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join('')}
+    ${st.error ? `<p class="warn" id="run-error">${esc(st.error)}</p>` : ''}
+    <div class="btns"><button data-act="save-run">Save</button>
+    <button data-act="delete-run" class="danger">Delete Run</button>
+    <button data-act="close-sheet">Close</button></div></div>`;
+}
+
+// edit_run fields from the sheet's raw inputs, or { error }.
+function runEditPayload(d, lengthUnit) {
+  const height = d.height === '' || d.height == null ? NaN : Number(d.height);
+  const angle = d.angle === '' || d.angle == null ? NaN : Number(d.angle);
+  if (!Number.isFinite(height) || height <= 0) return { error: 'Enter a height above zero.' };
+  if (!Number.isFinite(angle)) return { error: 'Enter an angle in degrees.' };
+  const mm = lengthUnit === 'mi' ? height * 25.4 : height;
+  return { payload: { height_mm: Math.round(mm * 10) / 10, angle_deg: angle } };
+}
+
+function checkPillsHtml(checks) {
+  if (!checks || !checks.length) return '<p class="hint">No Checks enabled.</p>';
+  return `<div class="pills">${checks.map((c) => `<span class="pill ${esc(c.state)}" title="${esc(c.state)}">${esc(c.name)}</span>`).join('')}</div>`;
+}
+
+function promptCardsHtml(prompts) {
+  return (prompts || []).map((p) => `<div class="prompt-card" data-prompt-card="${esc(p.prompt_id)}">
+      <h3>${esc(p.title)}</h3>
+      ${String(p.body || '').split('\n').filter(Boolean).map((l) => `<p>${esc(l)}</p>`).join('')}
+      <div class="btns">${(p.actions || []).map((a) => `<button data-prompt="${esc(p.prompt_id)}" data-action="${esc(a)}">${esc(actionLabel(a))}</button>`).join('')}</div></div>`).join('');
+}
+
 
 class MowingDirectorPanel extends HTMLElement {
   constructor() {
