@@ -338,6 +338,15 @@
     "prompt_headline_is_raining": {
       "message": "Is it raining?"
     },
+    "prompt_headline_gate": {
+      "message": "Gate closed"
+    },
+    "prompt_headline_gate_close": {
+      "message": "Through, close {gate}"
+    },
+    "prompt_gate": {
+      "message": "Gate: {gate}"
+    },
     "anomaly_not_active": {
       "message": "That Anomaly is not active."
     },

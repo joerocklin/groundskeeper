@@ -24,9 +24,10 @@ TYPE_BATTERY = "battery"
 TYPE_WORK_HOURS = "work_hours"
 TYPE_CUSTOM = "custom"
 TYPE_WET_GRASS = "wet_grass"
+TYPE_GATE_OPEN = "gate_open"
 TYPES = (
     TYPE_MOWER_READY, TYPE_ZONE_READY, TYPE_BATTERY, TYPE_WORK_HOURS, TYPE_WET_GRASS,
-    TYPE_CUSTOM,
+    TYPE_GATE_OPEN, TYPE_CUSTOM,
 )
 ALWAYS_ON = (TYPE_MOWER_READY, TYPE_ZONE_READY)  # spec §9.1: cannot be disabled
 
@@ -76,6 +77,9 @@ def default_check_records() -> list[dict[str, Any]]:
                     "morning_offset_s": DEFAULT_MORNING_OFFSET_S,
                     "precip_pct": DEFAULT_PRECIP_PCT},
          "timeout_s": WET_TIMEOUT_S, "policy": POLICY_NOTIFY},
+        # No default timeout: the Gate Prompt already tells the user (spec §9.2).
+        {"id": TYPE_GATE_OPEN, "type": TYPE_GATE_OPEN, "name": "Gate open",
+         "enabled": True, "config": {}, "timeout_s": None, "policy": POLICY_NOTIFY},
     ]
 
 
@@ -124,6 +128,8 @@ def validate_record(rec: Mapping[str, Any]) -> None:
         pct = cfg.get("precip_pct", DEFAULT_PRECIP_PCT)
         if not isinstance(pct, (int, float)) or not 0 <= pct <= 100:
             raise ValueError("Precipitation probability must be 0 to 100 %")
+    elif rec["type"] == TYPE_GATE_OPEN:
+        pass  # only the timeout and policy above can be set
     elif rec["type"] == TYPE_CUSTOM:
         cfg = rec["config"]
         if cfg.get("mode") == MODE_ENTITY:

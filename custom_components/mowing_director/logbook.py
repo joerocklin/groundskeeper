@@ -43,6 +43,12 @@ def describe(data: dict[str, Any]) -> str:
             return f"Prompt reminder: {data.get('kind')}"
         case "check_timeout":
             return f"Check {data.get('name')} timed out ({data.get('policy')})"
+        case "gate_crossing_expected":
+            return f"Crossing expected through {data.get('gate_name')} for {zone}"
+        case "gate_crossing_ended":
+            return f"Crossed {data.get('gate_name')} into {zone}"
+        case "gate_open_action_failed":
+            return f"Opening {data.get('gate_name')} did not work; notifying instead"
         case "height_unverified":
             return f"Blade height on {zone} could not be verified"
         case _:
