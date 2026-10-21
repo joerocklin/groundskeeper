@@ -61,6 +61,34 @@ class NativeScheduleFlow(RepairsFlow):
         return self.async_abort(reason="ignored")
 
 
+class StoreSafeIdleFlow(RepairsFlow):
+    """Safe idle: the only ways out are Start fresh here or Restore export."""
+
+    def __init__(self, entry_id: str) -> None:
+        """Remember which Mower the issue belongs to."""
+        self._entry_id = entry_id
+
+    async def async_step_init(self, user_input=None) -> FlowResult:
+        """Confirm, then wipe the Store and reload the Mower."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="init", description_placeholders=self._placeholders()
+            )
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        if entry is not None:
+            await entry.runtime_data.async_start_fresh()
+            self.hass.config_entries.async_schedule_reload(self._entry_id)
+        return self.async_create_entry(data={})
+
+    def _placeholders(self) -> dict[str, str]:
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        store = entry.runtime_data if entry else None
+        return {
+            "mower": entry.title if entry else "",
+            "reason": getattr(store, "safe_idle", "") or "",
+        }
+
+
 async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict | None
 ) -> RepairsFlow:
@@ -69,4 +97,6 @@ async def async_create_fix_flow(
         return MissingZonesFlow(data["entry_id"])
     if issue_id.startswith("native_schedule_") and data:
         return NativeScheduleFlow(data["entry_id"])
+    if issue_id.startswith("store_safe_idle_") and data:
+        return StoreSafeIdleFlow(data["entry_id"])
     raise ValueError(f"unknown issue {issue_id}")

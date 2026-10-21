@@ -93,6 +93,17 @@
     "store_unusable": {
       "title": "Saved state could not be read",
       "description": "The saved Schedule and Run state for {mower} could not be read, so the Schedule was reset to idle and empty. Mowing Director did not command the Mower or adopt any job it is running. Zones and settings are kept; add your Plans again."
+    },
+    "store_safe_idle": {
+      "title": "Saved data could not be used",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Start fresh?",
+            "description": "The saved data for {mower} is unusable ({reason}), so Mowing Director is idle: it will not command the Mower or change the saved file. Starting fresh erases the saved Zones, Plans and settings for this Mower and begins again. Restore an export instead if you have one."
+          }
+        }
+      }
     }
   },
   "exceptions": {
@@ -338,6 +349,9 @@
     },
     "prompt_anomaly_run_too_long": {
       "message": "The Run has been mowing for {elapsed_minutes} min; this Zone usually takes about {expected_minutes} min."
+    },
+    "store_safe_idle": {
+      "message": "The saved data for this Mower is unusable, so Mowing Director is idle. Open Repairs to start fresh or restore an export."
     }
   },
   "entity": {
