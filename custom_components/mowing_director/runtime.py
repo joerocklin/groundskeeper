@@ -162,6 +162,12 @@ class Director:
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
             start_window=window,
             stall_window=timedelta(seconds=cfg.get("stall_window_s", 3600)),
+            height_verify_window=timedelta(seconds=cfg.get("height_verify_window_s", 600)),
+            height_readback_resolution_mm=(
+                self.adapter.limits.height_readback_resolution_mm
+                if self.adapter.limits.has_height_readback
+                else None
+            ),
             entry_id=self.entry.entry_id,
         )
 

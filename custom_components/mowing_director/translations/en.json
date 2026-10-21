@@ -149,6 +149,9 @@
     "prompt_reason_stopped_off_dock": {
       "message": "The Mower stopped away from its dock."
     },
+    "prompt_reason_height_not_reached": {
+      "message": "The blade did not reach the commanded height."
+    },
     "prompt_reason_stalled": {
       "message": "The Mower stopped making progress."
     },
