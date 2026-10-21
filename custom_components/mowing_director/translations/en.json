@@ -122,6 +122,9 @@
     "nothing_to_cancel": {
       "message": "The Schedule is already idle and empty."
     },
+    "no_failure_to_answer": {
+      "message": "No failed Run is waiting for a decision."
+    },
     "nothing_to_pause": {
       "message": "The Schedule is not waiting or running, so there is nothing to pause."
     },
@@ -133,12 +136,6 @@
     },
     "failure_needs_answer": {
       "message": "A Run failed. Answer with Retry, Skip Plan or Cancel instead."
-    },
-    "no_failed_run": {
-      "message": "There is no failed Run to retry."
-    },
-    "no_plan_to_skip": {
-      "message": "There is no failed Run or waiting Plan to skip."
     }
   },
   "entity": {
@@ -245,6 +242,26 @@
         }
       }
     },
+    "retry_run": {
+      "name": "Retry Run",
+      "description": "Answer a failed Run with Retry: it returns to the head of the Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "skip_plan": {
+      "name": "Skip Plan",
+      "description": "Answer a failed Run with Skip Plan: the Plan's remaining Runs are skipped.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
     "pause": {
       "name": "Pause",
       "description": "Pause softly: the Schedule pauses when the current Run ends, or at once if waiting. Never commands the Mower.",
@@ -268,26 +285,6 @@
     "resume": {
       "name": "Resume",
       "description": "Resume a paused Schedule.",
-      "fields": {
-        "config_entry_id": {
-          "name": "Mower",
-          "description": "Which Mower; defaults to the only loaded one."
-        }
-      }
-    },
-    "retry_run": {
-      "name": "Retry Run",
-      "description": "Answer a failure: put the failed Run back at the head.",
-      "fields": {
-        "config_entry_id": {
-          "name": "Mower",
-          "description": "Which Mower; defaults to the only loaded one."
-        }
-      }
-    },
-    "skip_plan": {
-      "name": "Skip Plan",
-      "description": "Answer a failure (or a Gate Prompt): skip the rest of the Plan.",
       "fields": {
         "config_entry_id": {
           "name": "Mower",

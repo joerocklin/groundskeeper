@@ -25,7 +25,9 @@ from custom_components.mowing_director.core import (
     CommandOutcome,
     Env,
     PlanStatus,
+    RetryRun,
     SignalReceived,
+    SkipPlan,
     SnapshotReceived,
     StartRunEffect,
     StartSchedule,
@@ -353,7 +355,7 @@ from custom_components.mowing_director.core import (  # noqa: E402
 )
 
 
-def failed_state(n=2, *, pause_requested=False):
+def paused_failed_state(n=2, *, pause_requested=False):
     """Schedule `paused` after the head Run failed ("did not start")."""
     state = starting_state(n)
     if pause_requested:
@@ -479,7 +481,7 @@ def test_resume_after_stop_now_restarts_the_stopped_run():
 
 
 def test_resume_is_refused_while_a_failed_run_awaits_an_answer():
-    state = failed_state()
+    state = paused_failed_state()
     after, fx = step(state, ResumeSchedule(at(500)))
     assert after == state and fx == []
 
@@ -492,7 +494,7 @@ def test_resume_when_not_paused_is_a_no_op(make):
 
 
 def test_retry_puts_failed_run_back_at_head_and_schedule_waiting():
-    state = failed_state()
+    state = paused_failed_state()
     state, fx = step(state, RetryRun(at(500)))
     assert run_status(state) == ["pending", "pending"]
     assert state["state"]["runs"][0]["id"] == "p1-r1"
@@ -501,7 +503,7 @@ def test_retry_puts_failed_run_back_at_head_and_schedule_waiting():
 
 
 def test_retry_leaves_schedule_paused_when_pause_requested():
-    state = failed_state(pause_requested=True)
+    state = paused_failed_state(pause_requested=True)
     assert sched(state)["pause_requested"] is True
     state, _ = step(state, RetryRun(at(500)))
     assert run_status(state) == ["pending", "pending"]
@@ -511,7 +513,7 @@ def test_retry_leaves_schedule_paused_when_pause_requested():
 
 
 def test_skip_plan_skips_other_runs_and_goes_waiting_when_runs_left():
-    state = failed_state(n=2)
+    state = paused_failed_state(n=2)
     plan, runs = make_plan("p2", n=1)
     state, _ = step(state, AddPlan(at(450), plan, runs))
     state, fx = step(state, SkipPlan(at(500)))
@@ -522,14 +524,14 @@ def test_skip_plan_skips_other_runs_and_goes_waiting_when_runs_left():
 
 
 def test_skip_plan_goes_idle_when_nothing_left():
-    state = failed_state(n=2)
+    state = paused_failed_state(n=2)
     state, _ = step(state, SkipPlan(at(500)))
     assert sched(state)["status"] == "idle"
     assert state["state"]["runs"] == []
 
 
 def test_skip_plan_leaves_schedule_paused_when_pause_requested():
-    state = failed_state(n=2, pause_requested=True)
+    state = paused_failed_state(n=2, pause_requested=True)
     plan, runs = make_plan("p2", n=1)
     state, _ = step(state, AddPlan(at(450), plan, runs))
     state, _ = step(state, SkipPlan(at(500)))
@@ -537,15 +539,107 @@ def test_skip_plan_leaves_schedule_paused_when_pause_requested():
     assert [r["id"] for r in state["state"]["runs"]] == ["p2-r1"]
 
 
-def test_skip_plan_while_waiting_skips_head_plan_gate_prompt():
-    state = waiting_state(n=2)
-    state, _ = step(state, SkipPlan(at(10)))
-    assert sched(state)["status"] == "idle"
-    assert [r["status"] for r in state["history"]["runs"]] == ["skipped", "skipped"]
-
-
 def test_retry_and_skip_without_failed_run_are_no_ops():
     state = mowing_state()
     for event in (RetryRun(at(900)), SkipPlan(at(900))):
         after, fx = step(state, event)
         assert after == state and fx == []
+def failed_state(n=1, zone="z1"):
+    """Schedule paused after the head Run failed `did_not_start` (refused)."""
+    state = starting_state(n) if zone == "z1" else waiting_state(n, zone)
+    if zone == "z1":
+        state, _ = step(state, CommandOutcome(at(62), "p1-r1", "start_run", Refused("no")))
+    return state
+
+
+def test_any_run_failure_pauses_schedule_and_stores_reason():
+    state = failed_state()
+    assert state["state"]["schedule"]["status"] == "paused"
+    assert state["state"]["schedule"]["reason"] == "did_not_start"
+    assert state["state"]["runs"][0]["reason"] == "did_not_start"
+
+
+def test_retry_run_returns_failed_run_to_pending_head_and_waits():
+    state = failed_state(n=2)
+    state, fx = step(state, RetryRun(at(100)))
+    assert run_status(state) == ["pending", "pending"]
+    assert state["state"]["runs"][0]["id"] == "p1-r1"
+    assert state["state"]["runs"][0]["reason"] is None
+    assert state["state"]["schedule"]["status"] == "waiting"
+    assert not [e for e in fx if isinstance(e, (StartRunEffect, AbortRunEffect))]
+    state, fx = step(state, SnapshotReceived(at(101), DOCKED))
+    state, fx = step(state, TimerFired(at(170)))
+    assert run_status(state)[0] == "starting"
+
+
+def test_retry_run_keeps_schedule_paused_when_pause_requested():
+    state = failed_state()
+    state["state"]["schedule"]["pause_requested"] = True
+    state, _ = step(state, RetryRun(at(100)))
+    assert run_status(state) == ["pending"]
+    assert state["state"]["schedule"]["status"] == "paused"
+
+
+def test_retry_on_still_missing_zone_fails_again_once():
+    state = waiting_state(zone="zx")
+    assert run_status(state) == ["failed"]
+    state, fx = step(state, RetryRun(at(100)))
+    assert run_status(state) == ["failed"]
+    assert state["state"]["runs"][0]["reason"] == "zone_missing"
+    assert state["state"]["schedule"]["status"] == "paused"
+    assert not [e for e in fx if isinstance(e, (StartRunEffect, AbortRunEffect))]
+    assert len(events(fx, "run_status_changed")) == 2  # failed -> pending -> failed
+
+
+def test_retry_without_a_failed_run_changes_nothing():
+    state = waiting_state()
+    after, fx = step(state, RetryRun(at(100)))
+    assert after == state and not fx
+
+
+def test_skip_plan_skips_pending_runs_keeps_failed_and_goes_idle_if_empty():
+    state = failed_state(n=3)
+    state, fx = step(state, SkipPlan(at(100)))
+    s = state["state"]
+    assert s["runs"] == [] and s["schedule"]["status"] == "idle"
+    assert [(r["id"], r["status"]) for r in state["history"]["runs"]] == [
+        ("p1-r1", "failed"), ("p1-r2", "skipped"), ("p1-r3", "skipped")]
+    assert plan_status(state, "p1") is PlanStatus.ENDED_EARLY
+    assert not [e for e in fx if isinstance(e, (StartRunEffect, AbortRunEffect))]
+
+
+def test_skip_plan_leaves_other_plans_and_schedule_waiting():
+    state = initial_core_state()
+    for pid in ("p1", "p2"):
+        plan, runs = make_plan(plan_id=pid, n=2)
+        state, _ = step(state, AddPlan(at(0), plan, runs, start=pid == "p1"))
+    state, _ = step(state, SnapshotReceived(at(0), DOCKED))
+    state, _ = step(state, TimerFired(at(61)))
+    state, _ = step(state, CommandOutcome(at(62), "p1-r1", "start_run", Refused("no")))
+    state, _ = step(state, SkipPlan(at(100)))
+    assert [r["id"] for r in state["state"]["runs"]] == ["p2-r1", "p2-r2"]
+    assert state["state"]["schedule"]["status"] == "waiting"
+
+
+def test_skip_plan_without_a_failed_run_changes_nothing():
+    state = waiting_state()
+    after, fx = step(state, SkipPlan(at(100)))
+    assert after == state and not fx
+
+
+def test_cancel_from_paused_cancels_everything():
+    state = failed_state(n=2)
+    state, fx = step(state, CancelSchedule(at(100)))
+    s = state["state"]
+    assert s["runs"] == [] and s["schedule"]["status"] == "idle"
+    assert [r["status"] for r in state["history"]["runs"]] == ["failed", "cancelled"]
+    assert not [e for e in fx if isinstance(e, AbortRunEffect)]
+
+
+def test_unanswered_failure_stays_paused_no_clock_decides():
+    state = failed_state()
+    for t in (500, 5000, 86400 * 7):
+        state, fx = step(state, TimerFired(at(t)))
+        state, _ = step(state, SnapshotReceived(at(t), DOCKED))
+        assert state["state"]["schedule"]["status"] == "paused"
+        assert run_status(state) == ["failed"]

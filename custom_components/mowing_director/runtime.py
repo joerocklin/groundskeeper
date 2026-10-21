@@ -46,6 +46,8 @@ from .core import (
     SkipPlan,
     StopNow,
     CommandOutcome,
+    RetryRun,
+    SkipPlan,
     CoreInput,
     EmitEvent,
     Env,
@@ -310,7 +312,7 @@ class Director:
     async def async_resume(self) -> None:
         await self.dispatch(ResumeSchedule)
 
-    async def async_retry(self) -> None:
+    async def async_retry_run(self) -> None:
         await self.dispatch(RetryRun)
 
     async def async_skip_plan(self) -> None:

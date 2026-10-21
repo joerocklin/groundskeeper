@@ -73,13 +73,11 @@ async def async_cancel(director: Director) -> None:
 
 async def async_retry_run(director: Director) -> None:
     if _status(director) != ScheduleStatus.PAUSED or not _has_failed_run(director):
-        raise fail("no_failed_run")
-    await director.async_retry()
+        raise fail("no_failure_to_answer")
+    await director.async_retry_run()
 
 
 async def async_skip_plan(director: Director) -> None:
-    waiting_on_head = _status(director) == ScheduleStatus.WAITING and next_run(director.state)
-    failed = _status(director) == ScheduleStatus.PAUSED and _has_failed_run(director)
-    if not (waiting_on_head or failed):
-        raise fail("no_plan_to_skip")
+    if _status(director) != ScheduleStatus.PAUSED or not _has_failed_run(director):
+        raise fail("no_failure_to_answer")
     await director.async_skip_plan()
