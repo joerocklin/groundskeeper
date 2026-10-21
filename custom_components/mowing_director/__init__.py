@@ -18,6 +18,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
+from .housekeeping import async_detach_housekeeping
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
 from .store import MowerStore, empty_store_data
@@ -89,6 +90,7 @@ async def async_unload_entry(
 ) -> bool:
     """Unload a Mower. Never commands the Mower; state is already persisted."""
     async_detach_zone_sync(hass, entry.entry_id)
+    async_detach_housekeeping(hass, entry.entry_id)
     others = [
         e
         for e in hass.config_entries.async_loaded_entries(DOMAIN)

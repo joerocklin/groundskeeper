@@ -18,6 +18,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 
 from .const import ADAPTER_DOMAINS, DOMAIN
+from .housekeeping import async_run_active
 
 
 class MowingDirectorConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -128,4 +129,43 @@ class MowingDirectorConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="confirm",
             description_placeholders={"mower": self._mower_name},
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Rebind this Mower to another eligible device (spec §4.8).
+
+        Refused while a Run is `starting`/`mowing`/`on hold`. The entry and
+        its Store are kept; Zones reconcile by name on the next sync, so
+        Plans survive.
+        """
+        entry = self._get_reconfigure_entry()
+        if async_run_active(self.hass, entry.entry_id):
+            return self.async_abort(reason="run_active")
+
+        taken = {
+            other.data.get(CONF_DEVICE)
+            for other in self.hass.config_entries.async_entries(DOMAIN)
+        }
+        eligible = [d for d in self._mower_devices() if d.id not in taken]
+        if not eligible:
+            return self.async_abort(reason="no_supported_mower")
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="reconfigure", data_schema=self._picker_schema(eligible)
+            )
+
+        device_id = user_input[CONF_DEVICE]
+        if device_id not in {d.id for d in eligible}:
+            return self.async_show_form(
+                step_id="reconfigure",
+                data_schema=self._picker_schema(eligible),
+                errors={CONF_DEVICE: "no_supported_mower"},
+            )
+        return self.async_update_reload_and_abort(
+            entry,
+            unique_id=device_id,
+            data_updates={CONF_DEVICE: device_id},
         )

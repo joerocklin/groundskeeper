@@ -11,12 +11,22 @@
       },
       "confirm": {
         "description": "Add {mower} to Mowing Director. Debug recording is on by default and stores Mower telemetry locally; review it in the Mowing Director panel."
+      },
+      "reconfigure": {
+        "data": {
+          "device": "Mower"
+        },
+        "data_description": {
+          "device": "Pick the Mower to bind to. Zones are matched by name, so your Plans are kept."
+        }
       }
     },
     "abort": {
       "already_configured": "Device is already configured",
       "already_in_progress": "This is already being configured. Finish the existing configuration before starting again.",
-      "no_supported_mower": "No Mammotion Mower found. Add the Mammotion integration and make sure the Mower is online first."
+      "no_supported_mower": "No Mammotion Mower found. Add the Mammotion integration and make sure the Mower is online first.",
+      "run_active": "A Run is in progress. Finish or abort it before changing the Mower.",
+      "reconfigure_successful": "The Mower was rebound."
     },
     "error": {
       "no_supported_mower": "That device no longer has a usable Mower entity."
@@ -44,6 +54,41 @@
         }
       },
       "description": "These Zones no longer match anything on the Mower's map: {zones}."
+    },
+    "native_schedule": {
+      "title": "The Mower's own schedule is enabled",
+      "description": "These tasks in the Mower's own schedule are enabled and may start mowing outside the director's control: {tasks}.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "The Mower's own schedule is enabled",
+            "description": "These native tasks are enabled: {tasks}.",
+            "menu_options": {
+              "disable": "Disable these tasks",
+              "ignore": "Ignore"
+            }
+          },
+          "disable": {
+            "title": "Disable the Mower's own tasks?",
+            "description": "This turns off these tasks on the Mower itself: {tasks}. Confirm to continue."
+          }
+        },
+        "abort": {
+          "ignored": "Nothing changed. Dismiss the issue to hide it."
+        }
+      }
+    },
+    "conflicting_automations": {
+      "title": "Automations also use the Mower",
+      "description": "{count} automation(s) reference the Mower's device or entities and may act on it. Mowing Director never edits automations. Dismiss this if that is intended; it returns only if the set changes."
+    },
+    "device_not_found": {
+      "title": "The Mower's device was not found",
+      "description": "The device for {mower} is gone, for example after the Mammotion entry was re-added. Open Mowing Director in Settings and choose Reconfigure to rebind it. Your Zones, Plans and settings are kept."
+    },
+    "source_too_old": {
+      "title": "Mammotion integration is too old",
+      "description": "Mammotion {version} is older than the supported {minimum}. Mowing Director may misbehave; update the Mammotion integration."
     }
   },
   "exceptions": {
