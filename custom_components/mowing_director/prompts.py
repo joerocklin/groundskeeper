@@ -61,6 +61,17 @@ def render_content(
                 n=ctx["n"], m=ctx["m"], height=_mm(ctx.get("height_mm"))
             )
         )
+    if ctx.get("detector"):
+        template = strings.get(f"prompt_anomaly_{ctx['detector']}")
+        if template:
+            lines.append(
+                template.format(
+                    battery=_mm(ctx.get("battery")),
+                    flat_minutes=ctx.get("flat_minutes"),
+                    elapsed_minutes=round(ctx.get("elapsed_minutes", 0)),
+                    expected_minutes=round(ctx.get("expected_minutes", 0)),
+                )
+            )
     if ctx.get("reason"):
         template = strings.get(f"prompt_reason_{ctx['reason']}")
         lines.append(

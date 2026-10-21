@@ -335,6 +335,18 @@
     },
     "prompt_gate": {
       "message": "Gate: {gate}"
+    },
+    "anomaly_not_active": {
+      "message": "That Anomaly is not active."
+    },
+    "prompt_headline_anomaly": {
+      "message": "Anomaly detected"
+    },
+    "prompt_anomaly_charge_not_rising": {
+      "message": "The battery has been at {battery} % for {flat_minutes} min while docked."
+    },
+    "prompt_anomaly_run_too_long": {
+      "message": "The Run has been mowing for {elapsed_minutes} min; this Zone usually takes about {expected_minutes} min."
     }
   },
   "entity": {
@@ -388,6 +400,11 @@
       "cancel": {
         "name": "Cancel"
       }
+    },
+    "binary_sensor": {
+      "anomaly": {
+        "name": "Anomaly"
+      }
     }
   },
   "selector": {
@@ -395,6 +412,12 @@
       "options": {
         "end": "End of the Schedule",
         "front": "Front of the pending Runs"
+      }
+    },
+    "anomaly_detector": {
+      "options": {
+        "charge_not_rising": "Charge not rising while docked",
+        "run_too_long": "Run far longer than the Zone's history"
       }
     }
   },
@@ -584,6 +607,20 @@
         "config_entry_id": {
           "name": "Mower",
           "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "dismiss_anomaly": {
+      "name": "Dismiss Anomaly",
+      "description": "Dismiss an active Anomaly: it stays quiet until its condition clears and recurs.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        },
+        "detector": {
+          "name": "Detector",
+          "description": "The detector whose Anomaly to dismiss."
         }
       }
     }

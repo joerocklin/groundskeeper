@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
@@ -25,6 +28,7 @@ async def async_setup_entry(
     director = async_get_director(hass, entry.entry_id)
     if director is None:
         return
+    async_add_entities([AnomalySensor(director, entry)])
     known: dict[str, CheckSensor] = {}
 
     @callback
@@ -119,3 +123,40 @@ class GateCrossingSensor(GateEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         return self._director.gate_crossing_expected(self.gate_id)
+
+
+class AnomalySensor(BinarySensorEntity):
+    """On while any Anomaly is active (dismissed ones included); the active
+    list is an attribute (spec §11.6, §13.5)."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_translation_key = "anomaly"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, director: Director, entry: ConfigEntry) -> None:
+        self._director = director
+        self._attr_unique_id = f"{entry.entry_id}_anomaly"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)}, name=entry.title
+        )
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._director.async_add_listener(self._handle_change))
+
+    @callback
+    def _handle_change(self) -> None:
+        if self.hass is not None and self.platform is not None:
+            self.async_write_ha_state()
+
+    @property
+    def _active(self) -> list[dict]:
+        return self._director.state["anomalies"]["active"]
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._active)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"active": [dict(a) for a in self._active]}

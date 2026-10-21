@@ -66,6 +66,8 @@ from .core import (
     ChecksEdited,
     AddPlan,
     AnswerPrompt,
+    DETECTORS,
+    DismissAnomaly,
     DeleteRun,
     EditRun,
     MoveRun,
@@ -144,7 +146,13 @@ def _only_soft_changes(old: dict[str, Any], new: dict[str, Any]) -> bool:
     """True when only the snapshot summary and/or `learned` differ."""
     if old["history"] != new["history"]:
         return False
-    strip = lambda s: {k: v for k, v in s.items() if k != "snapshot"}  # noqa: E731
+    # The battery-last-rising tracker moves with every snapshot (spec §11.8).
+    def strip(state: dict[str, Any]) -> dict[str, Any]:
+        out = {k: v for k, v in state.items() if k != "snapshot"}
+        if "anomalies" in out:
+            out["anomalies"] = {k: v for k, v in out["anomalies"].items() if k != "battery"}
+        return out
+
     return strip(old["state"]) == strip(new["state"])
 
 
@@ -258,6 +266,7 @@ class Director:
                 else None
             ),
             entry_id=self.entry.entry_id,
+            anomaly_actions=dict(cfg.get("anomaly_actions", {})),
         )
 
     @callback
@@ -918,6 +927,28 @@ class Director:
 
     async def async_wet_grass_done_today(self) -> None:
         await self.dispatch(WetGrassDoneToday)
+
+    # -- Anomalies (spec §11) -----------------------------------------------------
+
+    def active_anomaly(self, detector: str) -> dict[str, Any] | None:
+        return next(
+            (a for a in self.state["anomalies"]["active"] if a["detector"] == detector),
+            None,
+        )
+
+    async def async_dismiss_anomaly(self, detector: str) -> None:
+        await self.dispatch(lambda now: DismissAnomaly(now, detector))
+
+    async def async_set_anomaly_action(self, detector: str, action: str) -> None:
+        """Per-Mower action for a detector; takes effect on the next evaluation."""
+        if detector not in DETECTORS:
+            raise ValueError(f"unknown detector {detector}")
+        if action not in ("off", "notify", "pause"):
+            raise ValueError("action must be off, notify or pause")
+        await self.async_edit_config(
+            lambda cfg: cfg.setdefault("anomaly_actions", {}).__setitem__(detector, action)
+        )
+        await self.dispatch(TimerFired)  # re-evaluate under the new action
 
     # -- Prompts (spec §12) -----------------------------------------------------
 
