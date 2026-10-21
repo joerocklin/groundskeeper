@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 
 type MowingDirectorConfigEntry = ConfigEntry[MowerStore]
 
-PLATFORMS = [Platform.BUTTON, Platform.SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 

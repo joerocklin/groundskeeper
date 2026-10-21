@@ -33,6 +33,14 @@ def _pn(hass):
     return persistent_notification._async_get_or_create_notifications(hass)
 
 
+@pytest.fixture(autouse=True)
+def _real_work_hours(monkeypatch):
+    """Reminders follow the real default window, not conftest's whole-day one."""
+    monkeypatch.setattr(
+        "custom_components.mowing_director.checks.DEFAULT_WINDOW", ("08:00", "00:00")
+    )
+
+
 PIXEL, IPHONE = "mobile_app_pixel_8", "mobile_app_iphone"
 
 
@@ -309,10 +317,14 @@ async def test_reminders_replace_by_tag_and_skip_the_night(
 
 
 async def test_first_notification_goes_out_at_any_hour(hass, director, phones, freezer) -> None:
+    from custom_components.mowing_director.core import RaisePrompt
+
     await hass.config.async_set_time_zone("UTC")
     freezer.move_to(datetime(2026, 10, 21, 3, 0, tzinfo=timezone.utc))
-    _, mower, _ = director
-    await fail_a_run(hass, mower, freezer)
+    entry, _, _ = director
+    d = async_get_director(hass, entry.entry_id)
+    await d.dispatch(lambda now: RaisePrompt(
+        now, "run_failed", None, ["retry", "skip_plan", "abort"], {"reason": "error"}))
     assert len(sent(phones[PIXEL])) == 1
 
 
@@ -350,3 +362,19 @@ async def test_delivery_failure_fires_an_event_and_does_not_retry(
     assert len(sent(good)) == 1  # the other phone still got it
     [prompt] = await list_prompts(hass, hass_ws_client, entry)  # panel card unaffected
     assert prompt["kind"] == "run_failed"
+
+
+async def test_check_timeout_event_becomes_a_check_wait_notice(
+    hass, director, phones, hass_ws_client
+) -> None:
+    entry, _, _ = director
+    d = async_get_director(hass, entry.entry_id)
+    await d.notifier.async_handle(
+        "check_timeout",
+        {"check_id": "wet_grass", "name": "Wet grass", "policy": "notify",
+         "reasons": ["rain_detected"]},
+    )
+    [note] = sent(phones[PIXEL])
+    assert note["title"] == "Example Mower: Check timed out"
+    assert note["message"] == "Wet grass is blocking the Schedule: rain_detected"
+    assert note["data"]["tag"] == f"mowdir_{entry.entry_id}_check_timeout_wet_grass"

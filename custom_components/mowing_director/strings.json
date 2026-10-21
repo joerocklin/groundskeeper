@@ -317,6 +317,12 @@
     },
     "prompt_open_panel": {
       "message": "Open Mowing Director"
+    },
+    "prompt_headline_check_timeout": {
+      "message": "Check timed out"
+    },
+    "prompt_check_waiting": {
+      "message": "{name} is blocking the Schedule: {reasons}"
     }
   },
   "entity": {
@@ -349,6 +355,9 @@
       },
       "pending_prompts": {
         "name": "Pending Prompts"
+      },
+      "waiting_on": {
+        "name": "Waiting on"
       }
     },
     "button": {

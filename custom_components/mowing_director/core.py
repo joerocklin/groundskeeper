@@ -28,13 +28,24 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta, timezone, tzinfo
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 from typing import Any
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.util import ulid as ulid_util
 
+from .checks import (
+    POLICY_PAUSE,
+    TYPE_BATTERY,
+    TYPE_CUSTOM,
+    TYPE_MOWER_READY,
+    TYPE_WORK_HOURS,
+    TYPE_ZONE_READY,
+    default_check_records,
+    work_hours_open,
+    work_window_start,
+)
 from .adapter import (
     AdapterSignal,
     CommandKind,
@@ -57,6 +68,9 @@ COMMAND_LOG_MAX = 20  # spec §14.6
 DURATION_SAMPLES_MAX = 20  # spec §14.6
 
 DEADLINE_STABILITY = "stability"
+DEADLINE_CHECK_TICK = "check_tick"  # spec §9.1: Checks re-evaluate every 60 s
+DEADLINE_CHECK_TIMEOUT = "check_timeout:"  # + Check id: one clock per blocking Check
+CHECK_TICK = timedelta(seconds=60)
 DEADLINE_START_WINDOW = "start_window"
 DEADLINE_DONE_STABLE = "done_stable"
 DEADLINE_STOPPED_STABLE = "stopped_stable"
@@ -83,8 +97,6 @@ RESTART_WINDOWS = (
 )
 PROMPT_REMINDER_AFTER = timedelta(hours=1)  # spec §12.4: first reminder at +1 h
 DEADLINE_PROMPT_REMINDER = "prompt_reminder"  # earliest due Prompt reminder
-DEFAULT_WORK_START = time(8, 0)  # spec §19: Work hours 08:00-00:00 daily
-DEFAULT_WORK_END = time(0, 0)  # 00:00 means midnight, the end of the day
 
 PROMPT_RUN_FAILED = "run_failed"  # spec §12.1: Retry / Skip Plan / Abort
 ACTION_RETRY = "retry"
@@ -325,6 +337,18 @@ class CommandOutcome:
 
 
 @dataclass(frozen=True)
+class ChecksEdited:
+    """Checks were edited (spec §9.1): `check_ids` are the edited or removed ones.
+
+    The caller has already changed `Env.checks`. Each listed Check's clock
+    restarts; the stability window restarts whatever was edited.
+    """
+
+    now: datetime
+    check_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TimerFired:
     """A deadline timer fired; the reducer re-evaluates every deadline."""
 
@@ -370,6 +394,7 @@ type CoreInput = (
     | SnapshotReceived
     | SignalReceived
     | CommandOutcome
+    | ChecksEdited
     | TimerFired
 )
 
@@ -462,12 +487,15 @@ class Env:
     height_verify_window: timedelta = DEFAULT_HEIGHT_VERIFY_WINDOW
     # Limits.height_readback_resolution_mm; None = no readback declared (§7.6.6)
     height_readback_resolution_mm: int | None = None
+    # Check records (checks.py); the two always-on built-ins unless configured
+    checks: tuple[Mapping[str, Any], ...] = field(
+        default_factory=lambda: tuple(default_check_records())
+    )
+    # Custom Check id -> reason it fails, None when it passes (resolved by the runtime)
+    custom_results: Mapping[str, str | None] = field(default_factory=dict)
+    tz: tzinfo = UTC  # local time for Work hours
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
-    # Work hours window for reminders (spec §12.4), in the HA time zone.
-    work_start: time = DEFAULT_WORK_START
-    work_end: time = DEFAULT_WORK_END
-    tz: tzinfo = timezone.utc
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +524,9 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("last_error_time", None)
     state.setdefault("blocking_error", None)
     state.setdefault("waiting_on", [])
+    state.setdefault("check_clocks", {})  # Check id -> {"since"} for this wait
+    state.setdefault("check_notified", [])  # Check ids notified in this wait
+    state.setdefault("battery_pending", False)  # Battery gates the first Run only
     state.setdefault("stall_movement", None)
     state.setdefault("battery_trend", None)
     state.setdefault("height_verify", None)
@@ -674,27 +705,50 @@ def evaluate_checks(
     zone: ZoneView,
     env: Env,
     blocking_error: Mapping[str, Any] | None,
+    *,
+    battery_pending: bool = False,
+    local_now: datetime | None = None,
 ) -> list[dict[str, str]]:
-    """Failing Checks as `[{"check", "reason"}]`; empty means every Check passes."""
+    """Failing Checks as `[{"check": id, "reason"}]`; empty means every Check passes.
+
+    Only enabled Checks count (the always-on built-ins ignore `enabled`).
+    """
     failing: list[dict[str, str]] = []
-
-    def fail(check: str, reason: str) -> None:
-        failing.append({"check": check, "reason": reason})
-
-    if not snapshot.available:
-        fail("mower_ready", "unavailable")
-    elif snapshot.activity is None:
-        fail("mower_ready", "unknown_state")
-    if snapshot.job_active:
-        fail("mower_ready", "job_active")
-    if blocking_error is not None:
-        fail("mower_ready", "new_error")
-    if snapshot.self_check is SelfCheckReason.DEVICE_NON_WORK_HOURS:
-        fail("mower_ready", "device_non_work_hours")
-    if snapshot.battery is None or snapshot.battery < env.min_start_battery_pct:
-        fail("mower_ready", "battery_low")
-    if zone.bearing is None:
-        fail("zone_ready", "bearing_unset")
+    for rec in env.checks:
+        check = rec["id"]
+        reasons: list[str] = []
+        match rec["type"]:
+            case "mower_ready":
+                if not snapshot.available:
+                    reasons.append("unavailable")
+                elif snapshot.activity is None:
+                    reasons.append("unknown_state")
+                if snapshot.job_active:
+                    reasons.append("job_active")
+                if blocking_error is not None:
+                    reasons.append("new_error")
+                if snapshot.self_check is SelfCheckReason.DEVICE_NON_WORK_HOURS:
+                    reasons.append("device_non_work_hours")
+                if snapshot.battery is None or snapshot.battery < env.min_start_battery_pct:
+                    reasons.append("battery_low")
+            case "zone_ready":
+                if zone.bearing is None:
+                    reasons.append("bearing_unset")
+            case "battery":
+                if rec["enabled"] and battery_pending:
+                    threshold = rec["config"].get("threshold_pct", 80)
+                    if snapshot.battery is None or snapshot.battery < threshold:
+                        reasons.append("below_threshold")
+            case "work_hours":
+                if rec["enabled"] and local_now is not None:
+                    if not work_hours_open(rec["config"], local_now):
+                        reasons.append("outside_work_hours")
+            case "custom":
+                if rec["enabled"]:
+                    reason = env.custom_results.get(check, "unavailable")
+                    if reason is not None:
+                        reasons.append(reason)
+        failing.extend({"check": check, "reason": reason} for reason in reasons)
     return failing
 
 
@@ -775,6 +829,8 @@ class _Machine:
             case TimerFired():
                 self._evaluate()
                 self._fire_due_reminders()
+            case ChecksEdited():
+                self._checks_edited(event)
             case Reconcile():
                 self._reconcile(event)
 
@@ -811,6 +867,12 @@ class _Machine:
         if before == ScheduleStatus.IDLE and status != ScheduleStatus.IDLE:
             sched["started_at"] = iso(self.now)  # anchors the completion summary
         if before != status.value:
+            self._clear_check_state()
+            if status != ScheduleStatus.WAITING:
+                self.s["waiting_on"] = []
+                self.s["battery_pending"] = False  # only the first wait is gated
+            elif before == ScheduleStatus.IDLE:
+                self.s["battery_pending"] = True  # first Run after leaving idle
             self._emit(
                 "schedule_status_changed",
                 **{"from": before, "to": status.value, "reason": reason},
@@ -1160,25 +1222,29 @@ class _Machine:
         verify["ignore_until"] = None
         self._arm(DEADLINE_HEIGHT_VERIFY, self.now + self.env.height_verify_window)
 
+    def _work_hours_config(self) -> Mapping[str, Any]:
+        for rec in self.env.checks:
+            if rec["type"] == TYPE_WORK_HOURS:
+                return rec["config"]
+        return {}
+
     def _in_work_hours(self, moment: datetime) -> bool:
-        env = self.env
-        at = moment.astimezone(env.tz).time()
-        if env.work_end == time(0, 0):
-            return at >= env.work_start
-        if env.work_start < env.work_end:
-            return env.work_start <= at < env.work_end
-        return at >= env.work_start or at < env.work_end
+        """Inside the Work hours window (enabled or not; spec §12.4)."""
+        return work_hours_open(self._work_hours_config(), moment.astimezone(self.env.tz))
 
     def _next_work_open(self, moment: datetime) -> datetime:
         """The next moment the Work hours window opens, strictly after `moment`."""
         local = moment.astimezone(self.env.tz)
-        day = local.date()
-        for _ in range(3):
-            opens = datetime.combine(day, self.env.work_start, tzinfo=self.env.tz)
+        config = self._work_hours_config()
+        for offset in range(8):
+            day = local.date() + timedelta(days=offset)
+            start = work_window_start(config, day.weekday())
+            opens = datetime.combine(
+                day, time(start // 60 % 24, start % 60), tzinfo=self.env.tz
+            )
             if opens > local:
-                return opens.astimezone(timezone.utc)
-            day += timedelta(days=1)
-        raise AssertionError("unreachable")  # pragma: no cover
+                return opens.astimezone(UTC)
+        return (local + timedelta(days=1)).astimezone(UTC)  # no usable window
 
     def _fire_due_reminders(self) -> None:
         """Send each due reminder once; overnight ones wait for the morning.
@@ -1244,8 +1310,18 @@ class _Machine:
             self._cancel_deadline(DEADLINE_STABILITY)
             self._fail_run(run, "zone_missing", abort=False)
             return
-        failing = evaluate_checks(snapshot, zone, self.env, self.s["blocking_error"])
+        failing = evaluate_checks(
+            snapshot,
+            zone,
+            self.env,
+            self.s["blocking_error"],
+            battery_pending=self.s["battery_pending"],
+            local_now=self.now.astimezone(self.env.tz),
+        )
         self.s["waiting_on"] = failing
+        if not self._run_check_clocks(failing):
+            return  # a Check timed out with policy `pause`
+        self._tick()
         if failing:
             self._cancel_deadline(DEADLINE_STABILITY)
             return
@@ -1254,10 +1330,88 @@ class _Machine:
         elif self._deadline_due(DEADLINE_STABILITY):
             self._start_run(run, zone)
 
+    def _tick(self) -> None:
+        """The 60 s Check tick: armed when absent or due, never slid by events."""
+        if DEADLINE_CHECK_TICK not in self.s["deadlines"] or self._deadline_due(
+            DEADLINE_CHECK_TICK
+        ):
+            self._arm(DEADLINE_CHECK_TICK, self.now + CHECK_TICK)
+
+    def _run_check_clocks(self, failing: list[dict[str, str]]) -> bool:
+        """Start, drop and expire per-Check timeout clocks (spec §9.1).
+
+        Returns False when a `pause` policy moved the Schedule to `paused`.
+        """
+        records = {rec["id"]: rec for rec in self.env.checks}
+        clocks = self.s["check_clocks"]
+        reasons: dict[str, list[str]] = {}
+        for item in failing:
+            reasons.setdefault(item["check"], []).append(item["reason"])
+        for check in list(clocks):
+            if check not in reasons:  # passing, disabled or removed: clock stops
+                del clocks[check]
+                self._cancel_deadline(DEADLINE_CHECK_TIMEOUT + check)
+        self.s["check_notified"] = [c for c in self.s["check_notified"] if c in records]
+        for check, why in reasons.items():
+            rec = records[check]
+            if check not in clocks:
+                clocks[check] = {"since": iso(self.now)}
+            if check in self.s["check_notified"]:
+                continue
+            timeout = rec.get("timeout_s")
+            if rec["type"] == TYPE_MOWER_READY and "new_error" in why:
+                timeout = 0  # an error notifies immediately
+            if timeout is None:
+                continue
+            key = DEADLINE_CHECK_TIMEOUT + check
+            due = parse(clocks[check]["since"]) + timedelta(seconds=timeout)
+            if due > self.now:
+                if self.s["deadlines"].get(key) != iso(due):
+                    self._arm(key, due)
+                continue
+            self._cancel_deadline(key)
+            self.s["check_notified"].append(check)
+            policy = rec["policy"] if rec["type"] != TYPE_MOWER_READY else "notify"
+            self._emit(
+                "check_timeout",
+                check_id=check,
+                name=rec["name"],
+                policy=policy,
+                reasons=list(why),
+            )
+            if policy == POLICY_PAUSE:
+                self._cancel_deadline(DEADLINE_STABILITY)
+                self._set_schedule(
+                    ScheduleStatus.PAUSED, f"Check {rec['name']} timed out"
+                )
+                return False
+        return True
+
+    def _checks_edited(self, event: ChecksEdited) -> None:
+        """Edits while `waiting` apply at once (spec §9.1)."""
+        if self.status != ScheduleStatus.WAITING:
+            return
+        for check in event.check_ids:
+            self.s["check_clocks"].pop(check, None)
+            self._cancel_deadline(DEADLINE_CHECK_TIMEOUT + check)
+            if check in self.s["check_notified"]:
+                self.s["check_notified"].remove(check)
+        self._cancel_deadline(DEADLINE_STABILITY)
+        self._evaluate()
+
+    def _clear_check_state(self) -> None:
+        """Every wait starts with fresh clocks (spec §9.1)."""
+        self.s["check_clocks"] = {}
+        self.s["check_notified"] = []
+        self._cancel_deadline(DEADLINE_CHECK_TICK)
+        for name in [n for n in self.s["deadlines"] if n.startswith(DEADLINE_CHECK_TIMEOUT)]:
+            self._cancel_deadline(name)
+
     def _start_run(self, run: dict[str, Any], zone: ZoneView) -> None:
         """Persist the command intent, then (after the save) command the Mower."""
         self._cancel_deadline(DEADLINE_STABILITY)
         self.s["waiting_on"] = []
+        self.s["battery_pending"] = False
         run["native_ref"] = zone.native_ref
         run["starting_at"] = iso(self.now)
         self.s["active_run_id"] = run["id"]

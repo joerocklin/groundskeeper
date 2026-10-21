@@ -125,6 +125,8 @@ class Notifier:
                 await self._run_notice(payload)
             case "schedule_completed":
                 await self._schedule_completed(payload)
+            case "check_timeout":
+                await self._check_timeout(payload)
 
     # -- Prompts ----------------------------------------------------------------------
 
@@ -226,6 +228,20 @@ class Notifier:
             strings[f"prompt_headline_{category}"],
             lines,
             subject=payload["run_id"],
+        )
+
+    async def _check_timeout(self, payload: dict[str, Any]) -> None:
+        strings = await async_prompt_strings(self._hass)
+        await self.async_notice(
+            "check_waits",
+            "check_timeout",
+            strings["prompt_headline_check_timeout"],
+            [
+                strings["prompt_check_waiting"].format(
+                    name=payload["name"], reasons=", ".join(payload.get("reasons", []))
+                )
+            ],
+            subject=payload["check_id"],
         )
 
     def _find_run(self, run_id: str) -> dict[str, Any] | None:
