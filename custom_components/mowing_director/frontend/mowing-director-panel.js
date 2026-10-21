@@ -63,6 +63,11 @@ const STYLE = `
   .tag.missing { background: var(--error-color, #db4437); color: #fff; }
   .warn { color: var(--warning-color, #b26a00); }
   input[type=number] { width: 5em; font: inherit; }
+  table.schedule, table.preview { width: 100%; border-collapse: collapse; }
+  table.schedule td, table.schedule th, table.preview td, table.preview th { padding: 4px 6px; text-align: left; }
+  ul.plan-runs { list-style: none; margin: 0; padding: 0; }
+  ul.plan-runs li { padding: 6px 0; }
+  .hint { color: var(--secondary-text-color); }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
 `;
 
@@ -368,6 +373,118 @@ function gateListHtml(view, selectedId) {
     <p><button data-act="new-gate">Add Gate</button></p>`;
 }
 
+// -- Schedule & Plans helpers (spec §16.3, §5.5, §5.7) ------------------------
+// Heights are stored in mm; shown and typed in HA units (inches when imperial).
+
+const fmtHeight = (mm, lengthUnit) =>
+  (lengthUnit === 'mi' ? `${num(mm / 25.4)} in` : `${num(mm)} mm`);
+const heightToMm = (v, lengthUnit) => (lengthUnit === 'mi' ? num(v * 25.4) : v);
+const heightValue = (mm, lengthUnit) => (lengthUnit === 'mi' ? num(mm / 25.4) : num(mm));
+
+const EDIT_WARNINGS = {
+  height_increases: 'This makes the Run taller than the one before it, so the Plan no longer steps down.',
+  step_above_max_cut: 'This step is more than the Plan\'s max cut.',
+  angle_outside_range: 'This angle is outside the Zone\'s allowed angle range.',
+};
+const editWarningsText = (keys) => (keys || []).map((k) => EDIT_WARNINGS[k] || k);
+
+// Position among the pending Runs for a one-step move, or null when the move
+// is not allowed: a Run never passes an earlier or later Run of its own Plan
+// (same rule as Up next, spec §5.7).
+function moveTarget(pending, runId, dir) {
+  const i = pending.findIndex((r) => r.id === runId);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= pending.length) return null;
+  return pending[j].plan_id === pending[i].plan_id ? null : j;
+}
+
+const pendingOf = (view) => (view.runs || []).filter((r) => r.status === 'pending');
+
+function scheduleTableHtml(view, lengthUnit) {
+  const pending = pendingOf(view);
+  const btn = (act, r, label, dir) => {
+    const ok = r.status === 'pending' && moveTarget(pending, r.id, dir) != null;
+    return `<button data-act="${act}" data-run="${esc(r.id)}"${ok ? '' : ' disabled'} aria-label="${label}">${dir < 0 ? '&#9650;' : '&#9660;'}</button>`;
+  };
+  const rows = (view.runs || []).map((r, i) => `<tr data-run="${esc(r.id)}">
+      <td>${i + 1}</td><td>${esc(r.zone_name)}</td><td>${esc(r.index)} of ${esc(r.of)}</td>
+      <td>${fmtHeight(r.height_mm, lengthUnit)}</td><td>${fmtDeg(r.angle_deg)}</td>
+      <td><span class="tag">${esc(r.status)}</span></td>
+      <td>${r.status === 'pending' ? btn('move-up', r, 'Move up', -1) + btn('move-down', r, 'Move down', 1) : ''}</td></tr>`).join('');
+  if (!rows) return '<p class="empty">The Schedule is empty.</p>';
+  return `<table class="schedule"><tr><th>#</th><th>Zone</th><th>Run</th><th>Height</th><th>Angle</th><th>Status</th><th></th></tr>${rows}</table>`;
+}
+
+function planCardsHtml(view, lengthUnit) {
+  const cards = (view.plans || []).map((p) => {
+    const runs = (view.runs || []).filter((r) => r.plan_id === p.id);
+    const started = runs.some((r) => r.status !== 'pending');
+    const dis = started ? ' disabled' : '';
+    const rows = runs.map((r) => {
+      const pend = r.status === 'pending';
+      const edit = pend ? `<label>Height <input type="number" step="any" class="edit-height" data-run="${esc(r.id)}" value="${heightValue(r.height_mm, lengthUnit)}"></label>
+          <label>Angle <input type="number" step="any" class="edit-angle" data-run="${esc(r.id)}" value="${num(r.angle_deg)}"></label>
+          <button data-act="edit-run" data-run="${esc(r.id)}">Save</button>
+          <button data-act="delete-run" data-run="${esc(r.id)}">Delete</button>`
+        : `${fmtHeight(r.height_mm, lengthUnit)} at ${fmtDeg(r.angle_deg)} <span class="tag">${esc(r.status)}</span>`;
+      return `<li>Run ${esc(r.index)} of ${esc(r.of)}: ${edit}</li>`;
+    }).join('');
+    const warns = (p.angle_warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join('');
+    const note = p.note === 'angles_redrawn_for_range'
+      ? '<p class="hint">Angles were redrawn when the Zone\'s allowed angle range arrived.</p>' : '';
+    return `<section class="card plan" data-plan="${esc(p.id)}"><h3>${esc(p.zone_name)}: ${fmtHeight(p.start_height_mm, lengthUnit)} to ${fmtHeight(p.end_height_mm, lengthUnit)}
+      <span class="tag">${esc(p.status)}</span></h3>${note}${warns}<ul class="plan-runs">${rows}</ul>
+      <p><button data-act="reroll" data-plan="${esc(p.id)}"${dis}>Re-roll angles</button>
+      <button data-act="rederive" data-plan="${esc(p.id)}"${dis}>Re-derive from defaults</button>
+      <button data-act="remove-plan" data-plan="${esc(p.id)}">Remove Plan</button></p></section>`;
+  }).join('');
+  return cards || '<section class="card"><p class="empty">No Plans yet.</p></section>';
+}
+
+// Websocket fields for preview_plan / add_plan from the New Plan form, or { error }.
+function newPlanPayload(d, lengthUnit) {
+  if (!d.zone) return { error: 'Pick a Zone.' };
+  const start = Number(d.start), end = Number(d.end);
+  if (d.start === '' || d.end === '' || d.start == null || d.end == null || Number.isNaN(start) || Number.isNaN(end)) {
+    return { error: 'Enter a start and an end height.' };
+  }
+  const payload = {
+    zone: d.zone, start_height_mm: heightToMm(start, lengthUnit), end_height_mm: heightToMm(end, lengthUnit),
+  };
+  if (d.max_cut !== '' && d.max_cut != null) payload.max_cut_pct = Number(d.max_cut);
+  if (d.base_angle !== '' && d.base_angle != null) payload.base_angle = Number(d.base_angle);
+  if (d.finishing === 'on') payload.finishing = true;
+  if (d.finishing === 'off') payload.finishing = false;
+  return { payload };
+}
+
+function previewHtml(pv, lengthUnit) {
+  const rows = pv.runs.map((r) => `<tr><td>${esc(r.n)} of ${esc(r.m)}</td><td>${fmtHeight(r.height_mm, lengthUnit)}</td>
+      <td>${fmtDeg(r.angle_deg)}${r.provisional ? ' <span class="tag">provisional</span>' : ''}</td>
+      <td>${r.estimated_time_s == null ? 'unknown' : fmtDuration(r.estimated_time_s)}</td></tr>`).join('');
+  const prov = pv.provisional
+    ? '<p class="warn" id="provisional-warning">Angles are provisional: the Zone\'s allowed angle range is not known yet. They are redrawn when it arrives.</p>' : '';
+  const warns = (pv.warnings || []).filter((w) => !/provisional/i.test(w)).map((w) => `<p class="warn">${esc(w)}</p>`).join('');
+  return `<table class="preview"><tr><th>Run</th><th>Height</th><th>Angle</th><th>Estimated time</th></tr>${rows}</table>${prov}${warns}`;
+}
+
+function newPlanFormHtml(d, zones, preview, lengthUnit) {
+  const opts = zones.filter((z) => !z.missing && !z.hidden)
+    .map((z) => `<option value="${esc(z.id)}"${z.id === d.zone ? ' selected' : ''}>${esc(z.name)}</option>`).join('');
+  const hu = lengthUnit === 'mi' ? 'in' : 'mm';
+  const fin = (v, l) => `<option value="${v}"${d.finishing === v ? ' selected' : ''}>${l}</option>`;
+  return `<section class="card"><h2>New Plan</h2>
+    <p><label>Zone <select id="np-zone"><option value="">Choose a Zone</option>${opts}</select></label></p>
+    <p><label>Start height (${hu}) <input type="number" step="any" id="np-start" value="${esc(d.start)}"></label>
+    <label>End height (${hu}) <input type="number" step="any" id="np-end" value="${esc(d.end)}"></label></p>
+    <p><label>Max cut (%, optional) <input type="number" step="any" id="np-max-cut" value="${esc(d.max_cut)}"></label>
+    <label>Base angle (optional) <input type="number" step="any" id="np-base-angle" value="${esc(d.base_angle)}"></label>
+    <label>Finishing <select id="np-finishing">${fin('default', 'Default')}${fin('on', 'On')}${fin('off', 'Off')}</select></label></p>
+    ${d.error ? `<p class="warn" id="np-error">${esc(d.error)}</p>` : ''}
+    <p><button data-act="preview-plan">Preview</button> <button data-act="add-plan">Add Plan</button></p>
+    ${preview ? previewHtml(preview, lengthUnit) : ''}</section>`;
+}
+
 class MowingDirectorPanel extends HTMLElement {
   constructor() {
     super();
@@ -380,6 +497,9 @@ class MowingDirectorPanel extends HTMLElement {
     this._zoneView = { zones: [], channels: [] };
     this._zoneId = null;
     this._gateDraft = null; // Gate being created or edited, with its picked Channels
+    this._scheduleView = { schedule: {}, plans: [], runs: [] };
+    this._planDraft = { zone: '', start: '', end: '', max_cut: '', base_angle: '', finishing: 'default' };
+    this._planPreview = null;
     this._unsub = null;
     this._started = false;
   }
@@ -418,13 +538,13 @@ class MowingDirectorPanel extends HTMLElement {
     this._snapshot = null;
     if (!this._entryId) return;
     this._unsub = await this._hass.connection.subscribeMessage(
-      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._render(); },
+      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._render(); },
       { type: 'mowing_director/subscribe', entry_id: this._entryId },
     );
   }
 
   async _loadZones() {
-    if (!this._entryId || this._tab !== 'zones') return;
+    if (!this._entryId || (this._tab !== 'zones' && this._tab !== 'schedule')) return;
     try {
       this._zoneView = await this._hass.connection.sendMessagePromise({
         type: 'mowing_director/get_zones', entry_id: this._entryId });
@@ -443,6 +563,119 @@ class MowingDirectorPanel extends HTMLElement {
       this._error = err.message || String(err);
     }
     await this._loadZones();
+  }
+
+  async _loadSchedule() {
+    if (!this._entryId || this._tab !== 'schedule') return;
+    try {
+      this._scheduleView = await this._hass.connection.sendMessagePromise({
+        type: 'mowing_director/get_schedule', entry_id: this._entryId });
+      this._render();
+    } catch (err) {
+      this._error = err.message || String(err);
+    }
+  }
+
+  _lengthUnit() {
+    return (this._hass.config && this._hass.config.unit_system && this._hass.config.unit_system.length) || 'km';
+  }
+
+  // One Schedule command. Errors and edit warnings show in a notice; the
+  // backend pushes a fresh snapshot, which reloads the Schedule.
+  async _scheduleCmd(type, extra = {}) {
+    let result = null;
+    this._notice = null;
+    try {
+      result = await this._hass.connection.sendMessagePromise({
+        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+      const warnings = editWarningsText(result && result.warnings);
+      if (warnings.length) this._notice = warnings.join(' ');
+    } catch (err) {
+      this._notice = err.message || String(err);
+    }
+    await this._loadSchedule();
+    return result;
+  }
+
+  _readPlanDraft(root) {
+    const el = (id) => root.querySelector(id);
+    if (!el('#np-zone')) return;
+    Object.assign(this._planDraft, {
+      zone: el('#np-zone').value, start: el('#np-start').value, end: el('#np-end').value,
+      max_cut: el('#np-max-cut').value, base_angle: el('#np-base-angle').value,
+      finishing: el('#np-finishing').value,
+    });
+  }
+
+  async _planCmd(kind) {
+    const d = this._planDraft;
+    const { payload, error } = newPlanPayload(d, this._lengthUnit());
+    d.error = error || null;
+    if (error) { this._render(); return; }
+    try {
+      if (kind === 'preview') {
+        this._planPreview = await this._hass.connection.sendMessagePromise({
+          type: 'mowing_director/preview_plan', entry_id: this._entryId, ...payload });
+      } else {
+        await this._hass.connection.sendMessagePromise({
+          type: 'mowing_director/add_plan', entry_id: this._entryId, ...payload });
+        this._planPreview = null;
+      }
+    } catch (err) {
+      d.error = err.message || String(err);
+    }
+    await this._loadSchedule();
+    this._render();
+  }
+
+  _scheduleTab() {
+    const unit = this._lengthUnit();
+    const view = this._scheduleView;
+    const notice = this._notice ? `<p class="warn" id="schedule-notice">${esc(this._notice)}</p>` : '';
+    return `<section class="card"><h2>Schedule</h2>${notice}${scheduleTableHtml(view, unit)}</section>
+      ${newPlanFormHtml(this._planDraft, this._zoneView.zones || [], this._planPreview, unit)}
+      ${planCardsHtml(view, unit)}`;
+  }
+
+  _wireSchedule(root) {
+    const unit = this._lengthUnit();
+    root.querySelectorAll('#np-zone,#np-start,#np-end,#np-max-cut,#np-base-angle,#np-finishing').forEach((el) => {
+      el.addEventListener('change', () => { this._readPlanDraft(root); this._planPreview = null; });
+    });
+    root.querySelectorAll('[data-act]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const run_id = el.dataset.run, plan_id = el.dataset.plan;
+        switch (el.dataset.act) {
+          case 'move-up': case 'move-down': {
+            const to = moveTarget(pendingOf(this._scheduleView), run_id, el.dataset.act === 'move-up' ? -1 : 1);
+            if (to != null) this._scheduleCmd('move_run', { run_id, position: to });
+            break;
+          }
+          case 'edit-run': {
+            const q = (c) => root.querySelector(`.${c}[data-run="${run_id}"]`);
+            const height = Number(q('edit-height').value), angle = Number(q('edit-angle').value);
+            this._scheduleCmd('edit_run', { run_id, height_mm: heightToMm(height, unit), angle_deg: angle });
+            break;
+          }
+          case 'delete-run':
+            if (window.confirm('Delete this Run? The Plan will have one step fewer and its other Runs keep their heights.')) {
+              this._scheduleCmd('delete_run', { run_id });
+            }
+            break;
+          case 'reroll': this._scheduleCmd('reroll_angles', { plan_id }); break;
+          case 'rederive':
+            if (window.confirm('Re-derive this Plan from the current defaults? Edits you made to its Runs are replaced.')) {
+              this._scheduleCmd('rederive_plan', { plan_id });
+            }
+            break;
+          case 'remove-plan':
+            if (window.confirm('Remove this Plan and its pending Runs?')) this._scheduleCmd('remove_plan', { plan_id });
+            break;
+          case 'preview-plan': this._readPlanDraft(root); this._planCmd('preview'); break;
+          case 'add-plan': this._readPlanDraft(root); this._planCmd('add'); break;
+        }
+      });
+    });
   }
 
   _zonesTab() {
@@ -564,6 +797,7 @@ class MowingDirectorPanel extends HTMLElement {
 
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
+    if (this._tab === 'schedule') this._readPlanDraft(this.shadowRoot);
     const mowerOptions = this._mowers
       .map((m) => `<option value="${esc(m.entry_id)}"${m.entry_id === this._entryId ? ' selected' : ''}>${esc(m.title)}</option>`)
       .join('');
@@ -579,6 +813,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (this._error) body = `<div class="empty">${esc(this._error)}</div>`;
     else if (!this._entryId) body = '<div class="empty">No Mowers configured.</div>';
     else if (this._tab === 'zones') body = `<main>${this._zonesTab()}</main>`;
+    else if (this._tab === 'schedule') body = `<main>${this._scheduleTab()}</main>`;
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
@@ -588,9 +823,10 @@ class MowingDirectorPanel extends HTMLElement {
       this._subscribe().then(() => this._render());
     };
     this.shadowRoot.querySelectorAll('nav button').forEach((b) => {
-      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); };
+      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); };
     });
     if (this._tab === 'zones') this._wireZones(this.shadowRoot);
+    if (this._tab === 'schedule') this._wireSchedule(this.shadowRoot);
   }
 }
 
