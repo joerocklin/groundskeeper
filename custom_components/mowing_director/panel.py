@@ -8,6 +8,7 @@ hash to bust it on every change.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from .const import (
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 _STATIC_KEY = f"{DOMAIN}_panel_static"
+_LOCK_KEY = f"{DOMAIN}_panel_lock"
 
 
 def _asset_to_serve() -> Path:
@@ -54,6 +56,13 @@ def _read_asset_info() -> tuple[Path, str]:
 
 async def async_register_panel(hass: HomeAssistant) -> None:
     """Register the static JS and the sidebar panel, once per instance."""
+    # Entries set up concurrently; serialise so only one registers.
+    lock = hass.data.setdefault(_LOCK_KEY, asyncio.Lock())
+    async with lock:
+        await _async_register_panel_locked(hass)
+
+
+async def _async_register_panel_locked(hass: HomeAssistant) -> None:
     if frontend.async_panel_exists(hass, PANEL_URL_PATH):
         return
     asset, version = await hass.async_add_executor_job(_read_asset_info)
