@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from dataclasses import asdict
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_DEVICE
+from homeassistant.const import CONF_DEVICE, EVENT_STATE_CHANGED
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import config_validation as cv
@@ -43,6 +45,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util import ulid as ulid_util
 
 from .notifier import Notifier
+from .recording import DebugRecording, recording_enabled
 from .transfer import BrokenReferences
 from .prompts import async_prompt_strings, render_content
 from .adapter import (
@@ -165,6 +168,7 @@ class _Sink:
 
     @callback
     def on_snapshot(self, snapshot: Snapshot) -> None:
+        self._director.record_snapshot(snapshot)
         if self._director.frozen:
             self._director.on_frozen_snapshot(snapshot)
             return
@@ -208,6 +212,12 @@ class Director:
         self._cancel_started: CALLBACK_TYPE | None = None
         self._check_unsubs: list[CALLBACK_TYPE] = []
         self._forecast_rain = False  # Wet grass: latest forecast confirmation (§9.4)
+        # Debug recording (spec §15): None when the entry's flag is off.
+        self.recording: DebugRecording | None = (
+            DebugRecording(hass, entry, adapter) if recording_enabled(entry) else None
+        )
+        self._last_snapshot: dict[str, Any] | None = None
+        self._unsub_raw_state: CALLBACK_TYPE | None = None
 
     # -- read access ----------------------------------------------------------
 
@@ -315,8 +325,14 @@ class Director:
         data = await self._store.async_data()
         self._data = data
         self._loaded_at = dt_util.utcnow()
+        if self.recording is not None:
+            await self.recording.async_start()
+            self._listen_raw_state()
         self._check_store()
         data.update(normalise_core_state(data))
+        self.record(
+            "lifecycle", {"event": "start", "safe_idle": bool(self._store.safe_idle)}
+        )
         self.broken_references.start()
         async_set_run_active_provider(self.hass, self.entry.entry_id, self.run_active)
         if self._store.safe_idle:
@@ -324,6 +340,7 @@ class Director:
             return
         self._unsub_adapter = self.adapter.subscribe(_Sink(self))
         await self.adapter.async_start()
+        self.record_snapshot(self.adapter.snapshot)
         if self.hass.is_running:
             await self._begin_wait()
         else:
@@ -421,11 +438,18 @@ class Director:
             for name, at in self.state["deadlines"].items():
                 self._arm(name, parse(at))
         self._resubscribe_checks()
+        self.record(
+            "lifecycle",
+            {"event": "reconciled", "schedule": self.state["schedule"]["status"]},
+        )
 
     @callback
     def async_unload(self) -> None:
         """Stop timers and observation. Never commands the Mower."""
         self._closed = True
+        if self._unsub_raw_state is not None:
+            self._unsub_raw_state()
+            self._unsub_raw_state = None
         self.broken_references.close()
         self._unsubscribe_checks()
         for cancel in (self._wait_cancel, self._cancel_started, self._unsub_adapter):
@@ -839,6 +863,7 @@ class Director:
         reduction = reduce(old, event, self.env())
         new = reduction.state
         if new != old:
+            self._record_changes(old, new)
             self._data.update(new)
             if _only_soft_changes(old, new) and not reduction.effects:
                 self._store.async_delay_save_shared(DELAYED_SAVE_S)
@@ -864,7 +889,10 @@ class Director:
                         cancel()
                 case StartRunEffect():
                     result = await self._command(
-                        self.adapter.start_run(effect.zone_ref, effect.settings)
+                        self.adapter.start_run(effect.zone_ref, effect.settings),
+                        "start_run",
+                        {"zone_ref": effect.zone_ref, "settings": asdict(effect.settings)},
+                        effect.run_id,
                     )
                     run_id = effect.run_id
                     follow_ups.append(
@@ -875,9 +903,13 @@ class Director:
                 case GateActionEffect():
                     self._run_gate_action(effect)
                 case AbortRunEffect():
-                    await self._command(self.adapter.abort_run())
+                    await self._command(
+                        self.adapter.abort_run(), "abort_run", {"reason": effect.reason}
+                    )
                 case ResumeRunEffect():
-                    result = await self._command(self.adapter.resume_run())
+                    result = await self._command(
+                        self.adapter.resume_run(), "resume_run", {}, effect.run_id
+                    )
                     follow_ups.append(
                         lambda now, r=result, i=effect.run_id: CommandOutcome(
                             now, i, "resume_run", r
@@ -885,12 +917,202 @@ class Director:
                     )
         return follow_ups
 
-    async def _command(self, awaitable: Any) -> CommandResult:
+    async def _command(
+        self,
+        awaitable: Any,
+        name: str = "command",
+        args: dict[str, Any] | None = None,
+        run_id: str | None = None,
+    ) -> CommandResult:
+        began = time.monotonic()
         try:
-            return await awaitable
-        except Exception:  # noqa: BLE001 - adapters should not raise; never re-issue
+            result: CommandResult = await awaitable
+        except Exception as exc:  # noqa: BLE001 - adapters should not raise; never re-issue
             _LOGGER.exception("Mower command raised; treating as unconfirmed")
-            return Unconfirmed()
+            self.record("lifecycle", {"event": "error", "where": name, "error": repr(exc)})
+            result = Unconfirmed()
+        self.record(
+            "command",
+            {
+                "command": name,
+                "args": args or {},
+                "result": result.kind.value,
+                "reason": getattr(result, "reason", None),
+                "latency_ms": round((time.monotonic() - began) * 1000),
+            },
+            run_id,
+        )
+        return result
+
+    # -- debug recording (spec §15) ------------------------------------------------
+
+    def record(self, kind: str, payload: Any, run_id: str | None = None) -> None:
+        """Record on the debug recording; a no-op when it is off. Never raises."""
+        if self.recording is None:
+            return
+        try:
+            if run_id is None:
+                run = active_run(self.core_state["state"])
+                run_id = run["id"] if run else None
+            self.recording.record(kind, payload, run_id)
+        except Exception:  # noqa: BLE001 - no recording failure reaches the core
+            _LOGGER.debug("recording failed", exc_info=True)
+
+    def record_check(
+        self, check_id: str, result: str, reason: str | None = None
+    ) -> None:
+        """API for Check code: recorded only when result or reason changed."""
+        if self.recording is not None:
+            self.recording.record_check(check_id, result, reason, self._active_run_id())
+
+    def record_detector(
+        self,
+        detector: str,
+        phase: str,
+        details: dict[str, Any] | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        """API for detectors: `estimate` at Run start, then `fire` and `clear`."""
+        if self.recording is not None:
+            self.recording.record_detector(
+                detector, phase, details, run_id or self._active_run_id()
+            )
+
+    def _active_run_id(self) -> str | None:
+        try:
+            run = active_run(self.core_state["state"])
+            return run["id"] if run else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def record_snapshot(self, snapshot: Snapshot) -> None:
+        """A `snapshot` record, only when the normalised snapshot changed."""
+        if self.recording is None:
+            return
+        try:
+            payload = asdict(snapshot)
+            if payload == self._last_snapshot:
+                return
+            self._last_snapshot = payload
+            self.record("snapshot", payload)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("snapshot recording failed", exc_info=True)
+
+    def _listen_raw_state(self) -> None:
+        """`raw_state` records for entities on the Mower's own device only."""
+        device_id = self.device_id
+        if self.recording is None or device_id is None:
+            return
+        registry = er.async_get(self.hass)
+
+        @callback
+        def _on_device(data: Any) -> bool:
+            entity = registry.async_get(data["entity_id"])
+            return entity is not None and entity.device_id == device_id
+
+        @callback
+        def _changed(event: Any) -> None:
+            new, old = event.data.get("new_state"), event.data.get("old_state")
+            self.record(
+                "raw_state",
+                {
+                    "entity_id": event.data["entity_id"],
+                    "state": new.state if new else None,
+                    "attributes": dict(new.attributes) if new else {},
+                    "old_state": old.state if old else None,
+                },
+            )
+
+        self._unsub_raw_state = self.hass.bus.async_listen(
+            EVENT_STATE_CHANGED, _changed, event_filter=_on_device
+        )
+
+    def _record_changes(self, old: dict[str, Any], new: dict[str, Any]) -> None:
+        """Transitions, run summaries, Check and detector changes, errors."""
+        if self.recording is None:
+            return
+        try:
+            self._diff_for_recording(old, new)
+        except Exception:  # noqa: BLE001 - no recording failure reaches the core
+            _LOGGER.debug("change recording failed", exc_info=True)
+
+    def _diff_for_recording(self, old: dict[str, Any], new: dict[str, Any]) -> None:
+        o, n = old["state"], new["state"]
+        before, after = o["schedule"], n["schedule"]
+        if (before["status"], before.get("reason")) != (after["status"], after.get("reason")):
+            self.record(
+                "transition",
+                {
+                    "scope": "schedule",
+                    "from": before["status"],
+                    "to": after["status"],
+                    "cause": after.get("reason"),
+                },
+            )
+        old_runs = {r["id"]: r for r in o["runs"]}
+        old_done = {r["id"] for r in old["history"]["runs"]}
+        archived = [r for r in new["history"]["runs"] if r["id"] not in old_done]
+        for run in [*n["runs"], *archived]:
+            prev = old_runs.get(run["id"])
+            if prev is None or (prev["status"], prev.get("reason")) == (
+                run["status"],
+                run.get("reason"),
+            ):
+                continue
+            self.record(
+                "transition",
+                {
+                    "scope": "run",
+                    "from": prev["status"],
+                    "to": run["status"],
+                    "cause": run.get("reason"),
+                    "zone": run.get("zone_name"),
+                },
+                run["id"],
+            )
+        for run in archived:
+            plan = new["history"]["plans"].get(run["plan_id"]) or n["plans"].get(run["plan_id"])
+            self.record("run_summary", {**run, "plan": plan}, run["id"])
+        self._diff_checks(o, n)
+        self._diff_detectors(o, n)
+        if n.get("blocking_error") != o.get("blocking_error") and n.get("blocking_error"):
+            self.record(
+                "lifecycle", {"event": "error", "error": n["blocking_error"]}
+            )
+
+    def _diff_checks(self, o: dict[str, Any], n: dict[str, Any]) -> None:
+        def reasons(state: dict[str, Any]) -> dict[str, str]:
+            grouped: dict[str, list[str]] = {}
+            for item in state["waiting_on"]:
+                grouped.setdefault(item["check"], []).append(item["reason"])
+            return {c: ", ".join(sorted(r)) for c, r in grouped.items()}
+
+        before, after = reasons(o), reasons(n)
+        for check, reason in after.items():
+            self.record_check(check, "failing", reason)
+        for check in before.keys() - after.keys():
+            self.record_check(check, "passing", None)
+
+    def _diff_detectors(self, o: dict[str, Any], n: dict[str, Any]) -> None:
+        def live(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+            return {
+                a["id"]: a for a in state["anomalies"]["active"] if not a.get("dismissed")
+            }
+
+        before, after = live(o), live(n)
+        for key, anomaly in after.items():
+            if key not in before:
+                self.record_detector(
+                    anomaly["detector"],
+                    "fire",
+                    {"anomaly_id": key, **anomaly.get("details", {})},
+                    anomaly.get("run_id"),
+                )
+        for key, anomaly in before.items():
+            if key not in after:
+                self.record_detector(
+                    anomaly["detector"], "clear", {"anomaly_id": key}, anomaly.get("run_id")
+                )
 
     def fire_event(self, type_: str, **payload: Any) -> None:
         """Fire a `mowing_director_event` from outside the reducer."""

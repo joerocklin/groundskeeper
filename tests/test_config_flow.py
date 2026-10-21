@@ -143,7 +143,7 @@ async def test_flow_lists_mower_and_creates_entry(hass, hass_storage) -> None:
     assert entry.unique_id == mower.id
     assert entry.title == "Example Mower"
     assert entry.data == {CONF_DEVICE: mower.id}
-    assert entry.options == {}
+    assert entry.options == {"debug_recording": True}
 
     # One Store per Mower, created with the right key and sections.
     key = f"mowing_director.{entry.entry_id}"
