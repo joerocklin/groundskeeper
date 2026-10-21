@@ -66,11 +66,11 @@ ENTITY_CHECK = {"name": "Gate shut", "enabled": True, "timeout_s": 600, "policy"
                            "value": "on"}}
 
 
-async def test_list_checks_returns_the_four_built_ins(hass, hass_ws_client, setup) -> None:
+async def test_list_checks_returns_the_built_ins(hass, hass_ws_client, setup) -> None:
     entry, _ = setup
     msg = await ws(hass, hass_ws_client, entry, "list_checks")
     by_id = {c["id"]: c for c in msg["result"]["checks"]}
-    assert set(by_id) == {"mower_ready", "zone_ready", "battery", "work_hours"}
+    assert set(by_id) == {"mower_ready", "zone_ready", "battery", "work_hours", "wet_grass"}
     assert by_id["battery"]["enabled"] is False
 
 
@@ -78,7 +78,7 @@ async def test_every_check_has_a_binary_sensor_and_waiting_on_sensor_explains(
     hass, setup, freezer
 ) -> None:
     entry, mower = setup
-    for check_id in ("mower_ready", "zone_ready", "battery", "work_hours"):
+    for check_id in ("mower_ready", "zone_ready", "battery", "work_hours", "wet_grass"):
         assert entity_for(hass, entry, check_id) is not None
     mower.emit_snapshot(replace(DEFAULT_SNAPSHOT, job_active=True))
     await add_plan(hass)

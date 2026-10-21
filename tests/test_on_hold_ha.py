@@ -108,4 +108,5 @@ async def test_rain_stop_returns_run_pending_with_no_command(hass, director, fre
     assert state_of(hass, CURRENT).state == "none"
     assert state_of(hass, "sensor.example_mower_schedule").state == "waiting"
     assert state_of(hass, "sensor.example_mower_next_run").state == "Front Lawn"
-    assert state_of(hass, "sensor.example_mower_pending_prompts").state == "0"
+    # nothing confirms the rain, so the Wet grass flow asks (spec §7.5, §9.4)
+    assert state_of(hass, "sensor.example_mower_pending_prompts").state == "1"

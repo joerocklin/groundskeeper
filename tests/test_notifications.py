@@ -92,7 +92,7 @@ async def test_notify_targets_are_stored_in_config_and_readable(
     assert msg["result"]["targets"] == [PIXEL]
     assert msg["result"]["categories"] == {
         "run_failed": True, "run_on_hold": True, "check_waits": True,
-        "rain_question": True, "run_started": False, "run_done": False,
+        "is_raining": True, "run_started": False, "run_done": False,
         "schedule_completed": True,
     }
     stored = hass_storage[f"mowing_director.{entry.entry_id}"]["data"]["config"]

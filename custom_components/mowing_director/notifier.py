@@ -26,14 +26,14 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_TARGETS = "notify_targets"
-CONFIG_CATEGORIES = "notify_categories"
+CONFIG_CATEGORIES = "notifications"  # shared with the rain-question toggle
 
 # Spec §12.3. Failure and on-hold cannot be switched off.
 CATEGORY_DEFAULTS: dict[str, bool] = {
     "run_failed": True,
     "run_on_hold": True,
     "check_waits": True,
-    "rain_question": True,
+    "is_raining": True,
     "run_started": False,
     "run_done": False,
     "schedule_completed": True,

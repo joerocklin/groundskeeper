@@ -28,7 +28,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 from typing import Any
 
@@ -40,9 +40,12 @@ from .checks import (
     TYPE_BATTERY,
     TYPE_CUSTOM,
     TYPE_MOWER_READY,
+    TYPE_WET_GRASS,
     TYPE_WORK_HOURS,
     TYPE_ZONE_READY,
     default_check_records,
+    next_work_start,
+    weather_condition_wet,
     work_hours_open,
     work_window_start,
 )
@@ -106,6 +109,11 @@ ACTION_ABORT = "abort"
 PROMPT_RUN_ON_HOLD = "run_on_hold"  # spec §12.1: Resume / End Run
 ACTION_RESUME = "resume"
 ACTION_END_RUN = "end_run"
+
+PROMPT_IS_RAINING = "is_raining"  # spec §9.4: No / Yes / Yes, done for today
+ACTION_RAIN_NO = "no"
+ACTION_RAIN_YES = "yes"
+ACTION_RAIN_DONE_TODAY = "yes_done_today"
 
 HOLD_EXTERNAL_PAUSE = "external_pause"  # spec §7.4 causes
 HOLD_RECHARGE_STALL = "recharge_stall"
@@ -349,6 +357,14 @@ class ChecksEdited:
 
 
 @dataclass(frozen=True)
+class WetGrassDoneToday:
+    """`wet_grass_done_today` service / panel button (spec §9.4): Wet grass
+    fails until the next Work hours start plus the morning dry-out."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
 class TimerFired:
     """A deadline timer fired; the reducer re-evaluates every deadline."""
 
@@ -395,6 +411,7 @@ type CoreInput = (
     | SignalReceived
     | CommandOutcome
     | ChecksEdited
+    | WetGrassDoneToday
     | TimerFired
 )
 
@@ -477,6 +494,24 @@ class ZoneView:
 
 
 @dataclass(frozen=True)
+class WetInputs:
+    """Wet grass readings the runtime resolves from HA (spec §9.3, §9.4).
+
+    `sensors` / `weather` are the raw states of the picked entities
+    (`unavailable` and `unknown` are skipped); `forecast_rain` is whether the
+    current or next forecast hour of a picked weather entity is rainy or at or
+    above the precipitation probability; `sunrise(local_date)` is HA's sun;
+    `ask` is the "Is it raining?" notification category.
+    """
+
+    sensors: tuple[str, ...] = ()
+    weather: tuple[str, ...] = ()
+    forecast_rain: bool = False
+    sunrise: Callable[[date], datetime | None] | None = None
+    ask: bool = True
+
+
+@dataclass(frozen=True)
 class Env:
     """Read-only environment for one reduction."""
 
@@ -493,6 +528,7 @@ class Env:
     )
     # Custom Check id -> reason it fails, None when it passes (resolved by the runtime)
     custom_results: Mapping[str, str | None] = field(default_factory=dict)
+    wet: WetInputs = field(default_factory=WetInputs)
     tz: tzinfo = UTC  # local time for Work hours
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
@@ -531,6 +567,11 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("battery_trend", None)
     state.setdefault("height_verify", None)
     state.setdefault("prompts", [])
+    wet = state.setdefault("wet", {})  # Wet grass memory, persisted absolute (spec §9.3)
+    wet.setdefault("last_wet_at", None)
+    wet.setdefault("wet_now", False)
+    wet.setdefault("done_until", None)
+    wet.setdefault("episode", None)
     history = dict(data.get("history") or {})
     history.setdefault("runs", [])
     history.setdefault("plans", {})
@@ -708,6 +749,7 @@ def evaluate_checks(
     *,
     battery_pending: bool = False,
     local_now: datetime | None = None,
+    wet_reasons: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Failing Checks as `[{"check": id, "reason"}]`; empty means every Check passes.
 
@@ -743,6 +785,9 @@ def evaluate_checks(
                 if rec["enabled"] and local_now is not None:
                     if not work_hours_open(rec["config"], local_now):
                         reasons.append("outside_work_hours")
+            case "wet_grass":
+                if rec["enabled"]:
+                    reasons.extend(wet_reasons or [])
             case "custom":
                 if rec["enabled"]:
                     reason = env.custom_results.get(check, "unavailable")
@@ -831,6 +876,8 @@ class _Machine:
                 self._fire_due_reminders()
             case ChecksEdited():
                 self._checks_edited(event)
+            case WetGrassDoneToday():
+                self._wet_done_today()
             case Reconcile():
                 self._reconcile(event)
 
@@ -1287,6 +1334,7 @@ class _Machine:
 
     def _evaluate(self) -> None:
         """Re-evaluate everything that depends on state or time."""
+        self._wet_update()
         if self.status == ScheduleStatus.WAITING:
             self._evaluate_waiting()
         elif self.status == ScheduleStatus.RUNNING:
@@ -1317,6 +1365,7 @@ class _Machine:
             self.s["blocking_error"],
             battery_pending=self.s["battery_pending"],
             local_now=self.now.astimezone(self.env.tz),
+            wet_reasons=self._wet_reasons(),
         )
         self.s["waiting_on"] = failing
         if not self._run_check_clocks(failing):
@@ -1676,6 +1725,7 @@ class _Machine:
         self.s["battery_trend"] = None
         self._set_run(run, RunStatus.PENDING, "rain_stop")
         self._set_schedule(ScheduleStatus.WAITING, "rain_stop")
+        self._wet_rain_stop()
         self._evaluate()
 
     def _evaluate_on_hold(self, run: dict[str, Any]) -> None:
@@ -1981,6 +2031,8 @@ class _Machine:
                 self._resume_run()
             else:
                 self._end_run()
+        elif prompt["kind"] == PROMPT_IS_RAINING:
+            self._wet_answer(event.action)
         elif prompt["kind"] == PROMPT_RUN_FAILED:
             # The dedicated input does the work and answers the Prompt.
             if event.action == ACTION_RETRY:
@@ -1991,6 +2043,155 @@ class _Machine:
                 self._cancel()
         if prompt in self.s["prompts"]:  # no dedicated side effect applied
             self._settle_prompt(prompt, event.action)
+        if prompt["kind"] == PROMPT_IS_RAINING:
+            self._evaluate()  # the answer changes what Wet grass reads at once
+
+    # -- Wet grass (spec §9.3, §9.4) -------------------------------------------
+
+    def _wet_record(self) -> Mapping[str, Any] | None:
+        return next(
+            (r for r in self.env.checks if r["type"] == TYPE_WET_GRASS and r["enabled"]),
+            None,
+        )
+
+    def _wet_update(self) -> None:
+        """Track wet readings and the rain episode on every evaluation."""
+        rec = self._wet_record()
+        wet = self.s["wet"]
+        if rec is None:
+            if wet["episode"] is not None:
+                wet["episode"] = None
+                self._answer_kind(PROMPT_IS_RAINING, "disabled")
+            return
+        cfg = rec["config"]
+        snapshot = self._snapshot()
+        flag = bool(
+            snapshot is not None and snapshot.rain is True and cfg.get("mower_rain", True)
+        )
+        episode = wet["episode"]
+        if not flag and episode is not None and (
+            episode.get("flag_seen") or not episode.get("signal")
+        ):
+            wet["episode"] = episode = None
+            self._answer_kind(PROMPT_IS_RAINING, "cleared")
+        if flag:
+            if episode is None:
+                episode = wet["episode"] = {
+                    "state": "open", "asked": False, "flag_seen": True,
+                    "prev_last_wet_at": wet["last_wet_at"],
+                }
+            episode["flag_seen"] = True
+        if episode is not None and episode["state"] == "open" and not episode["asked"]:
+            self._wet_confirm(episode)
+        mower_wet = episode is not None and episode["state"] != "ignored"
+        direct = self._wet_direct()
+        wet_now = mower_wet or bool(direct)
+        if wet_now or wet["wet_now"]:
+            wet["last_wet_at"] = iso(self.now)  # the last wet reading, even as it clears
+        wet["wet_now"] = wet_now
+
+    def _wet_direct(self) -> list[str]:
+        """Picked sources reading wet now."""
+        readings = self.env.wet
+        out: list[str] = []
+        if any(weather_condition_wet(c) for c in readings.weather):
+            out.append("weather_wet")
+        if any(state == "on" for state in readings.sensors):
+            out.append("sensor_wet")
+        return out
+
+    def _wet_confirm(self, episode: dict[str, Any]) -> None:
+        """Confirm-or-ask (spec §9.4): sensor, then weather, then ask."""
+        readings = self.env.wet
+        if any(s == "on" for s in readings.sensors) or any(
+            weather_condition_wet(c) for c in readings.weather
+        ) or readings.forecast_rain:
+            episode["state"] = "rain"
+            return
+        if not readings.ask:
+            return  # unconfirmed and not asked: treated as rain
+        if self.status in (ScheduleStatus.WAITING, ScheduleStatus.RUNNING):
+            episode["asked"] = True
+            self._raise_prompt(
+                PROMPT_IS_RAINING,
+                None,
+                [ACTION_RAIN_NO, ACTION_RAIN_YES, ACTION_RAIN_DONE_TODAY],
+                {},
+            )
+
+    def _wet_reasons(self) -> list[str]:
+        rec = self._wet_record()
+        if rec is None:
+            return []
+        wet = self.s["wet"]
+        cfg = rec["config"]
+        episode = wet["episode"]
+        out: list[str] = []
+        if episode is not None and episode["state"] != "ignored":
+            out.append("mower_rain")
+        out.extend(self._wet_direct())
+        if not out and wet["last_wet_at"] is not None:
+            dry_at = parse(wet["last_wet_at"]) + timedelta(seconds=cfg.get("dry_out_s", 0))
+            if self.now < dry_at:
+                out.append("dry_out")
+        if wet["done_until"] is not None and self.now < parse(wet["done_until"]):
+            out.append("done_for_today")
+        if cfg.get("morning", True) and self.env.wet.sunrise is not None:
+            local = self.now.astimezone(self.env.tz)
+            rise = self.env.wet.sunrise(local.date())
+            if rise is not None and self.now < rise + timedelta(
+                seconds=cfg.get("morning_offset_s", 0)
+            ):
+                out.append("morning_dry_out")
+        return out
+
+    def _wet_rain_stop(self) -> None:
+        """A rain stop is a wet reading: run confirm-or-ask (spec §7.5)."""
+        if self._wet_record() is None or self.s["wet"]["episode"] is not None:
+            return
+        self.s["wet"]["episode"] = {
+            "state": "open", "asked": False, "flag_seen": False, "signal": True,
+            "prev_last_wet_at": self.s["wet"]["last_wet_at"],
+        }
+
+    def _wet_answer(self, action: str) -> None:
+        wet = self.s["wet"]
+        episode = wet["episode"]
+        if action == ACTION_RAIN_NO:
+            if episode is not None:
+                episode["state"] = "ignored"
+                wet["last_wet_at"] = episode["prev_last_wet_at"]
+                wet["wet_now"] = False
+        else:
+            if episode is not None:
+                episode["state"] = "rain"
+            if action == ACTION_RAIN_DONE_TODAY:
+                self._wet_set_done_today()
+
+    def _wet_set_done_today(self) -> None:
+        """Fail until the next Work hours start plus the morning dry-out."""
+        records = {r["type"]: r for r in self.env.checks}
+        local = self.now.astimezone(self.env.tz)
+        work = records.get("work_hours")
+        until = next_work_start(work["config"] if work else {}, local)
+        wet_rec = records.get(TYPE_WET_GRASS)
+        cfg = wet_rec["config"] if wet_rec else {}
+        if cfg.get("morning", True) and self.env.wet.sunrise is not None:
+            rise = self.env.wet.sunrise(until.date())
+            if rise is not None:
+                until = max(
+                    until.astimezone(UTC),
+                    rise + timedelta(seconds=cfg.get("morning_offset_s", 0)),
+                )
+        self.s["wet"]["done_until"] = iso(until.astimezone(UTC))
+
+    def _wet_done_today(self) -> None:
+        self._wet_set_done_today()
+        episode = self.s["wet"]["episode"]
+        if episode is not None and episode["state"] == "open":
+            episode["state"] = "rain"
+        self._answer_kind(PROMPT_IS_RAINING, ACTION_RAIN_DONE_TODAY)
+        self._evaluate()
 
     # -- Answering a failure (spec §6.3, §6.4) ---------------------------------
 

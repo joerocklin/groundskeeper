@@ -25,6 +25,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import TemplateError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import sun as sun_helper
 from homeassistant.helpers.event import (
     TrackTemplate,
     async_call_later,
@@ -50,6 +51,8 @@ from .const import DOMAIN, EVENT_TYPE
 from .checks import (
     MODE_ENTITY,
     TYPE_CUSTOM,
+    TYPE_WET_GRASS,
+    forecast_confirms_rain,
     condition_result,
     normalise_checks,
     validate_record,
@@ -88,6 +91,8 @@ from .core import (
     StartRunEffect,
     StartSchedule,
     TimerFired,
+    WetGrassDoneToday,
+    WetInputs,
     ZoneView,
     normalise_core_state,
     parse,
@@ -184,6 +189,7 @@ class Director:
         self._wait_cancel: CALLBACK_TYPE | None = None
         self._cancel_started: CALLBACK_TYPE | None = None
         self._check_unsubs: list[CALLBACK_TYPE] = []
+        self._forecast_rain = False  # Wet grass: latest forecast confirmation (§9.4)
 
     # -- read access ----------------------------------------------------------
 
@@ -229,6 +235,7 @@ class Director:
             zones=zones,
             checks=tuple(checks),
             custom_results=self._custom_results(checks),
+            wet=self._wet_inputs(checks),
             tz=dt_util.get_default_time_zone(),
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
             start_window=window,
@@ -385,6 +392,73 @@ class Director:
             return rendered.strip().lower()
         return None if result_as_boolean(rendered) else "condition_false"
 
+    def _wet_record(self, checks: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        return next(
+            (r for r in checks or self.checks if r["type"] == TYPE_WET_GRASS and r["enabled"]),
+            None,
+        )
+
+    def _picked_states(self, refs: list[str]) -> tuple[str, ...]:
+        """States of picked entities; a missing entity reads `unavailable`."""
+        registry = er.async_get(self.hass)
+        out = []
+        for ref in refs:
+            entity_id = er.async_resolve_entity_id(registry, ref)
+            state = self.hass.states.get(entity_id) if entity_id else None
+            out.append(state.state if state else "unavailable")
+        return tuple(out)
+
+    def _wet_inputs(self, checks: list[dict[str, Any]]) -> WetInputs:
+        """Wet grass readings from HA (spec §9.3, §9.4); nothing when it is off."""
+        rec = self._wet_record(checks)
+        if rec is None:
+            return WetInputs()
+        cfg = rec["config"]
+        hass = self.hass
+        categories = self._data.get("config", {}).get("notifications", {})
+        return WetInputs(
+            sensors=self._picked_states(cfg.get("sensors", [])),
+            weather=self._picked_states(cfg.get("weather", [])),
+            forecast_rain=self._forecast_rain,
+            sunrise=lambda day: sun_helper.get_astral_event_date(hass, "sunrise", day),
+            ask=bool(categories.get("is_raining", True)),
+        )
+
+    async def _refresh_forecast(self) -> None:
+        """Ask the picked weather entities for the hourly forecast, but only
+        while a rain flag still needs confirming (spec §9.4 step 2)."""
+        rec = self._wet_record()
+        episode = self.state.get("wet", {}).get("episode")
+        needed = (
+            rec is not None
+            and self.adapter.snapshot.rain is True
+            and (episode is None or (episode["state"] == "open" and not episode["asked"]))
+        )
+        refs = rec["config"].get("weather", []) if rec else []
+        registry = er.async_get(self.hass)
+        entity_ids = [
+            eid for ref in refs
+            if (eid := er.async_resolve_entity_id(registry, ref)) is not None
+        ]
+        if not needed or not entity_ids:
+            self._forecast_rain = False
+            return
+        try:
+            response = await self.hass.services.async_call(
+                "weather", "get_forecasts",
+                {"entity_id": entity_ids, "type": "hourly"},
+                blocking=True, return_response=True,
+            )
+        except Exception:  # noqa: BLE001 - a missing forecast is simply "no confirmation"
+            _LOGGER.debug("weather.get_forecasts failed", exc_info=True)
+            self._forecast_rain = False
+            return
+        pct = rec["config"].get("precip_pct", 50)
+        self._forecast_rain = any(
+            forecast_confirms_rain((data.get("forecast") or [])[:2], pct)
+            for data in (response or {}).values()
+        )
+
     def _unsubscribe_checks(self) -> None:
         for cancel in self._check_unsubs:
             cancel()
@@ -400,6 +474,10 @@ class Director:
         entities: list[str] = []
         templates: list[TrackTemplate] = []
         for rec in self.checks:
+            if rec["type"] == TYPE_WET_GRASS and rec["enabled"]:
+                for ref in [*rec["config"].get("sensors", []), *rec["config"].get("weather", [])]:
+                    if (eid := er.async_resolve_entity_id(registry, ref)) is not None:
+                        entities.append(eid)
             if rec["type"] != TYPE_CUSTOM or not rec["enabled"]:
                 continue
             cfg = rec["config"]
@@ -437,6 +515,16 @@ class Director:
             entry = er.async_get(self.hass).async_get(cfg["entity"])
             if entry is not None:
                 return {**cfg, "entity": entry.id}
+        registry = er.async_get(self.hass)
+        for key in ("sensors", "weather"):
+            if isinstance(cfg.get(key), list):
+                cfg = {
+                    **cfg,
+                    key: [
+                        entry.id if (entry := registry.async_get(ref)) is not None else ref
+                        for ref in cfg[key]
+                    ],
+                }
         return cfg
 
     def _validate_check(self, rec: dict[str, Any]) -> None:
@@ -514,6 +602,7 @@ class Director:
                 pending.extend(await self._perform(effects))
 
     async def _reduce_and_save(self, event: CoreInput) -> tuple[Any, ...]:
+        await self._refresh_forecast()
         old = self.core_state
         reduction = reduce(old, event, self.env())
         new = reduction.state
@@ -664,6 +753,9 @@ class Director:
 
     async def async_end_run(self) -> None:
         await self.dispatch(EndRun)
+
+    async def async_wet_grass_done_today(self) -> None:
+        await self.dispatch(WetGrassDoneToday)
 
     # -- Prompts (spec §12) -----------------------------------------------------
 
