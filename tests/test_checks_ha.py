@@ -225,3 +225,19 @@ def test_logbook_describes_check_timeout() -> None:
 
     text = describe({"type": "check_timeout", "name": "Gate shut", "policy": "pause"})
     assert text == "Check Gate shut timed out (pause)"
+
+
+async def test_list_checks_carries_what_the_checks_tab_shows(hass, hass_ws_client, setup) -> None:
+    """Anomaly actions (defaults filled) and whether the Mower's rain flag is live (spec §9.3, §11.4)."""
+    entry, mower = setup
+    msg = await ws(hass, hass_ws_client, entry, "list_checks")
+    assert msg["result"]["anomaly_actions"] == {"charge_not_rising": "notify", "run_too_long": "notify"}
+    assert msg["result"]["mower_rain_detection"] is False  # snapshot.rain is None: detection off
+
+    await ws(hass, hass_ws_client, entry, "set_anomaly_action",
+             detector="run_too_long", action="pause")
+    mower.emit_snapshot(replace(DEFAULT_SNAPSHOT, rain=False))
+    await hass.async_block_till_done()
+    msg = await ws(hass, hass_ws_client, entry, "list_checks")
+    assert msg["result"]["anomaly_actions"]["run_too_long"] == "pause"
+    assert msg["result"]["mower_rain_detection"] is True

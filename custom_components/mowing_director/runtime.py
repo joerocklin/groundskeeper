@@ -477,6 +477,18 @@ class Director:
         """Check records with the built-ins always present."""
         return normalise_checks(self._data.get("config", {}).get("checks"))
 
+    @property
+    def anomaly_actions(self) -> dict[str, str]:
+        """Per-detector action with the `notify` default filled in (spec §11.4)."""
+        stored = self._data.get("config", {}).get("anomaly_actions", {})
+        return {d: stored.get(d, "notify") for d in DETECTORS}
+
+    @property
+    def mower_rain_detection(self) -> bool:
+        """Whether the Mower's own rain flag is live; the snapshot reads `None` when
+        detection is off on the Mower (spec §9.3)."""
+        return self.adapter.snapshot.rain is not None
+
     def _custom_results(self, checks: list[dict[str, Any]]) -> dict[str, str | None]:
         """Reason each enabled Custom Check fails, None when it passes."""
         return {

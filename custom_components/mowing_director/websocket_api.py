@@ -873,7 +873,11 @@ async def ws_list_checks(hass, connection, msg) -> None:
     """Every Check of one Mower, built-ins included."""
 
     async def call(director):
-        return {"checks": director.checks}
+        return {
+            "checks": director.checks,
+            "anomaly_actions": director.anomaly_actions,
+            "mower_rain_detection": director.mower_rain_detection,
+        }
 
     await _checks_call(hass, connection, msg, call)
 
