@@ -96,6 +96,8 @@ const STYLE = `
   table.schedule td, table.schedule th, table.preview td, table.preview th { padding: 4px 6px; text-align: left; }
   ul.plan-runs { list-style: none; margin: 0; padding: 0; }
   ul.plan-runs li { padding: 6px 0; }
+  ul.targets, ul.categories { list-style: none; margin: 0 0 8px; padding: 0; }
+  ul.targets li, ul.categories li { padding: 6px 0; }
   .hint { color: var(--secondary-text-color); }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
 `;
@@ -670,6 +672,55 @@ function newPlanFormHtml(d, zones, preview, lengthUnit) {
     ${preview ? previewHtml(preview, lengthUnit) : ''}</section>`;
 }
 
+// -- Settings tab: notify targets and categories (spec §16.3, §12.3, §4.2) ----------
+// Section builders for the Settings tab. Later tickets fill #settings-tunables and
+// #settings-storage; this ticket owns #settings-notifications.
+
+const NOTIFY_CATEGORIES = [
+  ['run_failed', 'Run failed (Retry / Skip Plan / Abort)', true],
+  ['run_on_hold', 'Run on hold (Resume / End Run)', true],
+  ['check_waits', 'Check waits (timeout, Mower ready, template error, start refused)', false],
+  ['is_raining', '"Is it raining?" (off: no question, unconfirmed counts as rain)', false],
+  ['run_started', 'Run started', false],
+  ['run_done', 'Run done', false],
+  ['schedule_completed', 'Schedule completed', false],
+];
+
+// Legacy `notify.mobile_app_*` services that exist, as stored service names.
+function notifyTargetOptions(services) {
+  const notify = (services && services.notify) || {};
+  return Object.keys(notify).filter((n) => n.startsWith('mobile_app_')).sort();
+}
+
+function notifyTargetsPayload(selected) {
+  return { targets: [...selected] };
+}
+
+function notifySettingsHtml(settings, available) {
+  const stored = settings.targets || [];
+  const rows = available.map((n) => `<li><label><input type="checkbox" data-target="${esc(n)}"${stored.includes(n) ? ' checked' : ''}> ${esc(n)}</label></li>`);
+  for (const n of stored.filter((t) => !available.includes(t))) {
+    rows.push(`<li><label><input type="checkbox" data-target="${esc(n)}" checked> ${esc(n)}</label> <span class="tag missing">no longer exists</span></li>`);
+  }
+  const phones = rows.length
+    ? `<ul class="targets">${rows.join('')}</ul>`
+    : '<p class="hint">No phones found. No phone, panel only: Prompts show here and failures raise a persistent notification.</p>';
+  const cats = NOTIFY_CATEGORIES.map(([id, label, locked]) => {
+    const on = locked || (settings.categories || {})[id];
+    return `<li><label><input type="checkbox" data-category="${id}"${on ? ' checked' : ''}${locked ? ' disabled' : ''}> ${esc(label)}</label>${locked ? ' <span class="tag">always on</span>' : ''}</li>`;
+  }).join('');
+  return `<h2>Notifications</h2>
+    <h3>Where should the Mower reach you?</h3>${phones}
+    <h3>Categories</h3><ul class="categories">${cats}</ul>
+    <p class="hint">Gate prompts follow each Gate's "Notify me before crossings" setting (Zones &amp; Gates). Anomaly notifications follow each detector's action (off, notify or pause).</p>`;
+}
+
+function settingsTabHtml(notifyHtml) {
+  return `<section class="card" id="settings-notifications">${notifyHtml}</section>
+    <section class="card" id="settings-tunables"></section>
+    <section class="card" id="settings-storage"></section>`;
+}
+
 class MowingDirectorPanel extends HTMLElement {
   constructor() {
     super();
@@ -695,6 +746,7 @@ class MowingDirectorPanel extends HTMLElement {
     this._runId = null; // tapped Run, highlighted on the map
     this._sheet = null; // { run_id, warnings, error } while the edit sheet is open
     this._nowZonesAt = 0;
+    this._notify = null; // Settings tab: { targets, categories } from get_notify_settings
   }
 
   set hass(hass) {
@@ -729,6 +781,7 @@ class MowingDirectorPanel extends HTMLElement {
   async _subscribe() {
     this._unsubscribe();
     this._snapshot = null;
+    this._notify = null;
     if (!this._entryId) return;
     this._unsub = await this._hass.connection.subscribeMessage(
       (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._render(); },
@@ -1113,6 +1166,52 @@ class MowingDirectorPanel extends HTMLElement {
     });
   }
 
+  // -- Settings tab: notify targets and categories --
+  async _loadNotify() {
+    if (!this._entryId || this._tab !== 'settings') return;
+    try {
+      this._notify = await this._hass.connection.sendMessagePromise({
+        type: 'mowing_director/get_notify_settings', entry_id: this._entryId });
+      this._render();
+    } catch (err) {
+      this._error = err.message || String(err);
+    }
+  }
+
+  async _setNotify(extra) {
+    try {
+      this._notify = await this._hass.connection.sendMessagePromise({
+        type: 'mowing_director/set_notify_settings', entry_id: this._entryId, ...extra });
+    } catch (err) {
+      this._notifyError = err.message || String(err);
+    }
+    this._render();
+  }
+
+  _settingsTab() {
+    const notify = this._notify
+      ? notifySettingsHtml(this._notify, notifyTargetOptions(this._hass && this._hass.services))
+      : '<h2>Notifications</h2><p class="hint">Loading...</p>';
+    const err = this._notifyError ? `<p class="warn" id="notify-error">${esc(this._notifyError)}</p>` : '';
+    return settingsTabHtml(notify + err);
+  }
+
+  _wireSettings(root) {
+    root.querySelectorAll('[data-target]').forEach((box) => {
+      box.addEventListener('change', () => {
+        this._notifyError = null;
+        const picked = [...root.querySelectorAll('[data-target]')].filter((b) => b.checked).map((b) => b.dataset.target);
+        this._setNotify(notifyTargetsPayload(picked));
+      });
+    });
+    root.querySelectorAll('[data-category]').forEach((box) => {
+      box.addEventListener('change', () => {
+        this._notifyError = null;
+        this._setNotify({ categories: { [box.dataset.category]: box.checked } });
+      });
+    });
+  }
+
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
     const rh = this.shadowRoot.querySelector('#run-height');
@@ -1137,6 +1236,7 @@ class MowingDirectorPanel extends HTMLElement {
     else if (this._tab === 'zones') body = `<main>${this._zonesTab()}</main>`;
     else if (this._tab === 'now') body = `<main>${this._nowTab()}</main>`;
     else if (this._tab === 'schedule') body = `<main>${this._scheduleTab()}</main>`;
+    else if (this._tab === 'settings') body = `<main>${this._settingsTab()}</main>`;
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
@@ -1146,11 +1246,12 @@ class MowingDirectorPanel extends HTMLElement {
       this._subscribe().then(() => this._render());
     };
     this.shadowRoot.querySelectorAll('nav button').forEach((b) => {
-      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); };
+      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); this._loadNotify(); };
     });
     if (this._tab === 'zones') this._wireZones(this.shadowRoot);
     if (this._tab === 'now' && this._now) this._wireNow(this.shadowRoot);
     if (this._tab === 'schedule') this._wireSchedule(this.shadowRoot);
+    if (this._tab === 'settings') this._wireSettings(this.shadowRoot);
   }
 }
 
