@@ -10,14 +10,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import ATTR_CONFIG_ENTRY_ID
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
 from .store import MowerStore, empty_store_data
+from .zone_sync import async_detach_zone_sync, async_get_zone_sync
 
 type MowingDirectorConfigEntry = ConfigEntry[MowerStore]
 
@@ -27,8 +31,41 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Mowing Director. Services are registered here, never per entry."""
     async_register_commands(hass)
-    # The service set lands in a later ticket; nothing to register yet.
+    # The rest of the service set lands in later tickets.
+
+    async def _refresh_zones(call: ServiceCall) -> None:
+        entry = _target_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+        sync = async_get_zone_sync(hass, entry.entry_id)
+        if sync is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="no_zone_sync"
+            )
+        await sync.async_sync()
+
+    hass.services.async_register(
+        DOMAIN,
+        "refresh_zones",
+        _refresh_zones,
+        schema=vol.Schema({vol.Optional(ATTR_CONFIG_ENTRY_ID): str}),
+    )
     return True
+
+
+def _target_entry(hass: HomeAssistant, entry_id: str | None) -> ConfigEntry:
+    """Resolve a service's Mower: explicit id, else the only loaded entry (§13.1)."""
+    loaded = hass.config_entries.async_loaded_entries(DOMAIN)
+    if entry_id is not None:
+        for entry in loaded:
+            if entry.entry_id == entry_id:
+                return entry
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="unknown_entry"
+        )
+    if len(loaded) != 1:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="entry_ambiguous"
+        )
+    return loaded[0]
 
 
 async def async_setup_entry(
@@ -51,6 +88,7 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: MowingDirectorConfigEntry
 ) -> bool:
     """Unload a Mower. Never commands the Mower; state is already persisted."""
+    async_detach_zone_sync(hass, entry.entry_id)
     others = [
         e
         for e in hass.config_entries.async_loaded_entries(DOMAIN)

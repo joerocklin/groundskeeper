@@ -24,5 +24,37 @@
     "create_entry": {
       "mower_added": "Configure {mower} in the [Mowing Director panel]({panel_url})."
     }
+  },
+  "issues": {
+    "missing_zones": {
+      "title": "Zones missing from the Mower's map",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Zones missing from the Mower's map",
+            "description": "These Zones no longer match anything on the Mower's map: {zones}. Delete them and their Plans, or wait if the map is being rebuilt.",
+            "menu_options": {
+              "delete": "Delete these Zones and their Plans",
+              "wait": "Wait"
+            }
+          }
+        },
+        "abort": {
+          "waiting": "Nothing changed. The Zones stay marked missing until they return."
+        }
+      },
+      "description": "These Zones no longer match anything on the Mower's map: {zones}."
+    }
+  },
+  "exceptions": {
+    "no_zone_sync": {
+      "message": "This Mower has no adapter attached yet."
+    },
+    "unknown_entry": {
+      "message": "No loaded Mower has that config_entry_id."
+    },
+    "entry_ambiguous": {
+      "message": "More than one Mower is loaded; pass config_entry_id."
+    }
   }
 }
