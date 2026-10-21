@@ -104,6 +104,10 @@
           }
         }
       }
+    },
+    "broken_references": {
+      "title": "Broken references",
+      "description": "{mower} refers to things that no longer resolve. Until they do, each reads as unavailable (a Custom Check fails, a Wet grass source is skipped, a Gate is believed closed, a notify target gets nothing). Fix them in the Mowing Director panel; this clears when they resolve or are edited away.\n\n{references}"
     }
   },
   "exceptions": {
@@ -361,6 +365,15 @@
     },
     "store_safe_idle": {
       "message": "The saved data for this Mower is unusable, so Mowing Director is idle. Open Repairs to start fresh or restore an export."
+    },
+    "import_not_idle": {
+      "message": "The Schedule must be idle: finish or cancel the current Plans and Runs first."
+    },
+    "import_invalid": {
+      "message": "That file is not a usable Mowing Director export."
+    },
+    "nothing_to_undo": {
+      "message": "There is no import to undo."
     }
   },
   "entity": {
@@ -635,6 +648,20 @@
         "detector": {
           "name": "Detector",
           "description": "The detector whose Anomaly to dismiss."
+        }
+      }
+    },
+    "export_config": {
+      "name": "Export configuration",
+      "description": "Return the Mower's configuration (optionally with Run history) as export JSON. Never includes state or learned data.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "The Mower; optional when only one is loaded."
+        },
+        "include_history": {
+          "name": "Include history",
+          "description": "Also export finished Runs."
         }
       }
     }
