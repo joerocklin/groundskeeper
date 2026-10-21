@@ -15,7 +15,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_CONFIG_ENTRY_ID, CONF_DEVICE, Platform
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -24,6 +24,7 @@ from .adapters import get_adapter_factory
 from .const import DOMAIN
 from .core import active_run, normalise_core_state
 from .housekeeping import async_detach_housekeeping
+from .notifier import ACTION_EVENT, async_handle_action_event
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
 from .runtime import Director, async_register_director, async_unregister_director
@@ -49,6 +50,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Mowing Director. Services are registered here, never per entry."""
     async_register_commands(hass)
     async_register_services(hass)
+
+    async def _on_action_tap(event: Event) -> None:
+        await async_handle_action_event(hass, event)
+
+    hass.bus.async_listen(ACTION_EVENT, _on_action_tap)
     # The rest of the service set lands in later tickets.
 
     async def _refresh_zones(call: ServiceCall) -> None:

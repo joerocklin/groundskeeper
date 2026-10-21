@@ -28,6 +28,13 @@ from .const import DOMAIN
 from .core import DETECTORS, plan_status
 from .heights import MAX_MAX_CUT, MIN_MAX_CUT
 from .run_settings import SettingsError, finishing_set, mower_run_defaults, validate_overrides
+from .notifier import (
+    CATEGORY_DEFAULTS,
+    CONFIG_CATEGORIES,
+    CONFIG_TARGETS,
+    LOCKED_CATEGORIES,
+    notify_settings,
+)
 from .runtime import Director, async_get_director
 from .schedule_ops import (
     ScheduleError,
@@ -101,6 +108,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_set_zone_range,
         ws_reset_zone_range,
         ws_set_zone_range_tolerance,
+        ws_get_notify_settings,
+        ws_set_notify_settings,
         ws_dismiss_anomaly,
         ws_set_anomaly_action,
     ):
@@ -802,6 +811,54 @@ async def ws_delete_check(hass, connection, msg) -> None:
         return {}
 
     await _checks_call(hass, connection, msg, call)
+
+
+# -- Notification targets and category toggles (spec §12.1, §12.3) -----------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/get_notify_settings", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_get_notify_settings(hass, connection, msg) -> None:
+    """Legacy `notify.mobile_app_*` service names and the category toggles."""
+    await _schedule_call(
+        hass, connection, msg, lambda d: _ready(notify_settings(d.data.get("config", {})))
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_notify_settings",
+        vol.Required("entry_id"): str,
+        vol.Optional("targets"): [str],
+        vol.Optional("categories"): {vol.In(list(CATEGORY_DEFAULTS)): bool},
+    }
+)
+@websocket_api.async_response
+async def ws_set_notify_settings(hass, connection, msg) -> None:
+    """Edit the targets (service names, `notify.` prefix optional) and toggles."""
+
+    async def call(director: Director) -> dict:
+        categories = msg.get("categories", {})
+        if any(categories.get(locked) is False for locked in LOCKED_CATEGORIES):
+            raise ScheduleError(
+                "category_locked", error="Failure and on-hold notifications are always on."
+            )
+
+        def edit(cfg: dict) -> None:
+            if "targets" in msg:
+                names = [t.strip().removeprefix("notify.") for t in msg["targets"]]
+                cfg[CONFIG_TARGETS] = list(dict.fromkeys(n for n in names if n))
+            if categories:
+                cfg[CONFIG_CATEGORIES] = {**cfg.get(CONFIG_CATEGORIES, {}), **categories}
+
+        await director.async_edit_config(edit)
+        return notify_settings(director.data.get("config", {}))
+
+    await _schedule_call(hass, connection, msg, call)
 
 
 # -- Anomaly detectors (spec §11, §16) --------------------------------------------
