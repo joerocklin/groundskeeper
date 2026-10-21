@@ -63,6 +63,15 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_refresh_zones)
     websocket_api.async_register_command(hass, ws_set_zone_hidden)
+    for cmd in (
+        ws_get_zone_angles,
+        ws_set_zone_bearing,
+        ws_reset_zone_bearing,
+        ws_set_zone_range,
+        ws_reset_zone_range,
+        ws_set_zone_range_tolerance,
+    ):
+        websocket_api.async_register_command(hass, cmd)
 
 
 @websocket_api.require_admin
@@ -167,3 +176,134 @@ async def ws_set_zone_hidden(
         return
     async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"])
+
+
+# -- Zone bearing and Allowed angle range (spec §4.5, §5.4) ------------------
+
+_ZONE = {vol.Required("entry_id"): str, vol.Required("zone_id"): str}
+_ANGLE = vol.All(vol.Coerce(float), vol.Range(min=-90, max=90))
+
+
+async def _zone_angles_call(hass, connection, msg, call) -> None:
+    """Run `call(sync)` for a Zone, answering with its angle records."""
+    sync = async_get_zone_sync(hass, msg["entry_id"])
+    if sync is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        result = await call(sync)
+    except KeyError:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Zone")
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/get_zone_angles",
+        vol.Required("entry_id"): str,
+        vol.Optional("zone_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_zone_angles(hass, connection, msg) -> None:
+    """Read bearing and range records (one Zone, or all)."""
+    sync = async_get_zone_sync(hass, msg["entry_id"])
+    if sync is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        zones = await sync.async_get_angles(msg.get("zone_id"))
+    except KeyError:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Zone")
+        return
+    connection.send_result(msg["id"], {"zones": zones})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_zone_bearing",
+        **_ZONE,
+        vol.Required("value"): vol.All(vol.Coerce(float), vol.Range(min=0, max=360)),
+    }
+)
+@websocket_api.async_response
+async def ws_set_zone_bearing(hass, connection, msg) -> None:
+    """Manual Zone bearing."""
+    await _zone_angles_call(
+        hass, connection, msg, lambda s: s.async_set_bearing(msg["zone_id"], msg["value"])
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/reset_zone_bearing", **_ZONE}
+)
+@websocket_api.async_response
+async def ws_reset_zone_bearing(hass, connection, msg) -> None:
+    """Back to the derived bearing."""
+    await _zone_angles_call(
+        hass, connection, msg, lambda s: s.async_reset_bearing(msg["zone_id"])
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_zone_range",
+        **_ZONE,
+        vol.Optional("min"): _ANGLE,
+        vol.Optional("max"): _ANGLE,
+        vol.Optional("full"): True,
+    }
+)
+@websocket_api.async_response
+async def ws_set_zone_range(hass, connection, msg) -> None:
+    """Manual Allowed angle range: `min` and `max` (min <= 0 <= max), or `full`."""
+    if msg.get("full"):
+        rng: Any = "full"
+    elif "min" in msg and "max" in msg and msg["min"] <= 0 <= msg["max"]:
+        rng = {"min": msg["min"], "max": msg["max"]}
+    else:
+        connection.send_error(
+            msg["id"], websocket_api.ERR_INVALID_FORMAT,
+            "Need full, or min <= 0 <= max",
+        )
+        return
+    await _zone_angles_call(
+        hass, connection, msg, lambda s: s.async_set_range(msg["zone_id"], rng)
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/reset_zone_range", **_ZONE}
+)
+@websocket_api.async_response
+async def ws_reset_zone_range(hass, connection, msg) -> None:
+    """Back to the derived range."""
+    await _zone_angles_call(
+        hass, connection, msg, lambda s: s.async_reset_range(msg["zone_id"])
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_zone_range_tolerance",
+        **_ZONE,
+        vol.Required("tolerance"): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=0, max=1))
+        ),
+    }
+)
+@websocket_api.async_response
+async def ws_set_zone_range_tolerance(hass, connection, msg) -> None:
+    """Per-Zone tolerance override (null clears it)."""
+    await _zone_angles_call(
+        hass, connection, msg,
+        lambda s: s.async_set_range_tolerance(msg["zone_id"], msg["tolerance"]),
+    )

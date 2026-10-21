@@ -7,7 +7,10 @@ the per-Mower "missing Zones" Repairs issue current.
 
 A Director Zone is a plain dict (JSON for the Store):
 
-    id, native_ref, name, hidden, missing, polygon, bearing_override
+    id, native_ref, name, hidden, missing, polygon, bearing, angle_range
+
+`bearing` and `angle_range` are the records of `zone_angles`; they are filled
+in by `ZoneSync` after every reconcile.
 
 `id` is a ULID and never changes; `native_ref` and `name` follow the Mower.
 """
@@ -24,6 +27,7 @@ from homeassistant.util import ulid as ulid_util
 
 from .adapter import AdapterSignal, MowerAdapter, Zone, ZonesChanged
 from .const import DOMAIN
+from .zone_angles import refresh_zone_angles
 
 ISSUE_MISSING_ZONES = "missing_zones_{}"
 
@@ -90,7 +94,6 @@ def reconcile_zones(
                 "hidden": False,
                 "missing": False,
                 "polygon": lz.polygon,
-                "bearing_override": None,
             }
         )
     return result
@@ -158,6 +161,7 @@ class ZoneSync:
         self._unsub: CALLBACK_TYPE | None = None
         self._task: asyncio.Task | None = None
         self._data: dict | None = None
+        self._range_listeners: list[Callable[[str, Any], None]] = []
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -215,6 +219,7 @@ class ZoneSync:
             cfg = await self._config()
             listed = await self._adapter.list_zones()
             cfg["zones"] = reconcile_zones(cfg["zones"], listed)
+            await self._recompute(cfg)
             channels = await self._adapter.list_channels()
             cfg["channels"] = reconcile_channels(
                 cfg["channels"], channels, cfg["zones"]
@@ -251,6 +256,114 @@ class ZoneSync:
             await self._store.async_save(self._data)
             self._update_issue(cfg["zones"])
 
+    # -- bearing and Allowed angle range (spec §4.5, §5.4) -------------------
+
+    @callback
+    def subscribe_range_changes(
+        self, listener: Callable[[str, Any], None]
+    ) -> CALLBACK_TYPE:
+        """Core input: `listener(zone_id, angle_range)` runs whenever a
+        Zone's effective Allowed angle range changes."""
+        self._range_listeners.append(listener)
+
+        @callback
+        def _unsub() -> None:
+            self._range_listeners.remove(listener)
+
+        return _unsub
+
+    async def _recompute(self, cfg: dict, before: dict | None = None) -> None:
+        """Refresh every Zone's derived bearing and range; notify changes.
+
+        `before` maps Zone id to its range before an edit was applied."""
+        settings = cfg.get("settings", {})
+        if before is None:
+            before = _ranges(cfg["zones"])
+        cfg["zones"] = await self._hass.async_add_executor_job(
+            _refresh_all, cfg["zones"], settings
+        )
+        for z in cfg["zones"]:
+            now = _effective_range(z)
+            if before.get(z["id"]) != now:
+                for listener in list(self._range_listeners):
+                    listener(z["id"], now)
+
+    async def _edit_zone(self, zone_id: str, edit: Callable[[dict], None]) -> dict:
+        async with self._lock:
+            cfg = await self._config()
+            zone = next((z for z in cfg["zones"] if z["id"] == zone_id), None)
+            if zone is None:
+                raise KeyError(zone_id)
+            before = _ranges(cfg["zones"])
+            edit(zone)
+            await self._recompute(cfg, before)
+            await self._store.async_save(self._data)
+            return next(z for z in cfg["zones"] if z["id"] == zone_id)
+
+    async def async_get_angles(self, zone_id: str | None = None) -> list[dict]:
+        """Bearing and range records, for one Zone or all."""
+        zones = (await self._config())["zones"]
+        if zone_id is None:
+            return [_angles(z) for z in zones]
+        for z in zones:
+            if z["id"] == zone_id:
+                return [_angles(z)]
+        raise KeyError(zone_id)
+
+    async def async_set_bearing(self, zone_id: str, value: float) -> dict:
+        """Manual Zone bearing; survives geometry refresh."""
+
+        def edit(z: dict) -> None:
+            z["bearing"] = {**(z.get("bearing") or {}), "source": "manual",
+                            "value": float(value) % 180.0}
+
+        return _angles(await self._edit_zone(zone_id, edit))
+
+    async def async_reset_bearing(self, zone_id: str) -> dict:
+        """Back to the derived bearing."""
+
+        def edit(z: dict) -> None:
+            z["bearing"] = {**(z.get("bearing") or {}), "source": "derived"}
+
+        return _angles(await self._edit_zone(zone_id, edit))
+
+    async def async_set_range(self, zone_id: str, angle_range: Any) -> dict:
+        """Manual Allowed angle range: {min, max} or "full"."""
+
+        def edit(z: dict) -> None:
+            z["angle_range"] = {**(z.get("angle_range") or {}),
+                                "source": "manual", "angle_range": angle_range}
+
+        return _angles(await self._edit_zone(zone_id, edit))
+
+    async def async_reset_range(self, zone_id: str) -> dict:
+        """Back to the derived range."""
+
+        def edit(z: dict) -> None:
+            z["angle_range"] = {**(z.get("angle_range") or {}), "source": "derived"}
+
+        return _angles(await self._edit_zone(zone_id, edit))
+
+    async def async_set_range_tolerance(
+        self, zone_id: str, tolerance: float | None
+    ) -> dict:
+        """Per-Zone tolerance override (None clears it)."""
+
+        def edit(z: dict) -> None:
+            z["angle_range"] = {**(z.get("angle_range") or {}),
+                                "tolerance_override": tolerance}
+
+        return _angles(await self._edit_zone(zone_id, edit))
+
+    async def async_update_settings(self, **changes: Any) -> None:
+        """Mower range inputs (range_tolerance, spacing, speed,
+        perimeter_laps, nogo_laps); recomputes every Zone."""
+        async with self._lock:
+            cfg = await self._config()
+            cfg.setdefault("settings", {}).update(changes)
+            await self._recompute(cfg)
+            await self._store.async_save(self._data)
+
     def _update_issue(self, zones: list[ZoneRecord]) -> None:
         issue_id = ISSUE_MISSING_ZONES.format(self._entry_id)
         missing = sorted(z["name"] for z in zones if z["missing"])
@@ -267,6 +380,26 @@ class ZoneSync:
             translation_placeholders={"zones": ", ".join(missing)},
             data={"entry_id": self._entry_id},
         )
+
+
+def _angles(zone: ZoneRecord) -> dict:
+    return {
+        "zone_id": zone["id"],
+        "bearing": zone.get("bearing"),
+        "angle_range": zone.get("angle_range"),
+    }
+
+
+def _ranges(zones: list[ZoneRecord]) -> dict:
+    return {z["id"]: _effective_range(z) for z in zones}
+
+
+def _effective_range(zone: ZoneRecord) -> Any:
+    return (zone.get("angle_range") or {}).get("angle_range")
+
+
+def _refresh_all(zones: list[ZoneRecord], settings: dict) -> list[ZoneRecord]:
+    return [refresh_zone_angles(z, settings) for z in zones]
 
 
 class _Sink:

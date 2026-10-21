@@ -26,7 +26,7 @@ def _ids():
 def _zone(id_, ref, name, **kw):
     return {
         "id": id_, "native_ref": ref, "name": name, "hidden": False,
-        "missing": False, "polygon": POLY, "bearing_override": None, **kw,
+        "missing": False, "polygon": POLY, **kw,
     }
 
 
@@ -45,11 +45,12 @@ def test_same_ref_new_name_renames() -> None:
 
 
 def test_new_ref_known_name_rebinds_keeping_id_and_overrides() -> None:
-    known = [_zone("z1", "a", "Front", hidden=True, bearing_override=42.0)]
+    known = [_zone("z1", "a", "Front", hidden=True,
+                   bearing={"source": "manual", "value": 42.0})]
     out = reconcile_zones(known, [Zone("b", "Front")], _ids())
     assert len(out) == 1
     z = out[0]
-    assert (z["id"], z["native_ref"], z["hidden"], z["bearing_override"]) == (
+    assert (z["id"], z["native_ref"], z["hidden"], z["bearing"]["value"]) == (
         "z1", "b", True, 42.0,
     )
     assert z["polygon"] is None  # changed ref refetches the polygon
@@ -103,7 +104,7 @@ async def _attached(hass, mower):
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     sync = async_attach_zone_sync(hass, entry.entry_id, mower, entry.runtime_data)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     return entry, sync
 
 
@@ -137,7 +138,7 @@ async def test_zone_list_changed_signal_triggers_sync(hass) -> None:
     _, sync = await _attached(hass, mower)
     mower.zones = mower.zones + (Zone("33333333", "Side"),)
     mower.emit_signal(ZonesChanged())
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert "Side" in [z["name"] for z in await sync.async_zones()]
 
 
@@ -243,3 +244,98 @@ async def test_ws_refresh_and_hide(hass, hass_ws_client) -> None:
                         "entry_id": entry.entry_id})
     assert (await ws.receive_json())["success"]
     assert (await sync.async_zones())[0]["hidden"] is True
+
+
+# -- bearing and Allowed angle range (issue #12) ------------------------------
+
+from tests.test_zone_bearing import rect  # noqa: E402
+
+
+def _long(bearing):
+    return {"type": "Polygon", "coordinates": [rect(40, 8, bearing)]}
+
+
+async def _with_polygon(hass, bearing=30):
+    mower = FakeMower()
+    mower.zones = (Zone("11111111", "Front Lawn", _long(bearing)),
+                   Zone("22222222", "Backyard", None))
+    _, sync = await _attached(hass, mower)
+    return mower, sync, (await sync.async_zones())
+
+
+async def test_sync_fills_bearing_and_range_records(hass) -> None:
+    _, sync, zones = await _with_polygon(hass)
+    assert zones[0]["bearing"]["status"] == "ready"
+    assert abs(zones[0]["bearing"]["value"] - 30) < 0.5
+    assert zones[1]["bearing"]["status"] == "pending"
+    assert zones[1]["angle_range"]["angle_range"] == "unset"
+
+
+async def test_polygon_arriving_later_sets_bearing_and_notifies_core(hass) -> None:
+    mower, sync, zones = await _with_polygon(hass)
+    seen = []
+    sync.subscribe_range_changes(lambda zid, r: seen.append((zid, r)))
+    mower.zones = (mower.zones[0], Zone("22222222", "Backyard", _long(80)))
+    await sync.async_sync()
+    zones = await sync.async_zones()
+    assert zones[1]["bearing"]["status"] == "ready"
+    assert [zid for zid, _ in seen] == [zones[1]["id"]]
+    assert seen[0][1] != "unset"
+
+
+async def test_manual_bearing_survives_refresh_and_recomputes_range(hass) -> None:
+    mower, sync, zones = await _with_polygon(hass)
+    zid = zones[0]["id"]
+    before = zones[0]["angle_range"]["derived"]
+    seen = []
+    sync.subscribe_range_changes(lambda z, r: seen.append(r))
+    await sync.async_set_bearing(zid, 100.0)
+    await sync.async_sync()
+    z = (await sync.async_zones())[0]
+    assert (z["bearing"]["source"], z["bearing"]["value"]) == ("manual", 100.0)
+    assert abs(z["bearing"]["derived_value"] - 30) < 0.5
+    assert z["angle_range"]["derived"] != before
+    res = await sync.async_reset_bearing(zid)
+    assert abs(res["bearing"]["value"] - 30) < 0.5
+    assert res["bearing"]["source"] == "derived"
+
+
+async def test_manual_range_survives_and_reset_restores_derived(hass) -> None:
+    _, sync, zones = await _with_polygon(hass)
+    zid = zones[0]["id"]
+    derived = zones[0]["angle_range"]["derived"]
+    seen = []
+    sync.subscribe_range_changes(lambda z, r: seen.append(r))
+    await sync.async_set_range(zid, {"min": -7, "max": 9})
+    await sync.async_sync()
+    r = (await sync.async_zones())[0]["angle_range"]
+    assert (r["source"], r["angle_range"], r["derived"]) == (
+        "manual", {"min": -7, "max": 9}, derived)
+    res = await sync.async_reset_range(zid)
+    assert res["angle_range"]["angle_range"] == derived
+    assert seen == [{"min": -7, "max": 9}, derived]
+
+
+async def test_settings_change_recomputes_every_zone(hass) -> None:
+    _, sync, zones = await _with_polygon(hass)
+    await sync.async_update_settings(range_tolerance=0.0, spacing=0.3)
+    r = (await sync.async_zones())[0]["angle_range"]
+    assert r["basis"]["tolerance"] == 0.0 and r["basis"]["spacing"] == 0.3
+    assert r["derived"] != zones[0]["angle_range"]["derived"]
+
+
+async def test_zone_tolerance_override(hass) -> None:
+    _, sync, zones = await _with_polygon(hass)
+    res = await sync.async_set_range_tolerance(zones[0]["id"], 0.0)
+    assert res["angle_range"]["basis"]["tolerance"] == 0.0
+    await sync.async_update_settings(range_tolerance=0.5)
+    r = (await sync.async_zones())[0]["angle_range"]
+    assert r["basis"]["tolerance"] == 0.0
+
+
+async def test_unknown_zone_raises(hass) -> None:
+    import pytest
+
+    _, sync, _z = await _with_polygon(hass)
+    with pytest.raises(KeyError):
+        await sync.async_set_bearing("nope", 10)
