@@ -43,6 +43,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util import ulid as ulid_util
 
 from .notifier import Notifier
+from .transfer import BrokenReferences
 from .prompts import async_prompt_strings, render_content
 from .adapter import (
     AdapterSignal,
@@ -192,6 +193,7 @@ class Director:
         self.adapter = adapter
         self._store = store
         self.notifier = Notifier(self)
+        self.broken_references = BrokenReferences(self)
         self._data: dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._timers: dict[str, CALLBACK_TYPE] = {}
@@ -213,6 +215,23 @@ class Director:
     def data(self) -> dict[str, Any]:
         """The shared Store dict (config, state, learned, history)."""
         return self._data
+
+    @property
+    def store(self) -> MowerStore:
+        return self._store
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        return self._lock
+
+    async def config_replaced(self) -> None:
+        """`config` was swapped wholesale (import, undo): re-wire everything that reads it."""
+        self._resubscribe_checks()
+        await self.dispatch(lambda now: ChecksEdited(now, tuple(c["id"] for c in self.checks)))
+        await self.dispatch(GatesEdited)
+        self.broken_references.refresh()
+        for listener in list(self._listeners):
+            listener()
 
     @property
     def state(self) -> dict[str, Any]:
@@ -298,6 +317,7 @@ class Director:
         self._loaded_at = dt_util.utcnow()
         self._check_store()
         data.update(normalise_core_state(data))
+        self.broken_references.start()
         async_set_run_active_provider(self.hass, self.entry.entry_id, self.run_active)
         if self._store.safe_idle:
             # Observe nothing, decide nothing, command nothing (spec §14.7).
@@ -406,6 +426,7 @@ class Director:
     def async_unload(self) -> None:
         """Stop timers and observation. Never commands the Mower."""
         self._closed = True
+        self.broken_references.close()
         self._unsubscribe_checks()
         for cancel in (self._wait_cancel, self._cancel_started, self._unsub_adapter):
             if cancel:
@@ -599,6 +620,7 @@ class Director:
         self._data.setdefault("config", {})["checks"] = checks
         await self._store.async_save(self._data)
         self._resubscribe_checks()
+        self.broken_references.refresh()
         await self.dispatch(lambda now: ChecksEdited(now, (check_id,)))
         for listener in list(self._listeners):
             listener()
@@ -721,6 +743,7 @@ class Director:
         self._data.setdefault("config", {})["gates"] = raw
         await self._store.async_save(self._data)
         self._resubscribe_checks()
+        self.broken_references.refresh()
         await self.dispatch(GatesEdited)
         for listener in list(self._listeners):
             listener()
@@ -929,6 +952,7 @@ class Director:
         async with self._lock:
             edit(self._data.setdefault("config", {}))
             await self._store.async_save(self._data)
+            self.broken_references.refresh()
             for listener in list(self._listeners):
                 listener()
 

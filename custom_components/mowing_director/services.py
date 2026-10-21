@@ -25,6 +25,7 @@ from .core import DETECTORS
 from . import controls
 from .schedule_ops import POSITIONS, ScheduleError, create_plan, remove_plan
 from .runtime import Director, async_get_director
+from .transfer import async_export
 
 ATTR_ZONE = "zone"
 ATTR_START_HEIGHT = "start_height_mm"
@@ -39,6 +40,7 @@ ATTR_PLAN_ID = "plan_id"
 ATTR_PROMPT_ID = "prompt_id"
 ATTR_ACTION = "action"
 ATTR_DETECTOR = "detector"
+ATTR_INCLUDE_HISTORY = "include_history"
 
 _ENTRY = {vol.Optional(ATTR_CONFIG_ENTRY_ID): str}
 
@@ -119,6 +121,17 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def dismiss_anomaly(call: ServiceCall) -> None:
         await controls.async_dismiss_anomaly(_director(hass, call), call.data[ATTR_DETECTOR])
 
+    async def export_config(call: ServiceCall) -> ServiceResponse:
+        director = _director(hass, call)
+        return async_export(director, call.data.get(ATTR_INCLUDE_HISTORY, False))
+
+    hass.services.async_register(
+        DOMAIN,
+        "export_config",
+        export_config,
+        schema=vol.Schema({**_ENTRY, vol.Optional(ATTR_INCLUDE_HISTORY): bool}),
+        supports_response=SupportsResponse.ONLY,
+    )
     hass.services.async_register(
         DOMAIN,
         "dismiss_anomaly",

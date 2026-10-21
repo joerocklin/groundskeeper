@@ -195,3 +195,16 @@ dismiss_anomaly:
             - charge_not_rising
             - run_too_long
           translation_key: anomaly_detector
+
+export_config:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+    include_history:
+      required: false
+      default: false
+      selector:
+        boolean:

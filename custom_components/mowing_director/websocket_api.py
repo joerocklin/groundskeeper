@@ -18,6 +18,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
@@ -46,6 +47,7 @@ from .schedule_ops import (
     reroll_angles,
     remove_plan,
 )
+from .transfer import async_export, async_import, async_undo_import
 from .zone_sync import async_get_zone_sync
 
 SIGNAL_STATE_CHANGED = f"{DOMAIN}_state_changed_{{}}"
@@ -117,6 +119,9 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_get_retention,
         ws_set_retention_limits,
         ws_delete_zone,
+        ws_export_config,
+        ws_import_config,
+        ws_undo_import,
     ):
         websocket_api.async_register_command(hass, cmd)
 
@@ -1101,3 +1106,71 @@ async def ws_delete_zone(hass, connection, msg) -> None:
         return
     async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"])
+
+
+# -- Export and import (spec §14.8) ----------------------------------------------------
+
+async def _transfer_call(hass, connection, msg, call) -> None:
+    """Like `_schedule_call`, but refusals are translated HA errors."""
+    director = _director_or_error(hass, connection, msg)
+    if director is None:
+        return
+    try:
+        result = await call(director)
+    except HomeAssistantError as err:
+        key = getattr(err, "translation_key", None) or "error"
+        connection.send_error(msg["id"], key, str(err))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/export_config",
+        vol.Required("entry_id"): str,
+        vol.Optional("include_history", default=False): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_export_config(hass, connection, msg) -> None:
+    """The export file, for the panel to download."""
+
+    async def call(director: Director) -> dict:
+        return {"export": async_export(director, msg["include_history"])}
+
+    await _transfer_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/import_config",
+        vol.Required("entry_id"): str,
+        vol.Required("export"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_import_config(hass, connection, msg) -> None:
+    """Replace `config` from an uploaded export; allowed in safe idle (restore)."""
+
+    async def call(director: Director) -> dict:
+        return {"report": await async_import(director, msg["export"])}
+
+    await _transfer_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/undo_import", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_undo_import(hass, connection, msg) -> None:
+    """Restore the config the last import replaced."""
+
+    async def call(director: Director) -> dict:
+        await async_undo_import(director)
+        return {}
+
+    await _transfer_call(hass, connection, msg, call)
