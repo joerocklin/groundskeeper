@@ -135,7 +135,7 @@ class Housekeeping:
         """
         issue_id = ISSUE_CONFLICTING_AUTOMATIONS.format(self._entry.entry_id)
         current = self._conflicting_automations()
-        data = await self._store.async_load()
+        data = await self._store.async_data()
         learned = data.setdefault("learned", {})
         previous = learned.get("conflicting_automations")
         if current != previous:

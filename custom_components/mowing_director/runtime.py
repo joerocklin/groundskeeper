@@ -22,7 +22,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import TemplateError
+from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import sun as sun_helper
@@ -115,21 +115,7 @@ def snapshot_usable(snapshot: Snapshot) -> bool:
     return snapshot.available and snapshot.activity is not None
 
 
-def store_usable(data: dict[str, Any]) -> bool:
-    """Whether the persisted Schedule/Run state has the shape the reducer reads."""
-    state = data.get("state")
-    if state is None:
-        return True  # first install: nothing persisted yet
-    if not isinstance(state, dict):
-        return False
-    runs = state.get("runs", [])
-    return (
-        isinstance(runs, list)
-        and all(isinstance(r, dict) and "status" in r and "id" in r for r in runs)
-        and isinstance(state.get("plans", {}), dict)
-        and isinstance(state.get("schedule", {}), dict)
-        and isinstance(state.get("deadlines", {}), dict)
-    )
+
 _CORE_KEYS = ("state", "learned", "history")
 # Changes to only these never need an awaited save (spec §14.4).
 
@@ -282,9 +268,12 @@ class Director:
         data = await self._store.async_data()
         self._data = data
         self._loaded_at = dt_util.utcnow()
-        self._check_store(data)
+        self._check_store()
         data.update(normalise_core_state(data))
         async_set_run_active_provider(self.hass, self.entry.entry_id, self.run_active)
+        if self._store.safe_idle:
+            # Observe nothing, decide nothing, command nothing (spec §14.7).
+            return
         self._unsub_adapter = self.adapter.subscribe(_Sink(self))
         await self.adapter.async_start()
         if self.hass.is_running:
@@ -292,24 +281,49 @@ class Director:
         else:
             self._cancel_started = async_at_started(self.hass, self._begin_wait)
 
-    def _check_store(self, data: dict[str, Any]) -> None:
-        """An unusable Store: Repairs, Schedule idle and empty (spec §14.7)."""
-        issue_id = f"store_unusable_{self.entry.entry_id}"
-        if store_usable(data):
-            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
-            return
-        _LOGGER.error("Unreadable Schedule state for %s; reset to idle", self.entry.title)
-        data["state"] = {}
-        ir.async_create_issue(
-            self.hass,
-            DOMAIN,
-            issue_id,
-            is_fixable=False,
-            is_persistent=False,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key="store_unusable",
-            translation_placeholders={"mower": self.entry.title},
-        )
+    def _check_store(self) -> None:
+        """Raise or clear the Store's Repairs issues (spec §14.7)."""
+        entry_id = self.entry.entry_id
+        placeholders = {"mower": self.entry.title}
+        safe_id = f"store_safe_idle_{entry_id}"
+        gone_id = f"store_unusable_{entry_id}"
+        if self._store.safe_idle:
+            _LOGGER.error(
+                "Store for %s is unusable (%s); safe idle", self.entry.title, self._store.safe_idle
+            )
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                safe_id,
+                data={"entry_id": entry_id},
+                is_fixable=True,
+                is_persistent=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="store_safe_idle",
+                translation_placeholders={**placeholders, "reason": self._store.safe_idle},
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, safe_id)
+        if self._store.state_discarded:
+            _LOGGER.error("Unreadable Schedule state for %s; reset to idle", self.entry.title)
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                gone_id,
+                is_fixable=False,
+                is_persistent=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="store_unusable",
+                translation_placeholders=placeholders,
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, gone_id)
+
+    def _refuse_in_safe_idle(self) -> None:
+        if self._store.safe_idle:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="store_safe_idle"
+            )
 
     def on_frozen_snapshot(self, snapshot: Snapshot) -> None:
         """First usable snapshot ends the wait, if it has begun."""
@@ -545,6 +559,7 @@ class Director:
                 raise ValueError(f"Template error: {err}") from err
 
     async def _checks_saved(self, checks: list[dict[str, Any]], check_id: str) -> None:
+        self._refuse_in_safe_idle()
         self._data.setdefault("config", {})["checks"] = checks
         await self._store.async_save(self._data)
         self._resubscribe_checks()
@@ -596,13 +611,14 @@ class Director:
     @callback
     def submit(self, make_input: Callable[[datetime], CoreInput]) -> None:
         """Queue an input from a sync callback (adapter push, timer)."""
-        if not self._closed:
+        if not self._closed and not self._store.safe_idle:
             self.entry.async_create_task(
                 self.hass, self.dispatch(make_input), "mowing_director input"
             )
 
     async def dispatch(self, make_input: Callable[[datetime], CoreInput]) -> None:
         """Reduce, save, then perform effects; follow-up results loop here."""
+        self._refuse_in_safe_idle()
         async with self._lock:
             pending: list[Callable[[datetime], CoreInput]] = [make_input]
             while pending:
@@ -730,6 +746,7 @@ class Director:
 
     async def async_edit_config(self, edit: Callable[[dict[str, Any]], None]) -> None:
         """Apply `edit` to the Store `config` and save; never reloads the entry."""
+        self._refuse_in_safe_idle()
         async with self._lock:
             edit(self._data.setdefault("config", {}))
             await self._store.async_save(self._data)
