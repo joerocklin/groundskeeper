@@ -66,6 +66,18 @@ class Housekeeping:
         """Every check; runs on load."""
         await self.async_check_native_schedule()
 
+    async def async_enabled_task_names(self) -> str:
+        """Names of the enabled native tasks, for display."""
+        tasks = await self._adapter.list_native_tasks()
+        return ", ".join(sorted(t.name for t in tasks if t.enabled))
+
+    async def async_disable_native_tasks(self) -> None:
+        """Repairs fix: `set_task_enabled false` on every enabled task."""
+        for task in await self._adapter.list_native_tasks():
+            if task.enabled:
+                await self._adapter.set_task_enabled(task.task_id, False)
+        await self.async_check_native_schedule()
+
     async def async_check_native_schedule(self) -> None:
         """Raise or clear the "native schedule enabled" issue.
 
