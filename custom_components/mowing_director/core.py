@@ -113,6 +113,41 @@ class StartSchedule:
 
 
 @dataclass(frozen=True)
+class PauseSchedule:
+    """`pause` service / button: soft Pause (spec §6.4); never commands the Mower."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class StopNow:
+    """`stop_now` service / button: the active Run returns to `pending`."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class ResumeSchedule:
+    """`resume` service / button: `paused` to `waiting`."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class RetryRun:
+    """Failure answer Retry: the failed Run goes back to `pending` at the head."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class SkipPlan:
+    """Failure answer Skip Plan (also the Gate Prompt's while `waiting`)."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
 class CancelSchedule:
     """`cancel` service / button: Abort."""
 
@@ -155,6 +190,11 @@ class TimerFired:
 type CoreInput = (
     AddPlan
     | StartSchedule
+    | PauseSchedule
+    | StopNow
+    | ResumeSchedule
+    | RetryRun
+    | SkipPlan
     | CancelSchedule
     | SnapshotReceived
     | SignalReceived
@@ -437,6 +477,16 @@ class _Machine:
                 self._add_plan(event)
             case StartSchedule():
                 self._start_schedule("user_start")
+            case PauseSchedule():
+                self._pause()
+            case StopNow():
+                self._stop_now()
+            case ResumeSchedule():
+                self._start_schedule("user_resume")
+            case RetryRun():
+                self._retry()
+            case SkipPlan():
+                self._skip_plan()
             case CancelSchedule():
                 self._cancel()
             case SnapshotReceived():
@@ -539,9 +589,91 @@ class _Machine:
             return
         if next_run(self.s) is None:
             return
+        # A failed Run leaves only by Retry / Skip Plan / Abort (spec §6.2).
+        if any(r["status"] == RunStatus.FAILED for r in self.s["runs"]):
+            return
         self.s["blocking_error"] = None
+        self.s["schedule"]["pause_requested"] = False
         self._set_schedule(ScheduleStatus.WAITING, reason)
         self._evaluate()
+
+    # -- Pause / Stop now / Retry / Skip Plan (spec §6.3, §6.4) -------------
+
+    def _pause(self) -> None:
+        """Soft Pause: set `pause_requested`, never command the Mower."""
+        if self.status not in (ScheduleStatus.WAITING, ScheduleStatus.RUNNING):
+            return
+        self.s["schedule"]["pause_requested"] = True
+        if self.status == ScheduleStatus.WAITING:
+            self._cancel_deadline(DEADLINE_STABILITY)
+            self._set_schedule(ScheduleStatus.PAUSED, "user_pause")
+        # `running`: the Run ends first; `_finish_run` then pauses.
+
+    def _stop_now(self) -> None:
+        """The active Run returns to `pending` at the head; Schedule `paused`."""
+        run = active_run(self.s)
+        if run is None:
+            return
+        self._clear_run_deadlines()
+        for key in ("starting_at", "started_at", "job_ref", "finished_at"):
+            run.pop(key, None)
+        self._set_run(run, RunStatus.PENDING, "stop_now")
+        self.s["runs"].remove(run)
+        self.s["runs"].insert(0, run)
+        self.effects.append(AbortRunEffect("stop_now"))
+        self._set_schedule(ScheduleStatus.PAUSED, "stop_now")
+
+    def _failed_run(self) -> dict[str, Any] | None:
+        if self.status != ScheduleStatus.PAUSED:
+            return None
+        return next((r for r in self.s["runs"] if r["status"] == RunStatus.FAILED), None)
+
+    def _after_decision(self, reason: str) -> None:
+        """Leave `paused` after a failure answer, honouring `pause_requested`."""
+        if next_run(self.s) is None:
+            self.s["schedule"]["pause_requested"] = False
+            self._set_schedule(ScheduleStatus.IDLE, reason)
+        elif self.s["schedule"]["pause_requested"]:
+            self._set_schedule(ScheduleStatus.PAUSED, "pause_requested")
+        else:
+            self.s["blocking_error"] = None
+            self._set_schedule(ScheduleStatus.WAITING, reason)
+            self._evaluate()
+
+    def _retry(self) -> None:
+        run = self._failed_run()
+        if run is None:
+            return
+        run.pop("finished_at", None)
+        self._set_run(run, RunStatus.PENDING, "retry")
+        self.s["runs"].remove(run)
+        self.s["runs"].insert(0, run)
+        self._after_decision("retry")
+
+    def _skip_plan(self) -> None:
+        failed = self._failed_run()
+        if failed is not None:
+            plan_id = failed["plan_id"]
+        elif self.status == ScheduleStatus.WAITING and (head := next_run(self.s)):
+            plan_id = head["plan_id"]  # Gate Prompt Skip Plan (spec §10)
+        else:
+            return
+        self._cancel_deadline(DEADLINE_STABILITY)
+        for run in list(self.s["runs"]):
+            if run["plan_id"] != plan_id:
+                continue
+            if run["status"] == RunStatus.PENDING:
+                run["finished_at"] = iso(self.now)
+                self._set_run(run, RunStatus.SKIPPED, "skip_plan")
+            if run["status"] in (RunStatus.FAILED, RunStatus.SKIPPED):
+                self._archive_run(run)
+        if failed is not None:
+            self._after_decision("skip_plan")
+        elif next_run(self.s) is None:
+            self.s["waiting_on"] = []
+            self._set_schedule(ScheduleStatus.IDLE, "skip_plan")
+        else:
+            self._evaluate()
 
     # -- Checks and starting a Run ----------------------------------------
 
@@ -698,9 +830,13 @@ class _Machine:
             del samples[:-DURATION_SAMPLES_MAX]
         self._archive_run(run)
         if next_run(self.s) is not None:
-            self._set_schedule(ScheduleStatus.WAITING, "run_done")
-            self._evaluate()
+            if self.s["schedule"]["pause_requested"]:
+                self._set_schedule(ScheduleStatus.PAUSED, "pause_requested")
+            else:
+                self._set_schedule(ScheduleStatus.WAITING, "run_done")
+                self._evaluate()
         else:
+            self.s["schedule"]["pause_requested"] = False
             plan_ids = sorted({r["plan_id"] for r in self.h["runs"][-50:]})
             self._set_schedule(ScheduleStatus.IDLE, "schedule_completed")
             self._emit("schedule_completed", plan_id=run["plan_id"], plan_ids=plan_ids)
