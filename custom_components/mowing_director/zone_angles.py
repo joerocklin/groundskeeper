@@ -113,3 +113,15 @@ def angle_estimates(zone: dict) -> dict | None:
         "min_edge": at(rng["min"]),
         "max_edge": at(rng["max"]),
     }
+
+
+def run_estimate_s(zone: dict, rel_angle: float) -> float | None:
+    """Estimated mow time of one Run on `zone` at a path angle relative to the
+    bearing (spec 5.4/5.5), or None while the bearing or outline is unknown.
+    Uses the basis stored on the range record."""
+    rec = zone.get("angle_range") or {}
+    bearing = (zone.get("bearing") or {}).get("value")
+    ring = _ring(zone.get("polygon"))
+    if bearing is None or ring is None or "basis" not in rec:
+        return None
+    return estimate_at(ring, bearing, rel_angle, basis=Basis(**rec["basis"])).time_s

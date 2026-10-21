@@ -41,6 +41,7 @@ from .runtime import Director, async_get_director
 from .schedule_ops import (
     ScheduleError,
     create_plan,
+    preview_plan,
     delete_run,
     edit_run,
     move_run,
@@ -100,6 +101,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_get_schedule,
         ws_add_plan,
         ws_edit_run,
+        ws_preview_plan,
         ws_delete_run,
         ws_move_run,
         ws_remove_plan,
@@ -599,6 +601,29 @@ async def ws_add_plan(hass, connection, msg) -> None:
             origin="panel",
         ),
     )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/preview_plan",
+        vol.Required("entry_id"): str,
+        vol.Required("zone"): str,
+        vol.Required("start_height_mm"): vol.Coerce(float),
+        vol.Required("end_height_mm"): vol.Coerce(float),
+        vol.Optional("max_cut_pct"): vol.Coerce(float),
+        vol.Optional("base_angle"): vol.Coerce(float),
+        vol.Optional("finishing"): vol.Any(None, bool),
+        vol.Optional("settings"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_preview_plan(hass, connection, msg) -> None:
+    """Preview the Runs a New Plan would derive; nothing is placed."""
+    args = {k: msg[k] for k in (
+        "zone", "start_height_mm", "end_height_mm", "max_cut_pct", "base_angle",
+        "finishing", "settings") if k in msg}
+    await _schedule_call(hass, connection, msg, lambda d: _ready(preview_plan(d, **args)))
 
 
 @websocket_api.require_admin

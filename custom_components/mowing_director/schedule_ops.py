@@ -30,6 +30,7 @@ from .plans import (
     redraw_plan,
     rederive_plan,
 )
+from .zone_angles import run_estimate_s
 from .run_settings import SettingsError, validate_overrides
 from .runtime import Director
 
@@ -64,7 +65,7 @@ def _run_view(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def create_plan(
+def _derive(
     director: Director,
     *,
     zone: str,
@@ -74,14 +75,10 @@ async def create_plan(
     base_angle: float | None = None,
     finishing: bool | None = None,
     settings: dict[str, Any] | None = None,
-    position: str = "end",
-    start: bool = False,
-    origin: str = "service",
+    origin: str,
     rng: random.Random | None = None,
-) -> dict[str, Any]:
-    """Derive a Plan, place it on the Schedule and report it (spec §13.3)."""
-    if position not in POSITIONS:
-        raise ScheduleError("invalid_position", position=position)
+):
+    """Derive a Plan without placing it; the Zone and the BuiltPlan."""
     config = _config(director)
     try:
         found = find_zone(config.get("zones", []), zone)
@@ -109,7 +106,52 @@ async def create_plan(
         raise ScheduleError("invalid_height", error=str(err)) from None
     except SettingsError as err:
         raise ScheduleError("invalid_settings", error=str(err)) from None
+    return found, built
 
+
+def preview_plan(director: Director, **kwargs: Any) -> dict[str, Any]:
+    """The Runs a new Plan would get (height, angle, estimated time) and the
+    derivation warnings, without placing anything (spec §16.3, §5.5)."""
+    found, built = _derive(director, origin="panel", **kwargs)
+    runs = []
+    for run in built.runs:
+        view = _run_view(run)
+        view["estimated_time_s"] = run_estimate_s(found, run["angle_deg"])
+        runs.append(view)
+    return {
+        "runs": runs,
+        "start_height_mm": built.heights.start,
+        "end_height_mm": built.heights.end,
+        "max_cut_pct": round(built.heights.max_cut * 100, 6),
+        "rounded": built.heights.rounded,
+        "warnings": built.warnings,
+        "provisional": any(r["provisional"] for r in runs),
+    }
+
+
+async def create_plan(
+    director: Director,
+    *,
+    zone: str,
+    start_height_mm: float,
+    end_height_mm: float,
+    max_cut_pct: float | None = None,
+    base_angle: float | None = None,
+    finishing: bool | None = None,
+    settings: dict[str, Any] | None = None,
+    position: str = "end",
+    start: bool = False,
+    origin: str = "service",
+    rng: random.Random | None = None,
+) -> dict[str, Any]:
+    """Derive a Plan, place it on the Schedule and report it (spec §13.3)."""
+    if position not in POSITIONS:
+        raise ScheduleError("invalid_position", position=position)
+    found, built = _derive(
+        director, zone=zone, start_height_mm=start_height_mm,
+        end_height_mm=end_height_mm, max_cut_pct=max_cut_pct, base_angle=base_angle,
+        finishing=finishing, settings=settings, origin=origin, rng=rng,
+    )
     before = director.state["schedule"]["status"]
     await director.async_add_plan(built.plan, built.runs, start, position)
     after = director.state["schedule"]["status"]
