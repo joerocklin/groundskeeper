@@ -127,3 +127,9 @@ def trim_durations(durations: dict[str, list[Any]], keep: int) -> None:
     """Apply the per-Zone sample limit in place."""
     for zone_id in list(durations):
         durations[zone_id] = trim_samples(durations[zone_id], keep)
+
+
+def trim_levels(levels: dict[str, list[Any]], keep: int) -> None:
+    """Apply the return/resume battery-level sample limit in place."""
+    for kind in list(levels):
+        levels[kind] = trim_samples(levels[kind], keep)

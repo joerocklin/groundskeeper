@@ -51,6 +51,12 @@ from .checks import (
     work_window_start,
 )
 from .history import prune_runs, trim_samples
+from .crossings import (
+    RUN_END_PROGRESS_PCT,
+    SLOPE_WINDOW,
+    effective_level,
+    should_warn,
+)
 from .gates import believed_open
 from .adapter import (
     AdapterSignal,
@@ -605,6 +611,12 @@ class Env:
     anomaly_actions: Mapping[str, str] = field(default_factory=dict)  # detector -> action
     history_runs_max: int = 500  # spec §14.6 retention limits
     duration_samples_max: int = 20
+    battery_samples_max: int = 5  # return/resume battery-level samples each
+    # Gate crossing warnings (spec §10): lead time, and the Mower's configured
+    # recharge/resume levels (None = "smart")
+    crossing_lead: timedelta = timedelta(minutes=10)
+    recharge_level: int | None = None
+    resume_level: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +654,7 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("prompts", [])
     state.setdefault("gate_flags", {})  # Gate id -> manual Open flag (spec §4.7)
     state.setdefault("gate_crossings", {})  # Gate id -> crossing expected (spec §10)
+    state.setdefault("crossing_watch", {})  # battery trace for crossing warnings (soft)
     anomalies = state.setdefault("anomalies", {})  # spec §11.8, persisted
     anomalies.setdefault("active", [])
     anomalies.setdefault("battery", {"level": None, "rising_at": None})
@@ -655,6 +668,10 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     history.setdefault("plans", {})
     learned = dict(data.get("learned") or {})
     learned.setdefault("durations", {})
+    levels = dict(learned.get("battery_levels") or {})  # spec §14.3
+    levels.setdefault("return", [])
+    levels.setdefault("resume", [])
+    learned["battery_levels"] = levels
     return {"state": state, "learned": learned, "history": history}
 
 
@@ -1620,6 +1637,7 @@ class _Machine:
             run["job_ref"] = snapshot.job_ref
             self._set_run(run, RunStatus.MOWING)
             self._gate_crossing_ended(run)
+            self._watch(run)["prev"] = LawnMowerActivity.MOWING.value
             self._arm_stall(snapshot)
             self._begin_height_verify(run, snapshot)
             return
@@ -1637,6 +1655,7 @@ class _Machine:
                 self._enter_hold(run, HOLD_CONTACT_LOST)
             return
         self._cancel_deadline(DEADLINE_CONTACT_LOST)
+        self._crossings_observe(run, snapshot)
         # The Mower's own non-work window began mid-job: it pauses itself and
         # resumes by itself; nobody needs to act (spec §7.4).
         if snapshot.job_active and snapshot.self_check is SelfCheckReason.DEVICE_NON_WORK_HOURS:
@@ -2026,6 +2045,8 @@ class _Machine:
         self._clear_run_deadlines()
         run["finished_at"] = iso(self.now)
         run["mow_mark"] = None
+        self._gate_crossing_ended(run, "back")  # the Run ended: it is home
+        self.s["crossing_watch"] = {}
         self._set_run(run, RunStatus.DONE)
         self._add_duration_sample(run)
         self._archive_run(run)
@@ -2218,14 +2239,24 @@ class _Machine:
     def _gate_prompts(self, gate_id: str, kind: str = PROMPT_GATE) -> list[dict[str, Any]]:
         return [p for p in self.s["prompts"] if p["kind"] == kind and p["subject"] == gate_id]
 
-    def _gate_begin(self, gate: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
+    def _gate_begin(
+        self,
+        gate: Mapping[str, Any],
+        run: Mapping[str, Any],
+        kind: str = "start",
+        direction: str = "out",
+    ) -> dict[str, Any]:
+        """Expect a crossing: `kind` is start / return / resume / end /
+        unpredicted, `direction` out (to the Zone) or back (to the dock)."""
         crossing = self.s["gate_crossings"].get(gate["id"])
         if crossing is None:
             crossing = self.s["gate_crossings"][gate["id"]] = {
                 "run_id": run["id"], "since": iso(self.now),
+                "kind": kind, "direction": direction,
             }
             self._emit(
                 "gate_crossing_expected",
+                kind=kind, direction=direction,
                 gate_id=gate["id"], gate_name=gate["name"], plan_id=run["plan_id"],
                 run_id=run["id"], zone_id=run["zone_id"], zone_name=run["zone_name"],
             )
@@ -2262,7 +2293,11 @@ class _Machine:
                 self._gate_closed(gate, self._gate_begin(gate, run), run)
 
     def _gate_closed(
-        self, gate: Mapping[str, Any], crossing: dict[str, Any], run: dict[str, Any]
+        self,
+        gate: Mapping[str, Any],
+        crossing: dict[str, Any],
+        run: dict[str, Any],
+        urgent: bool = False,
     ) -> None:
         """Run the open action, verify it, or notify (spec §10)."""
         gate_id = gate["id"]
@@ -2286,11 +2321,25 @@ class _Machine:
             )
         if (gate.get("notify") or crossing.get("fallback")) and not crossing.get("prompted"):
             crossing["prompted"] = True
-            self._raise_prompt(
-                PROMPT_GATE, gate_id,
-                [ACTION_GATE_OPENED, ACTION_GATE_CLOSED, ACTION_SKIP_PLAN],
-                self._gate_context(gate, run),
-            )
+            self._gate_prompt(gate, crossing, run, urgent)
+
+    def _gate_prompt(
+        self,
+        gate: Mapping[str, Any],
+        crossing: Mapping[str, Any],
+        run: Mapping[str, Any],
+        urgent: bool,
+    ) -> None:
+        """The Gate Prompt; "Skip Plan" only exists before the Run has started."""
+        actions = [ACTION_GATE_OPENED, ACTION_GATE_CLOSED]
+        if crossing.get("kind", "start") == "start":
+            actions.append(ACTION_SKIP_PLAN)
+        context = {
+            **self._gate_context(gate, run),
+            "crossing": crossing.get("direction", "out"),
+            "urgent": urgent,
+        }
+        self._raise_prompt(PROMPT_GATE, gate["id"], actions, context)
 
     def _gate_drop_stale(self) -> None:
         """Forget crossings whose Run is no longer the head or active Run, or
@@ -2310,11 +2359,14 @@ class _Machine:
             for prompt in self._gate_prompts(gate_id):
                 self._settle_prompt(prompt, "stale")
 
-    def _gate_crossing_ended(self, run: Mapping[str, Any]) -> None:
-        """The Mower is mowing in the gated Zone: close behind it (spec §10)."""
+    def _gate_crossing_ended(self, run: Mapping[str, Any], direction: str | None = None) -> None:
+        """The Mower is mowing in the gated Zone (out) or docked (back): close
+        behind it (spec §10). `direction` limits which crossings end."""
         records = self._gate_records()
         for gate_id, crossing in list(self.s["gate_crossings"].items()):
             if crossing["run_id"] != run["id"]:
+                continue
+            if direction is not None and crossing.get("direction", "out") != direction:
                 continue
             del self.s["gate_crossings"][gate_id]
             self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
@@ -2336,6 +2388,196 @@ class _Machine:
                     PROMPT_GATE_CLOSE, gate_id, [ACTION_GATE_CLOSED],
                     self._gate_context(gate, run),
                 )
+
+    # -- Gate crossings during a Run (spec §10) -----------------------------------
+
+    def _watch(self, run: Mapping[str, Any]) -> dict[str, Any]:
+        """The battery trace and recharge bookkeeping of the active Run."""
+        watch = self.s["crossing_watch"]
+        if watch.get("run_id") != run["id"]:
+            watch.clear()
+            watch.update(
+                run_id=run["id"], history=[], prev=None, dock_battery=None,
+                return_pending=None, recharged=False, warned=[], returning_seen=False,
+            )
+        return watch
+
+    def _crossings_observe(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        """Learn the return/resume levels and run the crossing logic. Only ever
+        tells the user or runs Gate actions - never touches the Mower."""
+        watch = self._watch(run)
+        activity, battery = snapshot.activity, snapshot.battery
+        prev = watch["prev"]
+        if prev is not None and activity is not None and (
+            (prev == LawnMowerActivity.DOCKED) != (activity is LawnMowerActivity.DOCKED)
+        ):
+            watch["history"] = []  # docking or leaving starts a new slope
+        if battery is not None:
+            cutoff = self.now - SLOPE_WINDOW
+            watch["history"] = [
+                h for h in [*watch["history"], [iso(self.now), battery]]
+                if parse(h[0]) >= cutoff
+            ][-200:]
+        self._learn_levels(watch, snapshot, prev)
+        gates = self._gate_ids(run)
+        if gates:
+            self._gate_service(run)
+            self._crossings_end(run, snapshot, prev)
+            self._crossings_urgent(run, gates, snapshot, watch, prev)
+            self._crossings_predict(run, gates, snapshot, watch)
+        if activity is not None:
+            watch["prev"] = activity.value
+
+    def _learn_levels(self, watch: dict[str, Any], snapshot: Snapshot, prev: str | None) -> None:
+        """Return level: battery at `mowing` -> `returning` that leads to
+        `recharging`. Resume level: battery when the Mower leaves the dock to
+        continue. Samples come from every Run, gated or not (spec §10)."""
+        activity, battery = snapshot.activity, snapshot.battery
+        if activity is None:
+            return
+        cap = self.env.battery_samples_max
+        levels = self.learned["battery_levels"]
+
+        def add(kind: str, value: int) -> None:
+            levels[kind] = [*levels[kind], value][-cap:] if cap else []
+
+        if (
+            prev == LawnMowerActivity.MOWING
+            and activity is LawnMowerActivity.RETURNING
+            and battery is not None
+        ):
+            watch["return_pending"] = battery
+        elif activity is LawnMowerActivity.MOWING:
+            watch["return_pending"] = None  # a breakpoint, not a recharge
+        if snapshot.recharging:
+            if watch["return_pending"] is not None:
+                add("return", watch["return_pending"])
+                watch["return_pending"] = None
+            watch["recharged"] = True
+        if activity is LawnMowerActivity.DOCKED and battery is not None:
+            watch["dock_battery"] = battery
+        if (
+            watch["recharged"]
+            and prev == LawnMowerActivity.DOCKED
+            and activity is not LawnMowerActivity.DOCKED
+        ):
+            level = watch["dock_battery"] if watch["dock_battery"] is not None else battery
+            if level is not None:
+                add("resume", level)
+            watch["recharged"] = False
+            watch["warned"] = [w for w in watch["warned"] if w not in ("return", "resume")]
+
+    def _expect_crossings(
+        self, run: dict[str, Any], gates: list[str], kind: str, direction: str,
+        *, urgent: bool = False,
+    ) -> None:
+        """Expect a crossing at each Gate: run the open action, verify it, or
+        notify - the same path as at Run start."""
+        records = self._gate_records()
+        for gate_id in gates:
+            gate = records[gate_id]
+            crossing = self._gate_begin(gate, run, kind, direction)
+            if not self._gate_is_open(gate):
+                self._gate_closed(gate, crossing, run, urgent=urgent)
+
+    def _crossings_predict(
+        self, run: dict[str, Any], gates: list[str], snapshot: Snapshot, watch: dict[str, Any]
+    ) -> None:
+        """Warn ahead of recharge return, resume and Run end (spec §10)."""
+        battery, activity, warned = snapshot.battery, snapshot.activity, watch["warned"]
+        history = [(parse(t), b) for t, b in watch["history"]]
+        levels = self.learned["battery_levels"]
+        if self.env.battery_samples_max and battery is not None:
+            if activity is LawnMowerActivity.MOWING and "return" not in warned:
+                level, _ = effective_level("return", levels["return"], self.env.recharge_level)
+                if should_warn("return", battery, level, history, self.now, self.env.crossing_lead):
+                    warned.append("return")
+                    self._expect_crossings(run, gates, "return", "back")
+            if (
+                activity is LawnMowerActivity.DOCKED
+                and snapshot.recharging
+                and "resume" not in warned
+            ):
+                level, _ = effective_level("resume", levels["resume"], self.env.resume_level)
+                if should_warn("resume", battery, level, history, self.now, self.env.crossing_lead):
+                    warned.append("resume")
+                    self._expect_crossings(run, gates, "resume", "out")
+        if (
+            activity is LawnMowerActivity.MOWING
+            and "end" not in warned
+            and (snapshot.progress or 0) >= RUN_END_PROGRESS_PCT
+        ):
+            warned.append("end")
+            self._expect_crossings(run, gates, "end", "back")
+
+    def _out_arrived(self, snapshot: Snapshot, run: Mapping[str, Any]) -> bool:
+        """Mowing in the gated Zone (an unknown or matching zone counts)."""
+        return (
+            snapshot.activity is LawnMowerActivity.MOWING
+            and snapshot.job_active
+            and (snapshot.zone is None or snapshot.zone == run.get("native_ref"))
+        )
+
+    def _crossings_end(self, run: dict[str, Any], snapshot: Snapshot, prev: str | None) -> None:
+        if snapshot.activity is LawnMowerActivity.DOCKED:
+            self._gate_crossing_ended(run, "back")
+        elif self._out_arrived(snapshot, run):
+            self._gate_crossing_ended(run, "out")
+
+    def _crossings_urgent(
+        self, run: dict[str, Any], gates: list[str], snapshot: Snapshot,
+        watch: dict[str, Any], prev: str | None,
+    ) -> None:
+        """`returning` is the definitive signal: an unpredicted return is warned
+        now, urgently; a predicted one re-sends its Prompt once if the Gate is
+        still closed. Leaving the dock does the same for the way out."""
+        activity = snapshot.activity
+        if activity is None:
+            return
+        if activity is not LawnMowerActivity.RETURNING:
+            watch["returning_seen"] = False
+        elif not watch["returning_seen"]:
+            watch["returning_seen"] = True
+            self._urgent_crossings(run, gates, "unpredicted", "back")
+        if (
+            prev == LawnMowerActivity.DOCKED
+            and activity is not LawnMowerActivity.DOCKED
+            and activity is LawnMowerActivity.MOWING
+            and not self._out_arrived(snapshot, run)
+        ):
+            self._urgent_crossings(run, gates, "unpredicted", "out")
+
+    def _urgent_crossings(
+        self, run: dict[str, Any], gates: list[str], kind: str, direction: str
+    ) -> None:
+        records = self._gate_records()
+        for gate_id in gates:
+            gate = records[gate_id]
+            existing = self.s["gate_crossings"].get(gate_id)
+            if existing is None:
+                self._expect_crossings(run, [gate_id], kind, direction, urgent=True)
+            elif (
+                existing.get("prompted")
+                and not existing.get("resent")
+                and not self._gate_is_open(gate)
+            ):
+                existing["resent"] = True
+                self._gate_prompt(gate, existing, run, urgent=True)
+
+    def _gate_service(self, run: dict[str, Any]) -> None:
+        """Carry on the crossings of this Run: a Gate that now reads open settles
+        its Prompt; an open action still closed after 2 min falls back."""
+        records = self._gate_records()
+        for gate_id, crossing in list(self.s["gate_crossings"].items()):
+            gate = records.get(gate_id)
+            if gate is None or crossing["run_id"] != run["id"]:
+                continue
+            if self._gate_is_open(gate):
+                self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+                for prompt in self._gate_prompts(gate_id):
+                    self._settle_prompt(prompt, "gate_open")
+            else:
+                self._gate_closed(gate, crossing, run)
 
     def _gate_answer(self, prompt: Mapping[str, Any], action: str) -> None:
         gate_id = prompt["subject"]

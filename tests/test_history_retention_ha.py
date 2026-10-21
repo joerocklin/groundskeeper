@@ -127,3 +127,14 @@ async def test_only_a_missing_zone_can_be_deleted(hass, hass_ws_client, setup) -
     zone = (await entry.runtime_data.async_data())["config"]["zones"][0]
     msg = await ws(hass, hass_ws_client, entry, "delete_zone", zone_id=zone["id"])
     assert not msg["success"] and msg["error"]["code"] == "not_allowed"
+
+
+async def test_lowering_battery_samples_trims_return_and_resume(
+    hass, hass_ws_client, setup
+) -> None:
+    entry, _ = setup
+    data = await entry.runtime_data.async_data()
+    data["learned"]["battery_levels"] = {"return": [30, 28, 26, 24], "resume": [90, 92]}
+    await ws(hass, hass_ws_client, entry, "set_retention_limits",
+             limits={"battery_samples_max": 2}, confirm=True)
+    assert data["learned"]["battery_levels"] == {"return": [26, 24], "resume": [90, 92]}

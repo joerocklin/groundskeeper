@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import async_capture_events
 
 from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
 from tests.fake_mower import DEFAULT_SNAPSHOT
+from custom_components.mowing_director.runtime import async_get_director
 from tests.test_checks_ha import add_plan, advance, setup, ws  # noqa: F401
 from tests.test_prompts import list_prompts
 
@@ -246,3 +247,24 @@ async def test_gate_views_show_the_state_entity_id_for_the_panel(
     [gate] = msg["result"]["gates"]
     assert gate["state_entity"] == reg.id
     assert gate["state_entity_id"] == reg.entity_id
+
+
+async def test_get_zones_shows_the_learned_return_and_resume_thresholds(
+    hass, hass_ws_client, setup
+) -> None:
+    """Zones & Gates tab: level, where it came from and how many samples (spec §10)."""
+    entry, _ = setup
+    director = async_get_director(hass, entry.entry_id)
+    msg = await ws(hass, hass_ws_client, entry, "get_zones")
+    assert msg["result"]["thresholds"] == {
+        "return": {"level": 25, "source": "default", "samples": 0},
+        "resume": {"level": 95, "source": "default", "samples": 0},
+    }
+    director._data.setdefault("learned", {})["battery_levels"] = {
+        "return": [30, 20, 26], "resume": [90],
+    }
+    msg = await ws(hass, hass_ws_client, entry, "get_zones")
+    assert msg["result"]["thresholds"]["return"] == {
+        "level": 26, "source": "learned", "samples": 3}
+    assert msg["result"]["thresholds"]["resume"]["source"] == "default"
+    assert msg["result"]["thresholds"]["resume"]["samples"] == 1

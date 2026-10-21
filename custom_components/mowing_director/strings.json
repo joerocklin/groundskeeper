@@ -347,6 +347,15 @@
     "prompt_gate": {
       "message": "Gate: {gate}"
     },
+    "prompt_crossing_out": {
+      "message": "The Mower is about to go out through this Gate."
+    },
+    "prompt_crossing_back": {
+      "message": "The Mower is about to come back through this Gate."
+    },
+    "prompt_urgent": {
+      "message": "It is already on its way: open the Gate now."
+    },
     "anomaly_not_active": {
       "message": "That Anomaly is not active."
     },

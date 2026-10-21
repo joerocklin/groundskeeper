@@ -87,3 +87,11 @@ def test_a_history_section_of_the_wrong_type_is_dropped_without_failing_the_stor
     assert result.config_ok and result.state_ok
     assert result.data["history"] == {}
     assert len(result.dropped) == 1
+
+
+def test_a_bad_battery_level_sample_is_dropped() -> None:
+    data = empty_store_data()
+    data["learned"] = {"battery_levels": {"return": [30, "low", True], "resume": [95]}}
+    result = validate_store(data)
+    assert result.data["learned"]["battery_levels"] == {"return": [30], "resume": [95]}
+    assert len(result.dropped) == 2
