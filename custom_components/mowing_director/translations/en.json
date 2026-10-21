@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "device": "Mower"
+        },
+        "data_description": {
+          "device": "Only Mowers set up by a supported integration are listed."
+        }
+      },
+      "confirm": {
+        "description": "Add {mower} to Mowing Director. Debug recording is on by default and stores Mower telemetry locally; review it in the Mowing Director panel."
+      }
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "already_in_progress": "This is already being configured. Finish the existing configuration before starting again.",
+      "no_supported_mower": "No Mammotion Mower found. Add the Mammotion integration and make sure the Mower is online first."
+    },
+    "error": {
+      "no_supported_mower": "That device no longer has a usable Mower entity."
+    },
+    "create_entry": {
+      "mower_added": "Configure {mower} in the [Mowing Director panel]({panel_url})."
+    }
+  }
+}
