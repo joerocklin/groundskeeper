@@ -704,17 +704,27 @@ class MammotionAdapter:
         )
 
     async def abort_run(self) -> CommandResult:
-        """Not implemented until ticket #10 lands in slices."""
-        return Refused("not_implemented")
+        """`lawn_mower.stop`, then `lawn_mower.dock` (spec §3.4).
+
+        A stop that is not cleanly accepted leaves the Mower's state
+        unknown or unchanged: return that result WITHOUT docking - a
+        dock could fight a command whose outcome is unknown (research
+        §3). One call each, never a retry (ADR 0002).
+        """
+        stopped = await self._lawn_mower_call("stop")
+        if not isinstance(stopped, Accepted):
+            return stopped
+        return await self._lawn_mower_call("dock")
 
     async def dock(self) -> CommandResult:
         """`lawn_mower.dock`: return to the dock (spec §3.4)."""
+        return await self._lawn_mower_call("dock")
+
+    async def _lawn_mower_call(self, service: str) -> CommandResult:
         entity_id = self._entity_id("lawn_mower", "mower")
         if entity_id is None:
             return Refused("mammotion_not_ready")
-        return await self._call(
-            "lawn_mower", "dock", {"entity_id": [entity_id]}
-        )
+        return await self._call("lawn_mower", service, {"entity_id": [entity_id]})
 
     async def resume_run(self) -> CommandResult:
         """Not implemented until ticket #10 lands in slices."""

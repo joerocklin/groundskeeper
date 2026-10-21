@@ -56,6 +56,31 @@ def set_mode(hass: HomeAssistant, mode: str) -> None:
     hass.states.async_set(entity_id, mode, {})
 
 
+def mock_lawn_mower(
+    hass: HomeAssistant,
+    stop_raises: Exception | None = None,
+    dock_raises: Exception | None = None,
+) -> tuple[list[tuple[str, str]], list, list]:
+    """Mock `lawn_mower.stop` and `lawn_mower.dock` with a shared call
+    order log plus per-service call logs."""
+    order: list[tuple[str, str]] = []
+    stops: list = []
+    docks: list = []
+
+    def log(target: list, exception: Exception | None):
+        async def _handler(call) -> None:
+            order.append((call.domain, call.service))
+            target.append(call)
+            if exception is not None:
+                raise exception
+
+        return _handler
+
+    hass.services.async_register("lawn_mower", "stop", log(stops, stop_raises))
+    hass.services.async_register("lawn_mower", "dock", log(docks, dock_raises))
+    return order, stops, docks
+
+
 def settings(bearing_deg: float = 135.0) -> RunSettings:
     """Run settings with every extras field at its schema default."""
     return RunSettings(
@@ -412,3 +437,67 @@ async def test_start_run_validation_error_is_refused(hass: HomeAssistant) -> Non
     result = await adapter.start_run(SIDE_YARD, settings())
     assert result == Refused("blade height out of range")
     assert len(calls) == 1
+
+
+# -- abort_run and dock sequencing (spec §3.4) --------------------------------
+
+
+async def test_abort_run_stops_then_docks_in_order(hass: HomeAssistant) -> None:
+    """abort_run = `lawn_mower.stop` then `lawn_mower.dock`, in that
+    order, accepted (issue #10 AC)."""
+    adapter = await make_command_adapter(hass)
+    order, stops, docks = mock_lawn_mower(hass)
+    assert await adapter.abort_run() == Accepted()
+    assert len(stops) == 1
+    assert len(docks) == 1
+    assert order == [("lawn_mower", "stop"), ("lawn_mower", "dock")]
+
+
+async def test_abort_run_does_not_dock_when_stop_is_unconfirmed(
+    hass: HomeAssistant,
+) -> None:
+    """A `pause_failed` mode-wait timeout on stop leaves the state
+    unknown: return unconfirmed and do NOT dock - docking could fight a
+    command whose outcome is unknown (research §3). Exactly one call."""
+    adapter = await make_command_adapter(hass)
+    _, stops, docks = mock_lawn_mower(
+        hass,
+        stop_raises=HomeAssistantError(
+            "pause wait expired", translation_domain="mammotion",
+            translation_key="pause_failed",
+        ),
+    )
+    assert await adapter.abort_run() == Unconfirmed()
+    assert len(stops) == 1
+    assert docks == []
+
+
+async def test_abort_run_does_not_dock_when_stop_is_refused(hass: HomeAssistant) -> None:
+    """A 400 on stop is a definite no: return the refusal, dock NOT
+    called. Exactly one call."""
+    adapter = await make_command_adapter(hass)
+    _, stops, docks = mock_lawn_mower(
+        hass, stop_raises=ServiceValidationError("no job running")
+    )
+    assert await adapter.abort_run() == Refused("no job running")
+    assert len(stops) == 1
+    assert docks == []
+
+
+async def test_abort_run_returns_the_dock_result_when_dock_fails(
+    hass: HomeAssistant,
+) -> None:
+    """After a clean stop, the dock's own mapping is the result: a
+    `dock_failed` timeout is unconfirmed, one stop + one dock call."""
+    adapter = await make_command_adapter(hass)
+    order, stops, docks = mock_lawn_mower(
+        hass,
+        dock_raises=HomeAssistantError(
+            "dock wait expired", translation_domain="mammotion",
+            translation_key="dock_failed",
+        ),
+    )
+    assert await adapter.abort_run() == Unconfirmed()
+    assert len(stops) == 1
+    assert len(docks) == 1
+    assert order == [("lawn_mower", "stop"), ("lawn_mower", "dock")]
