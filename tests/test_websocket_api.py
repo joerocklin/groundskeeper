@@ -109,3 +109,74 @@ async def test_unsubscribe_stops_pushes(hass, hass_ws_client) -> None:
     await hass.async_block_till_done()
     await ws.send_json({"id": 3, "type": "ping"})
     assert (await ws.receive_json())["type"] == "pong"
+
+
+# -- Zone bearing and range commands (issue #12) --------------------------------
+
+
+async def _zone_ws(hass, hass_ws_client):
+    from custom_components.mowing_director.adapter import Zone
+    from custom_components.mowing_director.zone_sync import async_attach_zone_sync
+    from tests.fake_mower import FakeMower
+    from tests.test_zone_bearing import rect
+
+    (entry,) = await _setup(hass, "Luba")
+    mower = FakeMower()
+    mower.zones = (
+        Zone("11111111", "Front Lawn",
+             {"type": "Polygon", "coordinates": [rect(40, 8, 30)]}),
+    )
+    sync = async_attach_zone_sync(hass, entry.entry_id, mower, entry.runtime_data)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    zone = (await sync.async_zones())[0]
+    return entry, zone, await hass_ws_client(hass)
+
+
+async def test_zone_angle_commands_read_set_reset(hass, hass_ws_client) -> None:
+    entry, zone, ws = await _zone_ws(hass, hass_ws_client)
+    base = {"entry_id": entry.entry_id, "zone_id": zone["id"]}
+
+    await ws.send_json_auto_id({"type": "mowing_director/get_zone_angles", **base})
+    got = (await ws.receive_json())["result"]["zones"][0]
+    assert got["bearing"]["source"] == "derived"
+
+    await ws.send_json_auto_id(
+        {"type": "mowing_director/set_zone_bearing", "value": 100, **base})
+    r = (await ws.receive_json())["result"]
+    assert (r["bearing"]["source"], r["bearing"]["value"]) == ("manual", 100.0)
+
+    await ws.send_json_auto_id(
+        {"type": "mowing_director/set_zone_range", "min": -10, "max": 12, **base})
+    r = (await ws.receive_json())["result"]
+    assert r["angle_range"]["angle_range"] == {"min": -10.0, "max": 12.0}
+    assert r["angle_range"]["source"] == "manual"
+
+    await ws.send_json_auto_id(
+        {"type": "mowing_director/set_zone_range_tolerance", "tolerance": 0.1, **base})
+    r = (await ws.receive_json())["result"]
+    assert r["angle_range"]["basis"]["tolerance"] == 0.1
+
+    await ws.send_json_auto_id({"type": "mowing_director/reset_zone_range", **base})
+    r = (await ws.receive_json())["result"]
+    assert r["angle_range"]["source"] == "derived"
+
+    await ws.send_json_auto_id({"type": "mowing_director/reset_zone_bearing", **base})
+    r = (await ws.receive_json())["result"]
+    assert r["bearing"]["source"] == "derived"
+    assert abs(r["bearing"]["value"] - 30) < 0.5
+
+
+async def test_zone_range_rejects_range_excluding_zero(hass, hass_ws_client) -> None:
+    entry, zone, ws = await _zone_ws(hass, hass_ws_client)
+    await ws.send_json_auto_id(
+        {"type": "mowing_director/set_zone_range", "min": 5, "max": 12,
+         "entry_id": entry.entry_id, "zone_id": zone["id"]})
+    assert (await ws.receive_json())["success"] is False
+
+
+async def test_zone_angle_commands_unknown_zone(hass, hass_ws_client) -> None:
+    entry, _zone, ws = await _zone_ws(hass, hass_ws_client)
+    await ws.send_json_auto_id(
+        {"type": "mowing_director/reset_zone_bearing",
+         "entry_id": entry.entry_id, "zone_id": "nope"})
+    assert (await ws.receive_json())["error"]["code"] == "not_found"
