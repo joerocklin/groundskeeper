@@ -44,6 +44,11 @@ const STYLE = `
   svg .zone.hidden { stroke-dasharray: 4 3; fill-opacity: .08; }
   svg .zone.missing { stroke: var(--error-color, #db4437); fill: none; stroke-dasharray: 2 3; }
   svg .channel { stroke: var(--secondary-text-color); stroke-width: 2; stroke-dasharray: 6 3; }
+  svg .channel.picked { stroke: var(--primary-color); stroke-width: 4; stroke-dasharray: none; }
+  svg .channel-hit { stroke: transparent; stroke-width: 18; cursor: pointer; }
+  svg .gate rect { stroke: var(--primary-text-color); stroke-width: 1.5; }
+  svg .gate.closed rect { fill: var(--error-color, #db4437); }
+  svg .gate.open rect { fill: var(--success-color, #43a047); }
   svg .stripe { stroke: var(--primary-text-color); stroke-opacity: .35; stroke-width: 1; }
   svg .label { font-size: 11px; text-anchor: middle; fill: var(--primary-text-color); pointer-events: none; }
   svg .dock { fill: var(--primary-text-color); }
@@ -123,7 +128,9 @@ function stripesSvg(pts, angle, clipId) {
 }
 
 /**
- * Map of Zones and Channels. `opts`: angle (absolute compass degrees; with
+ * Map of Zones, Channels and Gates. `opts`: gates (drawn on their Channels
+ * with believed open/closed state), pickedChannelIds (enables Channel
+ * picking and highlights those), angle (absolute compass degrees; with
  * stripeZoneId draws synthetic stripes in that Zone), selectedZoneId,
  * currentZoneId (the Mower's Zone), highlightZoneId.
  */
@@ -133,10 +140,27 @@ function renderMap(zones, channels, opts = {}) {
   zones.forEach((z, i) => { if (rings[i]) centre[z.id] = centroid(rings[i]); });
   const dock = [MAP_PAD, MAP_H - MAP_PAD];
   const end = (ref) => (ref === 'dock' ? dock : centre[ref]);
-  const lines = (channels || [])
-    .map((c) => [end(c.end_a), end(c.end_b)])
-    .filter(([a, b]) => a && b)
-    .map(([a, b]) => `<line class="channel" x1="${num(a[0])}" y1="${num(a[1])}" x2="${num(b[0])}" y2="${num(b[1])}"/>`)
+  const picked = new Set(opts.pickedChannelIds || []);
+  const segs = (channels || [])
+    .map((c) => ({ c, a: end(c.end_a), b: end(c.end_b) }))
+    .filter(({ a, b }) => a && b);
+  const seg = (a, b) => `x1="${num(a[0])}" y1="${num(a[1])}" x2="${num(b[0])}" y2="${num(b[1])}"`;
+  // Channels carry their id so the Gate editor can pick them; the wide
+  // transparent twin underneath is the tap target (only while picking).
+  const lines = segs
+    .map(({ c, a, b }) => {
+      const hit = opts.pickedChannelIds
+        ? `<line class="channel-hit" data-pick="${esc(c.id)}" ${seg(a, b)}/>` : '';
+      return `${hit}<line class="channel${picked.has(c.id) ? ' picked' : ''}" data-channel="${esc(c.id)}" ${seg(a, b)}/>`;
+    })
+    .join('');
+  // Gates sit on their Channels, drawn with the believed state (spec §4.7).
+  const mid = {};
+  segs.forEach(({ c, a, b }) => { mid[c.id] = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; });
+  const gateMarks = (opts.gates || []).flatMap((g) => (g.channels || [])
+    .filter((id) => mid[id])
+    .map((id) => `<g class="gate ${g.open ? 'open' : 'closed'}" data-gate="${esc(g.id)}"><title>${esc(g.name)}: ${g.open ? 'open' : 'closed'}</title>`
+      + `<rect x="${num(mid[id][0] - 6)}" y="${num(mid[id][1] - 6)}" width="12" height="12" rx="2"/></g>`))
     .join('');
   const hasDock = (channels || []).some((c) => c.end_a === 'dock' || c.end_b === 'dock');
   let defs = '', shapes = '';
@@ -154,7 +178,7 @@ function renderMap(zones, channels, opts = {}) {
     shapes += `<text class="label" x="${num(x)}" y="${num(y)}">${esc(z.name)}</text>`;
   });
   const dockMark = hasDock ? `<circle class="dock" cx="${dock[0]}" cy="${dock[1]}" r="5"/>` : '';
-  return `<svg class="map" viewBox="0 0 ${MAP_W} ${MAP_H}" role="img" aria-label="Zones and Channels"><defs>${defs}</defs>${shapes}${lines}${dockMark}</svg>`;
+  return `<svg class="map" viewBox="0 0 ${MAP_W} ${MAP_H}" role="img" aria-label="Zones and Channels"><defs>${defs}</defs>${shapes}${lines}${gateMarks}${dockMark}</svg>`;
 }
 
 // Values are shown in HA units: lengths follow the unit system, times are
@@ -242,6 +266,101 @@ function zoneListHtml(zones, selectedId) {
       ${z.missing ? '<span class="tag missing">missing</span>' : ''}
       <label><input type="checkbox" data-act="toggle-hidden" data-zone="${esc(z.id)}"${z.hidden ? ' checked' : ''}> hidden</label></li>`).join('');
   return `<ul class="zones">${rows}</ul><p><button data-act="refresh-zones">Refresh Zones</button></p>`;
+}
+
+
+// -- Gate editor helpers (spec §4.7, §16.3) -----------------------------------
+
+const endName = (ref, zones) =>
+  (ref === 'dock' ? 'Dock' : ((zones || []).find((z) => z.id === ref) || {}).name || ref);
+const channelName = (c, zones) => `${endName(c.end_a, zones)} – ${endName(c.end_b, zones)}`;
+
+const actionsText = (a) => (a && a.length ? JSON.stringify(a) : '');
+
+// Editable copy of a stored Gate (or a blank one). Actions are edited as JSON.
+function gateDraft(g) {
+  if (!g) return { id: null, name: '', channels: [], state_entity_id: '', open_action: '', close_action: '', notify: null };
+  return {
+    id: g.id, name: g.name, channels: [...(g.channels || [])],
+    state_entity_id: g.state_entity_id || g.state_entity || '',
+    open_action: actionsText(g.open_action), close_action: actionsText(g.close_action),
+    notify: g.notify,
+  };
+}
+
+function parseActions(text, label) {
+  const t = (text || '').trim();
+  if (!t) return { value: null };
+  try {
+    const v = JSON.parse(t);
+    const list = Array.isArray(v) ? v : [v];
+    if (!list.every((a) => a && typeof a === 'object' && !Array.isArray(a))) throw new Error('not actions');
+    return { value: list };
+  } catch (e) {
+    return { error: `The ${label} must be a JSON action or list of actions.` };
+  }
+}
+
+// Websocket fields for create_gate / update_gate, or { error } to show.
+// Blank optional fields are sent as null so an edit can clear them; a null
+// notify keeps the "on when there is no open action" default.
+function gatePayload(d) {
+  const name = (d.name || '').trim();
+  if (!name) return { error: 'A Gate needs a name.' };
+  if (!(d.channels || []).length) return { error: 'Pick at least one Channel on the map.' };
+  const open = parseActions(d.open_action, 'open action');
+  if (open.error) return { error: open.error };
+  const close = parseActions(d.close_action, 'close action');
+  if (close.error) return { error: close.error };
+  return {
+    payload: {
+      name, channels: [...d.channels],
+      state_entity: (d.state_entity_id || '').trim() || null,
+      open_action: open.value, close_action: close.value,
+      notify: d.notify == null ? null : d.notify,
+    },
+  };
+}
+
+const toggleChannel = (picked, id) => (picked.includes(id) ? picked.filter((c) => c !== id) : [...picked, id]);
+
+function gateEditorHtml(d, view, entityIds) {
+  const zones = view.zones || [];
+  const byId = Object.fromEntries((view.channels || []).map((c) => [c.id, c]));
+  const picked = d.channels.map((id) => `<li>${esc(byId[id] ? channelName(byId[id], zones) : id)}</li>`).join('');
+  const notify = d.notify == null ? !(d.open_action || '').trim() : d.notify;
+  const options = (entityIds || []).map((e) => `<option value="${esc(e)}"></option>`).join('');
+  return `<section class="gate-editor"><h3>${d.id ? 'Edit Gate' : 'New Gate'}</h3>
+    <p><label>Name <input id="gate-name" value="${esc(d.name)}" placeholder="Fence gate"></label></p>
+    <p>Channels the Gate sits on. Pick the Channels on the map.</p>
+    <ul class="picked-channels">${picked || '<li class="warn">None picked yet.</li>'}</ul>
+    <p><label>Open-state entity (optional) <input id="gate-state-entity" list="gate-entities" value="${esc(d.state_entity_id)}" placeholder="binary_sensor.fence_gate"></label>
+      <datalist id="gate-entities">${options}</datalist></p>
+    <p><label>Open action (optional, JSON) <textarea id="gate-open-action" rows="3">${esc(d.open_action)}</textarea></label></p>
+    <p><label>Close action (optional, JSON) <textarea id="gate-close-action" rows="3">${esc(d.close_action)}</textarea></label></p>
+    <p><label><input type="checkbox" id="gate-notify"${notify ? ' checked' : ''}> Notify me before crossings</label></p>
+    ${d.error ? `<p class="warn" id="gate-error">${esc(d.error)}</p>` : ''}
+    <p><button data-act="save-gate">Save Gate</button> <button data-act="cancel-gate">Cancel</button>
+    ${d.id ? '<button data-act="delete-gate">Delete Gate</button>' : ''}</p></section>`;
+}
+
+// Gates with believed state, the Zones behind each for confirmation, and the
+// Zones no Channel route reaches.
+function gateListHtml(view, selectedId) {
+  const gates = view.gates || [];
+  const zones = view.zones || [];
+  const names = (ids) => ids.map((id) => esc((zones.find((z) => z.id === id) || {}).name || id)).join(', ');
+  const rows = gates.map((g) => `<li data-gate="${esc(g.id)}" class="${g.id === selectedId ? 'selected' : ''}">
+      <span class="name">${esc(g.name)}</span>
+      <span class="tag">${g.open ? 'open' : 'closed'}</span>
+      <button data-act="edit-gate" data-gate="${esc(g.id)}">Edit</button>
+      <div class="behind">Zones behind this Gate: ${g.zone_ids && g.zone_ids.length ? names(g.zone_ids) : 'none'}.
+        Check that this matches your fence.</div></li>`).join('');
+  const unrouted = (view.unrouted_zones || []).length
+    ? `<p class="warn">No Channel route to the dock, treated as not gated: ${names(view.unrouted_zones.map((z) => z.id))}.
+        Zones with no route to the dock cannot be reached through any Gate.</p>` : '';
+  return `<ul class="zones gates">${rows || '<li class="empty">No Gates declared.</li>'}</ul>${unrouted}
+    <p><button data-act="new-gate">Add Gate</button></p>`;
 }
 
 class MowingDirectorPanel extends HTMLElement {
