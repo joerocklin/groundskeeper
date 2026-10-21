@@ -1,7 +1,7 @@
 {
   "domain": "mowing_director",
   "name": "Mowing Director",
-  "after_dependencies": ["mammotion"],
+  "after_dependencies": ["logbook", "mammotion"],
   "codeowners": ["@joerocklin"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "panel_custom", "repairs", "websocket_api"],

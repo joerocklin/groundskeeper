@@ -12,19 +12,29 @@ from pathlib import Path
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_CONFIG_ENTRY_ID
+from homeassistant.const import ATTR_CONFIG_ENTRY_ID, CONF_DEVICE, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 
+from .adapters import get_adapter_factory
 from .const import DOMAIN
 from .housekeeping import async_detach_housekeeping
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
-from .store import MowerStore, empty_store_data
-from .zone_sync import async_detach_zone_sync, async_get_zone_sync
+from .runtime import Director, async_register_director, async_unregister_director
+from .services import async_register_services, target_entry
+from .store import MowerStore
+from .zone_sync import (
+    async_attach_zone_sync,
+    async_detach_zone_sync,
+    async_get_zone_sync,
+)
 
 type MowingDirectorConfigEntry = ConfigEntry[MowerStore]
+
+PLATFORMS = [Platform.SENSOR]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -32,10 +42,11 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Mowing Director. Services are registered here, never per entry."""
     async_register_commands(hass)
+    async_register_services(hass)
     # The rest of the service set lands in later tickets.
 
     async def _refresh_zones(call: ServiceCall) -> None:
-        entry = _target_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+        entry = target_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
         sync = async_get_zone_sync(hass, entry.entry_id)
         if sync is None:
             raise ServiceValidationError(
@@ -52,36 +63,34 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
-def _target_entry(hass: HomeAssistant, entry_id: str | None) -> ConfigEntry:
-    """Resolve a service's Mower: explicit id, else the only loaded entry (§13.1)."""
-    loaded = hass.config_entries.async_loaded_entries(DOMAIN)
-    if entry_id is not None:
-        for entry in loaded:
-            if entry.entry_id == entry_id:
-                return entry
-        raise ServiceValidationError(
-            translation_domain=DOMAIN, translation_key="unknown_entry"
-        )
-    if len(loaded) != 1:
-        raise ServiceValidationError(
-            translation_domain=DOMAIN, translation_key="entry_ambiguous"
-        )
-    return loaded[0]
+def _adapter_for(hass: HomeAssistant, entry: ConfigEntry):
+    """Build the adapter for the entry's Mower device, or None if unsupported."""
+    device = dr.async_get(hass).async_get(entry.data.get(CONF_DEVICE, ""))
+    if device is None:
+        return None
+    for domain, _identifier in device.identifiers:
+        factory = get_adapter_factory(domain)
+        if factory is not None:
+            return factory(hass, entry)
+    return None
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: MowingDirectorConfigEntry
 ) -> bool:
-    """Load a Mower's Store and mark the entry ready."""
+    """Load a Mower's Store, start its adapter and Director, add entities."""
     store = MowerStore(hass, entry.entry_id)
-    data = await store.async_load()
-    if data is None:
-        # First install, or a corrupt file HA renamed away; never treat a
-        # None load as "nothing in flight" beyond seeding the empty shape.
-        data = empty_store_data()
-        await store.async_save(data)
+    await store.async_data()  # seeds the empty shape on first install
     entry.runtime_data = store
     await async_register_panel(hass)
+
+    adapter = _adapter_for(hass, entry)
+    if adapter is not None:
+        async_attach_zone_sync(hass, entry.entry_id, adapter, store)
+        director = Director(hass, entry, adapter, store)
+        async_register_director(hass, director)
+        await director.async_load()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
@@ -89,6 +98,9 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: MowingDirectorConfigEntry
 ) -> bool:
     """Unload a Mower. Never commands the Mower; state is already persisted."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    async_unregister_director(hass, entry.entry_id)
     async_detach_zone_sync(hass, entry.entry_id)
     async_detach_housekeeping(hass, entry.entry_id)
     others = [

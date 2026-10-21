@@ -5,3 +5,51 @@ refresh_zones:
       selector:
         config_entry:
           integration: mowing_director
+
+add_plan:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+    zone:
+      required: true
+      example: "Front lawn"
+      selector:
+        text:
+    start_height_mm:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 200
+          unit_of_measurement: mm
+    end_height_mm:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 200
+          unit_of_measurement: mm
+    start:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+start:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+cancel:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
