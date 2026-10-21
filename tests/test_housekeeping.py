@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from homeassistant.const import CONF_DEVICE
-from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -11,6 +11,8 @@ from custom_components.mowing_director.adapter import NativeTask
 from custom_components.mowing_director.const import DOMAIN
 from custom_components.mowing_director.housekeeping import (
     ISSUE_CONFLICTING_AUTOMATIONS,
+    ISSUE_DEVICE_NOT_FOUND,
+    ISSUE_SOURCE_TOO_OLD,
     ISSUE_NATIVE_SCHEDULE,
     async_attach_housekeeping,
 )
@@ -144,3 +146,46 @@ async def test_conflicting_set_is_stored_in_learned(hass) -> None:
     entry, _ = await _loaded(hass, FakeMower(), mower_dev.id)
     stored = await entry.runtime_data.async_load()
     assert len(stored["learned"]["conflicting_automations"]) == 1
+
+
+async def test_missing_device_raises_issue_and_keeps_entry_and_store(hass) -> None:
+    _, mower_dev, _ = await make_mammotion_mower(hass)
+    entry, hk = await _loaded(hass, FakeMower(), mower_dev.id)
+    issue_id = ISSUE_DEVICE_NOT_FOUND.format(entry.entry_id)
+    assert _issue(hass, issue_id) is None
+
+    dr.async_get(hass).async_remove_device(mower_dev.id)
+    await hk.async_check_device()
+    issue = _issue(hass, issue_id)
+    assert issue is not None and issue.is_persistent is False
+    assert hass.config_entries.async_get_entry(entry.entry_id) is not None
+    assert await entry.runtime_data.async_load() is not None
+
+
+async def test_old_mammotion_raises_non_blocking_issue(hass) -> None:
+    entry, _ = await _loaded(hass, FakeMower(source_ver="0.6.17"))
+    issue = _issue(hass, ISSUE_SOURCE_TOO_OLD.format(entry.entry_id))
+    assert issue is not None and not issue.is_fixable
+    assert issue.translation_placeholders["minimum"] == "0.6.18"
+
+
+async def test_supported_or_unknown_version_raises_nothing(hass) -> None:
+    entry, _ = await _loaded(hass, FakeMower(source_ver="0.6.18"))
+    entry2, _ = await _loaded(hass, FakeMower(source_ver=None))
+    assert _issue(hass, ISSUE_SOURCE_TOO_OLD.format(entry.entry_id)) is None
+    assert _issue(hass, ISSUE_SOURCE_TOO_OLD.format(entry2.entry_id)) is None
+
+
+async def test_issues_are_re_created_by_the_load_checks_after_restart(hass) -> None:
+    mower = FakeMower(source_ver="0.6.10")
+    entry, hk = await _loaded(hass, mower)
+    ids = [
+        ISSUE_NATIVE_SCHEDULE.format(entry.entry_id),
+        ISSUE_SOURCE_TOO_OLD.format(entry.entry_id),
+    ]
+    # Non-persistent: a restart leaves nothing behind.
+    for issue_id in ids:
+        assert _issue(hass, issue_id).is_persistent is False
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+    await hk.async_check_all()  # what a load runs
+    assert all(_issue(hass, i) is not None for i in ids)

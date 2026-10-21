@@ -66,6 +66,52 @@ class Housekeeping:
         """Every check; runs on load."""
         await self.async_check_native_schedule()
         await self.async_check_automations()
+        await self.async_check_device()
+        self.async_check_source_version()
+
+    async def async_check_device(self) -> None:
+        """Raise or clear "Mower device not found".
+
+        The entry and its Store are untouched; the user rebinds through the
+        entry's reconfigure flow (spec §4.8).
+        """
+        issue_id = ISSUE_DEVICE_NOT_FOUND.format(self._entry.entry_id)
+        device_id = self._entry.data.get(CONF_DEVICE, "")
+        if dr.async_get(self._hass).async_get(device_id) is not None:
+            ir.async_delete_issue(self._hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="device_not_found",
+            translation_placeholders={"mower": self._entry.title},
+        )
+
+    @callback
+    def async_check_source_version(self) -> None:
+        """Raise or clear "Mammotion-HA too old" (spec §3.8)."""
+        issue_id = ISSUE_SOURCE_TOO_OLD.format(self._entry.entry_id)
+        version = self._adapter.source_version
+        if not version_too_old(version):
+            ir.async_delete_issue(self._hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="source_too_old",
+            translation_placeholders={
+                "version": version or "",
+                "minimum": ".".join(str(p) for p in MIN_MAMMOTION_VERSION),
+            },
+        )
 
     def _conflicting_automations(self) -> list[str]:
         """Automations that reference the Mower's device or its entities."""
