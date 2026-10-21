@@ -485,6 +485,149 @@ function newPlanFormHtml(d, zones, preview, lengthUnit) {
     ${preview ? previewHtml(preview, lengthUnit) : ''}</section>`;
 }
 
+// -- Checks tab (spec §16.3, §9, §11.4) ----------------------------------------
+
+const WEEKDAYS = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
+const DETECTORS = [['charge_not_rising', 'Charge not rising while docked'], ['run_too_long', 'Run far longer than the Zone\'s history']];
+const OPERATORS = [['is', 'is'], ['is_not', 'is not'], ['above', 'above'], ['below', 'below']];
+const ALWAYS_ON_CHECKS = ['mower_ready', 'zone_ready'];
+
+const hoursText = (s) => (s == null ? '' : String(num(s / 3600)));
+const hoursToS = (t) => {
+  const v = String(t == null ? '' : t).trim();
+  if (v === '') return { value: null };
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? { value: Math.round(n * 3600) } : { error: 'Timeouts are a positive number of hours.' };
+};
+const entityList = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((s) => s.trim()).filter(Boolean);
+
+const optionsHtml = (pairs, current) =>
+  pairs.map(([v, l]) => `<option value="${esc(v)}"${v === current ? ' selected' : ''}>${esc(l)}</option>`).join('');
+
+const timeoutPolicyHtml = (c) => `
+  <label>Timeout (hours, blank for none) <input type="number" min="0" step="any" data-f="timeout_h" value="${esc(hoursText(c.timeout_s))}"></label>
+  <label>When it times out <select data-f="policy">${optionsHtml([['notify', 'Notify and keep waiting'], ['pause', 'Pause the Schedule']], c.policy)}</select></label>`;
+
+function checkFieldsHtml(c, view) {
+  const cfg = c.config || {};
+  if (c.type === 'battery') {
+    return `<label>Minimum battery (%) <input type="number" min="1" max="100" data-f="threshold_pct" value="${esc(cfg.threshold_pct)}"></label>`;
+  }
+  if (c.type === 'work_hours') {
+    const rows = WEEKDAYS.map(([d, l]) => {
+      const w = (cfg.days || {})[d] || ['08:00', '00:00'];
+      return `<tr data-day="${d}"><td>${l}</td><td><input type="time" data-f="start" value="${esc(w[0])}"></td><td><input type="time" data-f="end" value="${esc(w[1])}"></td></tr>`;
+    }).join('');
+    return `<table class="hours"><tr><th></th><th>Start</th><th>End (00:00 = midnight)</th></tr>${rows}</table>`;
+  }
+  if (c.type === 'wet_grass') {
+    const mower = view.mower_rain_detection
+      ? ''
+      : ' <span class="warn" id="mower-rain-off">off on the Mower</span>';
+    return `<p><label><input type="checkbox" data-f="mower_rain"${cfg.mower_rain ? ' checked' : ''}> Mower rain flag</label>${mower}</p>
+      <label>Weather entities (comma separated) <input type="text" list="weather-ids" data-f="weather" value="${esc((cfg.weather || []).join(', '))}"></label>
+      <label>Rain sensors (comma separated) <input type="text" list="sensor-ids" data-f="sensors" value="${esc((cfg.sensors || []).join(', '))}"></label>
+      <label>Dry-out (hours) <input type="number" min="0" step="any" data-f="dry_out_h" value="${esc(hoursText(cfg.dry_out_s))}"></label>
+      <label><input type="checkbox" data-f="morning"${cfg.morning ? ' checked' : ''}> Morning dry-out</label>
+      <label>Sunrise plus (hours) <input type="number" min="0" step="any" data-f="morning_offset_h" value="${esc(hoursText(cfg.morning_offset_s))}"></label>
+      <label>Rain probability threshold (%) <input type="number" min="0" max="100" data-f="precip_pct" value="${esc(cfg.precip_pct)}"></label>`;
+  }
+  if (c.type === 'custom') {
+    const cond = cfg.mode === 'template'
+      ? `<code>${esc(cfg.template)}</code>`
+      : `<code>${esc(cfg.entity)} ${esc(cfg.operator)} ${esc(cfg.value)}</code>`;
+    return `<p>${cond}</p>`;
+  }
+  return '';
+}
+
+function checkCardHtml(c, view) {
+  if (ALWAYS_ON_CHECKS.includes(c.type)) {
+    return `<section class="card" data-check="${esc(c.id)}"><h3>${esc(c.name)}</h3><p>Always on.</p></section>`;
+  }
+  const del = c.type === 'custom' ? '<button data-act="delete-check">Delete</button>' : '';
+  return `<section class="card" data-check="${esc(c.id)}"><h3>${esc(c.name)}</h3>
+    <label><input type="checkbox" data-f="enabled"${c.enabled ? ' checked' : ''}> Enabled</label>
+    ${checkFieldsHtml(c, view)}${timeoutPolicyHtml(c)}
+    <p><button data-act="save-check">Save</button> ${del}</p></section>`;
+}
+
+const blankCustomDraft = () => ({ name: '', mode: 'entity', entity: '', operator: 'is', value: '', template: '', timeout_h: '', policy: 'notify' });
+
+function customCheckFormHtml(d) {
+  const entity = d.mode !== 'template';
+  return `<section class="card" id="custom-check-form"><h3>New Custom Check</h3>
+    <label>Name <input type="text" id="cc-name" value="${esc(d.name)}"></label>
+    <label>Kind <select id="cc-mode">${optionsHtml([['entity', 'Entity condition'], ['template', 'Template']], d.mode)}</select></label>
+    ${entity
+      ? `<label>Entity <input type="text" id="cc-entity" list="custom-ids" value="${esc(d.entity)}"></label>
+         <label>Passes when it <select id="cc-operator">${optionsHtml(OPERATORS, d.operator)}</select></label>
+         <label>Value <input type="text" id="cc-value" value="${esc(d.value)}"></label>`
+      : `<label>Template (passes when it renders true) <textarea id="cc-template" rows="3">${esc(d.template)}</textarea></label>`}
+    <label>Timeout (hours, blank for none) <input type="number" min="0" step="any" id="cc-timeout" value="${esc(d.timeout_h)}"></label>
+    <label>When it times out <select id="cc-policy">${optionsHtml([['notify', 'Notify and keep waiting'], ['pause', 'Pause the Schedule']], d.policy)}</select></label>
+    ${d.error ? `<p class="warn" id="cc-error">${esc(d.error)}</p>` : ''}
+    <p><button data-act="add-custom-check">Add Check</button></p></section>`;
+}
+
+function checksTabHtml(view, entityIds, draft) {
+  const ids = (id, re) => `<datalist id="${id}">${entityIds.filter((e) => re.test(e)).map((e) => `<option value="${esc(e)}">`).join('')}</datalist>`;
+  const anomalies = DETECTORS.map(([d, l]) => `<tr><td>${esc(l)}</td><td><select data-detector="${d}">${
+    optionsHtml([['off', 'Off'], ['notify', 'Notify'], ['pause', 'Pause after the Run']], (view.anomaly_actions || {})[d] || 'notify')}</select></td></tr>`).join('');
+  return `${view.checks.map((c) => checkCardHtml(c, view)).join('')}
+    ${customCheckFormHtml(draft || blankCustomDraft())}
+    <section class="card"><h3>Anomaly detectors</h3><table>${anomalies}</table></section>
+    ${ids('weather-ids', /^weather\./)}${ids('sensor-ids', /^binary_sensor\./)}${ids('custom-ids', /./)}`;
+}
+
+// `update_check` changes from a card's form values, or an error.
+function checkChanges(rec, f) {
+  const t = hoursToS(f.timeout_h);
+  if (t.error) return { error: t.error };
+  const changes = { enabled: !!f.enabled, timeout_s: t.value, policy: f.policy };
+  if (rec.type === 'battery') {
+    const pct = Number(f.threshold_pct);
+    if (String(f.threshold_pct).trim() === '' || !(pct >= 1 && pct <= 100)) return { error: 'Battery threshold is 1 to 100 %.' };
+    changes.config = { threshold_pct: pct };
+  } else if (rec.type === 'work_hours') {
+    const days = {};
+    for (const [d] of WEEKDAYS) {
+      const w = (f.days || {})[d];
+      if (!w || !w.start || !w.end) return { error: 'Every weekday needs a start and an end.' };
+      days[d] = [w.start, w.end];
+    }
+    changes.config = { days };
+  } else if (rec.type === 'wet_grass') {
+    const dry = Number(f.dry_out_h), off = Number(f.morning_offset_h), pct = Number(f.precip_pct);
+    if (!(dry >= 0) || !(off >= 0)) return { error: 'Dry-out times are zero or more hours.' };
+    if (!(pct >= 0 && pct <= 100)) return { error: 'Rain probability is 0 to 100 %.' };
+    changes.config = {
+      mower_rain: !!f.mower_rain, weather: entityList(f.weather), sensors: entityList(f.sensors),
+      dry_out_s: Math.round(dry * 3600), morning: !!f.morning,
+      morning_offset_s: Math.round(off * 3600), precip_pct: pct,
+    };
+  }
+  return { changes };
+}
+
+// `create_check` payload from the New Custom Check form, or an error.
+function customCheckPayload(d) {
+  const name = (d.name || '').trim();
+  if (!name) return { error: 'A Check needs a name.' };
+  const t = hoursToS(d.timeout_h);
+  if (t.error) return { error: t.error };
+  let config;
+  if (d.mode === 'template') {
+    if (!(d.template || '').trim()) return { error: 'A template is required.' };
+    config = { mode: 'template', template: d.template };
+  } else {
+    if (!(d.entity || '').trim()) return { error: 'Pick an entity.' };
+    if (String(d.value == null ? '' : d.value).trim() === '') return { error: 'A value is required.' };
+    config = { mode: 'entity', entity: d.entity.trim(), operator: d.operator, value: String(d.value).trim() };
+  }
+  return { payload: { name, config, timeout_s: t.value, policy: d.policy } };
+}
+
 class MowingDirectorPanel extends HTMLElement {
   constructor() {
     super();
@@ -500,6 +643,8 @@ class MowingDirectorPanel extends HTMLElement {
     this._scheduleView = { schedule: {}, plans: [], runs: [] };
     this._planDraft = { zone: '', start: '', end: '', max_cut: '', base_angle: '', finishing: 'default' };
     this._planPreview = null;
+    this._checksView = null;
+    this._customDraft = blankCustomDraft();
     this._unsub = null;
     this._started = false;
   }
@@ -538,7 +683,7 @@ class MowingDirectorPanel extends HTMLElement {
     this._snapshot = null;
     if (!this._entryId) return;
     this._unsub = await this._hass.connection.subscribeMessage(
-      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._render(); },
+      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._loadChecks(); this._render(); },
       { type: 'mowing_director/subscribe', entry_id: this._entryId },
     );
   }
@@ -574,6 +719,93 @@ class MowingDirectorPanel extends HTMLElement {
     } catch (err) {
       this._error = err.message || String(err);
     }
+  }
+
+  async _loadChecks() {
+    if (!this._entryId || this._tab !== 'checks') return;
+    try {
+      this._checksView = await this._hass.connection.sendMessagePromise({
+        type: 'mowing_director/list_checks', entry_id: this._entryId });
+      this._render();
+    } catch (err) {
+      this._error = err.message || String(err);
+    }
+  }
+
+  async _checkCmd(type, extra) {
+    this._checksNotice = null;
+    try {
+      await this._hass.connection.sendMessagePromise({
+        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+      return true;
+    } catch (err) {
+      this._checksNotice = err.message || String(err);
+      return false;
+    } finally {
+      await this._loadChecks();
+      this._render();
+    }
+  }
+
+  _readCustomDraft(root) {
+    const v = (id) => { const el = root.querySelector(id); return el ? el.value : undefined; };
+    if (!root.querySelector('#cc-name')) return;
+    const d = this._customDraft;
+    Object.assign(d, { name: v('#cc-name'), mode: v('#cc-mode'), timeout_h: v('#cc-timeout'), policy: v('#cc-policy') });
+    if (d.mode === 'template') d.template = v('#cc-template') || '';
+    else Object.assign(d, { entity: v('#cc-entity'), operator: v('#cc-operator'), value: v('#cc-value') });
+  }
+
+  _checksTab() {
+    if (!this._checksView) return '<section class="card"><p>Loading Checks.</p></section>';
+    const ids = Object.keys((this._hass && this._hass.states) || {}).sort();
+    const notice = this._checksNotice ? `<p class="warn" id="checks-notice">${esc(this._checksNotice)}</p>` : '';
+    return notice + checksTabHtml(this._checksView, ids, this._customDraft);
+  }
+
+  _readCheckCard(card) {
+    const f = (name) => card.querySelector(`[data-f="${name}"]`);
+    const val = (name) => (f(name) ? f(name).value : undefined);
+    const form = { enabled: f('enabled') && f('enabled').checked, timeout_h: val('timeout_h'), policy: val('policy') };
+    for (const k of ['threshold_pct', 'weather', 'sensors', 'dry_out_h', 'morning_offset_h', 'precip_pct']) form[k] = val(k);
+    for (const k of ['mower_rain', 'morning']) form[k] = f(k) ? f(k).checked : undefined;
+    const days = {};
+    card.querySelectorAll('[data-day]').forEach((row) => {
+      days[row.dataset.day] = {
+        start: row.querySelector('[data-f="start"]').value, end: row.querySelector('[data-f="end"]').value };
+    });
+    if (Object.keys(days).length) form.days = days;
+    return form;
+  }
+
+  _wireChecks(root) {
+    root.querySelectorAll('#cc-mode').forEach((el) => {
+      el.onchange = () => { this._readCustomDraft(root); this._render(); };
+    });
+    root.querySelectorAll('[data-detector]').forEach((el) => {
+      el.onchange = () => this._checkCmd('set_anomaly_action', { detector: el.dataset.detector, action: el.value });
+    });
+    root.querySelectorAll('[data-act]').forEach((el) => {
+      el.onclick = async () => {
+        const card = el.closest('[data-check]');
+        const rec = card && this._checksView.checks.find((c) => c.id === card.dataset.check);
+        if (el.dataset.act === 'save-check') {
+          const { changes, error } = checkChanges(rec, this._readCheckCard(card));
+          if (error) { this._checksNotice = error; this._render(); return; }
+          this._checkCmd('update_check', { check_id: rec.id, changes });
+        } else if (el.dataset.act === 'delete-check') {
+          this._checkCmd('delete_check', { check_id: rec.id });
+        } else if (el.dataset.act === 'add-custom-check') {
+          this._readCustomDraft(root);
+          const { payload, error } = customCheckPayload(this._customDraft);
+          this._customDraft.error = error || null;
+          if (error) { this._render(); return; }
+          // The backend validates a template on save and answers with its error.
+          if (await this._checkCmd('create_check', payload)) this._customDraft = blankCustomDraft();
+          else { this._customDraft.error = this._checksNotice; this._checksNotice = null; this._render(); }
+        }
+      };
+    });
   }
 
   _lengthUnit() {
@@ -798,6 +1030,7 @@ class MowingDirectorPanel extends HTMLElement {
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
     if (this._tab === 'schedule') this._readPlanDraft(this.shadowRoot);
+    if (this._tab === 'checks') this._readCustomDraft(this.shadowRoot);
     const mowerOptions = this._mowers
       .map((m) => `<option value="${esc(m.entry_id)}"${m.entry_id === this._entryId ? ' selected' : ''}>${esc(m.title)}</option>`)
       .join('');
@@ -814,6 +1047,7 @@ class MowingDirectorPanel extends HTMLElement {
     else if (!this._entryId) body = '<div class="empty">No Mowers configured.</div>';
     else if (this._tab === 'zones') body = `<main>${this._zonesTab()}</main>`;
     else if (this._tab === 'schedule') body = `<main>${this._scheduleTab()}</main>`;
+    else if (this._tab === 'checks') body = `<main>${this._checksTab()}</main>`;
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
@@ -823,10 +1057,11 @@ class MowingDirectorPanel extends HTMLElement {
       this._subscribe().then(() => this._render());
     };
     this.shadowRoot.querySelectorAll('nav button').forEach((b) => {
-      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); };
+      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); this._loadChecks(); };
     });
     if (this._tab === 'zones') this._wireZones(this.shadowRoot);
     if (this._tab === 'schedule') this._wireSchedule(this.shadowRoot);
+    if (this._tab === 'checks') this._wireChecks(this.shadowRoot);
   }
 }
 
