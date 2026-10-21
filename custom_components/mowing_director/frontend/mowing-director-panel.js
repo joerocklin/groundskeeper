@@ -63,6 +63,35 @@ const STYLE = `
   .tag.missing { background: var(--error-color, #db4437); color: #fff; }
   .warn { color: var(--warning-color, #b26a00); }
   input[type=number] { width: 5em; font: inherit; }
+  /* -- Now tab (spec §16.2) -- */
+  svg .zone.highlight { fill-opacity: .55; stroke-width: 4; stroke: var(--accent-color, #ff9800); }
+  .now-status { display: flex; flex-direction: column; gap: 8px; }
+  .now-status .state { font-size: 18px; font-weight: 500; }
+  .now-status dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; }
+  .now-status dt { color: var(--secondary-text-color); }
+  .now-status dd { margin: 0; }
+  .btns { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btns button, .run-row button, .prompt-card button, .sheet button { font: inherit; padding: 8px 14px; min-height: 40px;
+    border-radius: 8px; border: 1px solid var(--divider-color); background: var(--card-background-color);
+    color: var(--primary-text-color); cursor: pointer; }
+  .btns button.danger, .prompt-card button[data-action=abort] { color: var(--error-color, #db4437); }
+  button:disabled { opacity: .35; cursor: default; }
+  ul.runs { list-style: none; margin: 0; padding: 0; }
+  ul.runs li.run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 4px; border-radius: 6px; cursor: pointer; }
+  ul.runs li.run.selected { background: var(--secondary-background-color); }
+  ul.runs .what { flex: 1; min-width: 10em; }
+  ul.runs .what small { display: block; color: var(--secondary-text-color); }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill { font-size: 13px; padding: 3px 10px; border-radius: 12px; background: var(--secondary-background-color); }
+  .pill.ok { background: var(--success-color, #43a047); color: #fff; }
+  .pill.failing { background: var(--error-color, #db4437); color: #fff; }
+  .prompt-card { border-left: 4px solid var(--warning-color, #ffa600); padding-left: 12px; margin: 8px 0; }
+  .prompt-card h3 { margin: 0 0 4px; font-size: 16px; }
+  .prompt-card p { margin: 2px 0; }
+  .sheet { position: fixed; inset: auto 0 0 0; max-width: 480px; margin: 0 auto; z-index: 5;
+    background: var(--card-background-color); border-radius: 16px 16px 0 0; padding: 16px;
+    box-shadow: 0 -4px 24px rgba(0,0,0,.35); }
+  .sheet label { display: block; margin: 8px 0; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
 `;
 
@@ -368,6 +397,164 @@ function gateListHtml(view, selectedId) {
     <p><button data-act="new-gate">Add Gate</button></p>`;
 }
 
+// -- Now tab helpers (spec §16.2) ----------------------------------------------
+// Pure string builders over the `get_now` / `subscribe_now` view.
+
+const fmtHeight = (mm, lengthUnit) =>
+  (lengthUnit === 'mi' ? `${Math.round((mm / 25.4) * 100) / 100} in` : `${num(mm)} mm`);
+
+const REASONS = {
+  battery_low: 'Battery too low to start',
+  below_threshold: 'Battery below the Check threshold',
+  outside_work_hours: 'Outside work hours',
+  unavailable: 'Mower unavailable',
+  unknown_state: 'Mower state unknown',
+  job_active: 'The Mower already has a job running',
+  new_error: 'The Mower reported an error',
+  device_non_work_hours: 'Outside the Mower\'s own work hours',
+  bearing_unset: 'Zone bearing not set',
+  zone_missing: 'The Zone is missing',
+  start_failed: 'The Mower did not start',
+  ended_by_user: 'Ended by you',
+};
+const reasonText = (r) => REASONS[r] || String(r || 'unknown').replace(/_/g, ' ');
+
+const NOTES = {
+  height_increases: 'This height is higher than the Run before it in the Plan.',
+  step_above_max_cut: 'This step cuts more than the Max cut.',
+  angle_outside_range: 'This angle is outside the Zone\'s allowed range.',
+  move_before_earlier_run: 'A Run cannot go ahead of an earlier Run of its own Plan.',
+  move_after_later_run: 'A Run cannot go behind a later Run of its own Plan.',
+  move_not_pending: 'Only a Run that has not started can be moved.',
+  run_not_pending: 'Only a Run that has not started can be changed.',
+  no_failure_to_answer: 'There is no failed Run to answer any more.',
+  prompt_not_pending: 'That question has already been answered.',
+};
+const errorText = (code, message) => NOTES[code] || message;
+
+const STATUS_LABEL = { idle: 'Idle', waiting: 'Waiting', running: 'Running', paused: 'Paused' };
+const CTL_LABEL = {
+  pause: 'Pause after Run', stop_now: 'Stop now', done_today: 'Done for today',
+  resume: 'Resume', retry: 'Retry', skip_plan: 'Skip Plan', abort: 'Abort',
+  resume_run: 'Resume Run', end_run: 'End Run',
+};
+const ACTION_LABEL = {
+  retry: 'Retry', skip_plan: 'Skip Plan', abort: 'Abort', resume: 'Resume', end_run: 'End Run',
+  no: 'No', yes: 'Yes', yes_done_today: 'Yes, done for today', opened: 'I opened it',
+  closed: 'Closed', dismiss: 'Dismiss',
+};
+const actionLabel = (a) => ACTION_LABEL[a] || String(a).replace(/_/g, ' ');
+
+// The panel confirms Abort (spec §16.3); other actions go straight through.
+const confirmText = (action) => (action === 'abort'
+  ? 'Abort? This cancels the whole Schedule: every pending Run is removed.' : null);
+
+// Map options: stripes at the next Run's absolute angle (the active Run's while
+// one is mowing); tapping a Run highlights its Zone.
+function nowMapOpts(view, highlightRunId) {
+  const head = view.current_run || view.next_run;
+  const picked = (view.up_next || []).find((r) => r.run_id === highlightRunId);
+  return {
+    stripeZoneId: head ? head.zone_id : undefined,
+    angle: head ? head.angle_deg : undefined,
+    currentZoneId: view.current_zone_id || null,
+    highlightZoneId: picked ? picked.zone_id : null,
+  };
+}
+
+const ctlButton = (ctl, extra = '') =>
+  `<button data-ctl="${ctl}"${extra}${ctl === 'abort' || ctl === 'stop_now' ? ' class="danger"' : ''}>${CTL_LABEL[ctl]}</button>`;
+
+function statusCardHtml(view, lengthUnit) {
+  const c = view.current_run;
+  const has = (ctl) => (view.controls || []).includes(ctl);
+  let body = '';
+  if (c) {
+    body += `<dl><dt>Zone</dt><dd>${esc(c.zone_name)}</dd>
+      <dt>Height</dt><dd>${fmtHeight(c.height_mm, lengthUnit)}</dd>
+      <dt>Angle</dt><dd>${fmtDeg(c.angle_deg)}</dd>
+      <dt>Progress</dt><dd>Run ${esc(c.n)} of ${esc(c.of)}</dd>
+      <dt>Battery</dt><dd>${c.battery == null ? 'unknown' : `${esc(c.battery)} %`}</dd>
+      <dt>Height check</dt><dd>${esc(String(c.height_check || 'pending').replace(/_/g, ' '))}</dd></dl>`;
+    if (c.status === 'on_hold') {
+      body += `<p class="warn">On hold: ${esc(reasonText(c.on_hold_reason))}.</p>`;
+    }
+  }
+  if (view.status === 'waiting') {
+    const w = view.waiting_on || [];
+    body += w.length
+      ? `<p>Waiting for:</p><ul class="waiting">${w.map((x) => `<li><strong>${esc(x.name)}</strong>: ${esc(reasonText(x.reason))}</li>`).join('')}</ul>`
+      : '<p>Waiting for the Mower to settle before starting.</p>';
+  }
+  if (view.status === 'paused' && view.failure) {
+    const f = view.failure;
+    body += `<p class="warn">Run ${esc(f.n)} of ${esc(f.of)} (${esc(f.zone_name)}) failed: ${esc(reasonText(f.reason))}.</p>`;
+  } else if (view.status === 'paused' && view.paused_reason) {
+    body += `<p>Paused: ${esc(reasonText(view.paused_reason))}.</p>`;
+  }
+  if (view.pause_requested && view.status !== 'paused') body += '<p class="hint">Pausing after this Run.</p>';
+  const order = ['pause', 'stop_now', 'resume_run', 'end_run', 'retry', 'skip_plan', 'resume', 'abort', 'done_today'];
+  const btns = order.filter(has).map((ctl) => ctlButton(ctl)).join('');
+  return `<div class="now-status"><div class="state">${esc(STATUS_LABEL[view.status] || view.status)}</div>${body}
+    ${btns ? `<div class="btns">${btns}</div>` : ''}</div>`;
+}
+
+// Position (among the pending Runs) a ↑/↓ press moves the Run to.
+function movePosition(rows, runId, dir) {
+  const i = rows.findIndex((r) => r.run_id === runId);
+  return dir === 'up' ? i - 1 : i + 1;
+}
+
+function upNextHtml(view, lengthUnit, selectedRunId) {
+  const rows = (view.up_next || []).map((r) => `<li data-run="${esc(r.run_id)}" class="run${r.run_id === selectedRunId ? ' selected' : ''}">
+      <span class="what"><strong>${esc(r.zone_name)}</strong>
+        <small>Run ${esc(r.n)} of ${esc(r.of)} · ${fmtHeight(r.height_mm, lengthUnit)} · ${fmtDeg(r.angle_deg)}</small></span>
+      <span class="run-row"><button data-act="move-up" data-run="${esc(r.run_id)}" aria-label="Move earlier"${r.can_up ? '' : ' disabled'}>↑</button>
+      <button data-act="move-down" data-run="${esc(r.run_id)}" aria-label="Move later"${r.can_down ? '' : ' disabled'}>↓</button>
+      <button data-act="run-menu" data-run="${esc(r.run_id)}" aria-label="Edit or delete">⋯</button></span></li>`).join('');
+  return `<ul class="runs">${rows || '<li class="empty">No Runs coming up.</li>'}</ul>
+    <p><button data-act="add-plan">+ Plan</button></p>`;
+}
+
+// Bottom sheet for one pending Run. `state` carries { warnings, error } from the
+// last save; values are shown and entered in HA units.
+function runSheetHtml(run, lengthUnit, state) {
+  const h = lengthUnit === 'mi' ? Math.round((run.height_mm / 25.4) * 100) / 100 : num(run.height_mm);
+  const st = state || {};
+  return `<div class="sheet" role="dialog" aria-label="Edit Run" data-run="${esc(run.run_id)}">
+    <h3>${esc(run.zone_name)}, Run ${esc(run.n)} of ${esc(run.of)}</h3>
+    <label>Height (${lengthUnit === 'mi' ? 'in' : 'mm'}) <input id="run-height" type="number" step="any" value="${st.draft ? esc(st.draft.height) : h}"></label>
+    <label>Angle (°) <input id="run-angle" type="number" step="any" value="${st.draft ? esc(st.draft.angle) : num(run.angle_deg)}"></label>
+    ${(st.warnings || []).map((w) => `<p class="warn">${esc(NOTES[w] || w)}</p>`).join('')}
+    ${st.error ? `<p class="warn" id="run-error">${esc(st.error)}</p>` : ''}
+    <div class="btns"><button data-act="save-run">Save</button>
+    <button data-act="delete-run" class="danger">Delete Run</button>
+    <button data-act="close-sheet">Close</button></div></div>`;
+}
+
+// edit_run fields from the sheet's raw inputs, or { error }.
+function runEditPayload(d, lengthUnit) {
+  const height = d.height === '' || d.height == null ? NaN : Number(d.height);
+  const angle = d.angle === '' || d.angle == null ? NaN : Number(d.angle);
+  if (!Number.isFinite(height) || height <= 0) return { error: 'Enter a height above zero.' };
+  if (!Number.isFinite(angle)) return { error: 'Enter an angle in degrees.' };
+  const mm = lengthUnit === 'mi' ? height * 25.4 : height;
+  return { payload: { height_mm: Math.round(mm * 10) / 10, angle_deg: angle } };
+}
+
+function checkPillsHtml(checks) {
+  if (!checks || !checks.length) return '<p class="hint">No Checks enabled.</p>';
+  return `<div class="pills">${checks.map((c) => `<span class="pill ${esc(c.state)}" title="${esc(c.state)}">${esc(c.name)}</span>`).join('')}</div>`;
+}
+
+function promptCardsHtml(prompts) {
+  return (prompts || []).map((p) => `<div class="prompt-card" data-prompt-card="${esc(p.prompt_id)}">
+      <h3>${esc(p.title)}</h3>
+      ${String(p.body || '').split('\n').filter(Boolean).map((l) => `<p>${esc(l)}</p>`).join('')}
+      <div class="btns">${(p.actions || []).map((a) => `<button data-prompt="${esc(p.prompt_id)}" data-action="${esc(a)}">${esc(actionLabel(a))}</button>`).join('')}</div></div>`).join('');
+}
+
+
 class MowingDirectorPanel extends HTMLElement {
   constructor() {
     super();
@@ -382,6 +569,14 @@ class MowingDirectorPanel extends HTMLElement {
     this._gateDraft = null; // Gate being created or edited, with its picked Channels
     this._unsub = null;
     this._started = false;
+    // Now tab state (spec §16.2)
+    this._now = null; // latest subscribe_now view
+    this._prompts = []; // latest subscribe_prompts list
+    this._unsubNow = null;
+    this._unsubPrompts = null;
+    this._runId = null; // tapped Run, highlighted on the map
+    this._sheet = null; // { run_id, warnings, error } while the edit sheet is open
+    this._nowZonesAt = 0;
   }
 
   set hass(hass) {
@@ -421,10 +616,11 @@ class MowingDirectorPanel extends HTMLElement {
       (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._render(); },
       { type: 'mowing_director/subscribe', entry_id: this._entryId },
     );
+    await this._subscribeNow();
   }
 
   async _loadZones() {
-    if (!this._entryId || this._tab !== 'zones') return;
+    if (!this._entryId || (this._tab !== 'zones' && this._tab !== 'now')) return;
     try {
       this._zoneView = await this._hass.connection.sendMessagePromise({
         type: 'mowing_director/get_zones', entry_id: this._entryId });
@@ -560,10 +756,138 @@ class MowingDirectorPanel extends HTMLElement {
 
   _unsubscribe() {
     if (this._unsub) { this._unsub(); this._unsub = null; }
+    if (this._unsubNow) { this._unsubNow(); this._unsubNow = null; }
+    if (this._unsubPrompts) { this._unsubPrompts(); this._unsubPrompts = null; }
+  }
+
+  // ---- Now tab (spec §16.2) -------------------------------------------------
+
+  async _subscribeNow() {
+    this._now = null;
+    this._prompts = [];
+    const conn = this._hass.connection;
+    this._unsubNow = await conn.subscribeMessage((view) => {
+      this._now = view;
+      // The map needs Gate states: refresh Zones at most every 10 s of pushes.
+      if (this._tab === 'now' && Date.now() - this._nowZonesAt > 10000) {
+        this._nowZonesAt = Date.now();
+        this._loadZones();
+      }
+      this._render();
+    }, { type: 'mowing_director/subscribe_now', entry_id: this._entryId });
+    this._unsubPrompts = await conn.subscribeMessage((ev) => {
+      this._prompts = ev.prompts || [];
+      this._render();
+    }, { type: 'mowing_director/subscribe_prompts', entry_id: this._entryId });
+  }
+
+  _lengthUnit() {
+    const u = this._hass && this._hass.config && this._hass.config.unit_system;
+    return (u && u.length) || 'km';
+  }
+
+  async _nowCmd(type, extra = {}) {
+    try {
+      await this._hass.connection.sendMessagePromise({
+        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+      return null;
+    } catch (err) {
+      const message = errorText(err.code, err.message || String(err));
+      this._notice = message;
+      this._render();
+      return message;
+    }
+  }
+
+  _nowTab() {
+    const view = this._now;
+    if (!view) return '<section class="card"><h2>Now</h2><p>Loading.</p></section>';
+    const unit = this._lengthUnit();
+    const { zones, channels } = this._zoneView;
+    const sheetRun = this._sheet && (view.up_next || []).find((r) => r.run_id === this._sheet.run_id);
+    const map = renderMap(zones, channels, { gates: this._zoneView.gates || [], ...nowMapOpts(view, this._runId) });
+    return `<section class="card"><h2>Map</h2>${map}</section>
+      <div><section class="card"><h2>Status</h2>${this._notice ? `<p class="warn" id="notice">${esc(this._notice)}</p>` : ''}
+        ${statusCardHtml(view, unit)}</section>
+      ${this._prompts.length ? `<section class="card"><h2>Needs your answer</h2>${promptCardsHtml(this._prompts)}</section>` : ''}
+      <section class="card"><h2>Up next</h2>${upNextHtml(view, unit, this._runId)}</section>
+      <section class="card"><h2>Checks</h2>${checkPillsHtml(view.checks)}</section></div>
+      ${sheetRun ? runSheetHtml(sheetRun, unit, this._sheet) : ''}`;
+  }
+
+  _wireNow(root) {
+    const confirmed = (action) => {
+      const text = confirmText(action);
+      return !text || (typeof confirm !== 'function') || confirm(text);
+    };
+    root.querySelectorAll('li.run').forEach((li) => {
+      li.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        this._runId = this._runId === li.dataset.run ? null : li.dataset.run;
+        this._render();
+      });
+    });
+    root.querySelectorAll('[data-ctl]').forEach((b) => {
+      b.addEventListener('click', () => {
+        this._notice = null;
+        if (confirmed(b.dataset.ctl)) this._nowCmd('run_control', { action: b.dataset.ctl });
+      });
+    });
+    root.querySelectorAll('[data-prompt]').forEach((b) => {
+      b.addEventListener('click', () => {
+        this._notice = null;
+        if (confirmed(b.dataset.action)) {
+          this._nowCmd('answer_prompt', { prompt_id: b.dataset.prompt, action: b.dataset.action });
+        }
+      });
+    });
+    root.querySelectorAll('[data-act]').forEach((b) => {
+      b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const run_id = b.dataset.run || (this._sheet && this._sheet.run_id);
+        switch (b.dataset.act) {
+          case 'add-plan': this._tab = 'schedule'; this._render(); break;
+          case 'move-up': case 'move-down': {
+            this._notice = null;
+            const position = movePosition(this._now.up_next, run_id, b.dataset.act === 'move-up' ? 'up' : 'down');
+            this._nowCmd('move_run', { run_id, position });
+            break;
+          }
+          case 'run-menu': this._sheet = { run_id }; this._render(); break;
+          case 'close-sheet': this._sheet = null; this._render(); break;
+          case 'delete-run': {
+            if (await this._nowCmd('delete_run', { run_id }) == null) this._sheet = null;
+            this._render();
+            break;
+          }
+          case 'save-run': {
+            const { payload, error } = runEditPayload({
+              height: root.querySelector('#run-height').value,
+              angle: root.querySelector('#run-angle').value }, this._lengthUnit());
+            if (error) { this._sheet.error = error; this._render(); break; }
+            try {
+              const res = await this._hass.connection.sendMessagePromise({
+                type: 'mowing_director/edit_run', entry_id: this._entryId, run_id, ...payload });
+              const warnings = (res && res.warnings) || [];
+              this._sheet = warnings.length ? { run_id, warnings } : null; // warnings show; edit already saved
+            } catch (err) {
+              this._sheet.error = errorText(err.code, err.message || String(err));
+              this._sheet.warnings = [];
+            }
+            this._render();
+            break;
+          }
+        }
+      });
+    });
   }
 
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
+    const rh = this.shadowRoot.querySelector('#run-height');
+    if (this._sheet && rh) {
+      this._sheet.draft = { height: rh.value, angle: this.shadowRoot.querySelector('#run-angle').value };
+    }
     const mowerOptions = this._mowers
       .map((m) => `<option value="${esc(m.entry_id)}"${m.entry_id === this._entryId ? ' selected' : ''}>${esc(m.title)}</option>`)
       .join('');
@@ -579,6 +903,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (this._error) body = `<div class="empty">${esc(this._error)}</div>`;
     else if (!this._entryId) body = '<div class="empty">No Mowers configured.</div>';
     else if (this._tab === 'zones') body = `<main>${this._zonesTab()}</main>`;
+    else if (this._tab === 'now') body = `<main>${this._nowTab()}</main>`;
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
@@ -591,6 +916,7 @@ class MowingDirectorPanel extends HTMLElement {
       b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); };
     });
     if (this._tab === 'zones') this._wireZones(this.shadowRoot);
+    if (this._tab === 'now' && this._now) this._wireNow(this.shadowRoot);
   }
 }
 
