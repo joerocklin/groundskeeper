@@ -410,3 +410,35 @@ def on_hold_by_external_pause_from(state):
     state, _ = step(state, SnapshotReceived(at(100), PAUSED))
     state, _ = step(state, TimerFired(at(161)))
     return state
+
+
+# -- interplay with Stop now and blade height re-verify --------------------------
+
+
+def test_stop_now_while_on_hold_returns_pending_and_clears_hold_and_prompt():
+    from custom_components.mowing_director.core import StopNow
+
+    state = on_hold_by_external_pause()
+    state, fx = step(state, StopNow(at(200)))
+    run = state["state"]["runs"][0]
+    assert run["status"] == "pending"
+    assert "on_hold_reason" not in run
+    assert hold_prompts(state) == []
+    assert [e for e in fx if isinstance(e, AbortRunEffect)]
+
+
+def test_height_is_reverified_when_the_run_returns_to_mowing_from_hold():
+    from dataclasses import replace as dc_replace
+
+    from tests.test_core_reducer import ENV
+
+    env = dc_replace(ENV, height_readback_resolution_mm=5)
+    state = mowing_state()  # built with the default env: no readback declared
+    state, _ = step(state, SnapshotReceived(at(100), PAUSED), env)
+    state, _ = step(state, TimerFired(at(161)), env)
+    assert state["state"]["height_verify"] is None
+    state, _ = step(state, SnapshotReceived(at(300), MOWING), env)
+    state, _ = step(state, TimerFired(at(361)), env)
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["height_verify"] is not None
+    assert "height_verify" in state["state"]["deadlines"]

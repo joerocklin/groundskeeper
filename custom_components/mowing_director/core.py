@@ -61,6 +61,9 @@ DEADLINE_START_WINDOW = "start_window"
 DEADLINE_DONE_STABLE = "done_stable"
 DEADLINE_STOPPED_STABLE = "stopped_stable"
 DEADLINE_STALL = "stall"
+DEADLINE_HEIGHT_VERIFY = "height_verify"  # spec §7.6: window per `mowing` segment
+DEADLINE_HEIGHT_STABLE = "height_stable"  # spec §7.6: 60 s in tolerance
+DEFAULT_HEIGHT_VERIFY_WINDOW = timedelta(minutes=10)  # spec §7.6, §19
 DEFAULT_STALL_WINDOW = timedelta(minutes=60)  # spec §7.3, §19
 DEADLINE_PAUSE_STABLE = "pause_stable"
 DEADLINE_HOLD_CLEAR_STABLE = "hold_clear_stable"
@@ -139,6 +142,28 @@ class StartSchedule:
     """`start` service / button: `idle`/`paused` to `waiting`."""
 
     now: datetime
+
+
+@dataclass(frozen=True)
+class PauseSchedule:
+    """`pause` service / button: soft Pause (spec §6.4); never commands the Mower."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class StopNow:
+    """`stop_now` service / button: the active Run returns to `pending`."""
+
+    now: datetime
+
+
+@dataclass(frozen=True)
+class ResumeSchedule:
+    """`resume` service / button: `paused` to `waiting`."""
+
+    now: datetime
+
 
 
 @dataclass(frozen=True)
@@ -236,6 +261,9 @@ class TimerFired:
 type CoreInput = (
     AddPlan
     | StartSchedule
+    | PauseSchedule
+    | StopNow
+    | ResumeSchedule
     | CancelSchedule
     | RetryRun
     | SkipPlan
@@ -335,6 +363,9 @@ class Env:
     min_start_battery_pct: int
     start_window: timedelta = DEFAULT_START_WINDOW
     stall_window: timedelta = DEFAULT_STALL_WINDOW
+    height_verify_window: timedelta = DEFAULT_HEIGHT_VERIFY_WINDOW
+    # Limits.height_readback_resolution_mm; None = no readback declared (§7.6.6)
+    height_readback_resolution_mm: int | None = None
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
 
@@ -367,6 +398,7 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("waiting_on", [])
     state.setdefault("stall_movement", None)
     state.setdefault("battery_trend", None)
+    state.setdefault("height_verify", None)
     state.setdefault("prompts", [])
     history = dict(data.get("history") or {})
     history.setdefault("runs", [])
@@ -554,6 +586,12 @@ class _Machine:
                 self._add_plan(event)
             case StartSchedule():
                 self._start_schedule("user_start")
+            case PauseSchedule():
+                self._pause()
+            case StopNow():
+                self._stop_now()
+            case ResumeSchedule():
+                self._start_schedule("user_resume")
             case CancelSchedule():
                 self._cancel()
             case RetryRun():
@@ -670,9 +708,41 @@ class _Machine:
             return
         if next_run(self.s) is None:
             return
+        # A failed Run leaves only by Retry / Skip Plan / Abort (spec §6.2).
+        if any(r["status"] == RunStatus.FAILED for r in self.s["runs"]):
+            return
         self.s["blocking_error"] = None
+        self.s["schedule"]["pause_requested"] = False
         self._set_schedule(ScheduleStatus.WAITING, reason)
         self._evaluate()
+
+    # -- Pause / Stop now / Retry / Skip Plan (spec §6.3, §6.4) -------------
+
+    def _pause(self) -> None:
+        """Soft Pause: set `pause_requested`, never command the Mower."""
+        if self.status not in (ScheduleStatus.WAITING, ScheduleStatus.RUNNING):
+            return
+        self.s["schedule"]["pause_requested"] = True
+        if self.status == ScheduleStatus.WAITING:
+            self._cancel_deadline(DEADLINE_STABILITY)
+            self._set_schedule(ScheduleStatus.PAUSED, "user_pause")
+        # `running`: the Run ends first; `_finish_run` then pauses.
+
+    def _stop_now(self) -> None:
+        """The active Run returns to `pending` at the head; Schedule `paused`."""
+        run = active_run(self.s)
+        if run is None:
+            return
+        self._clear_run_deadlines()
+        self._answer_kind(PROMPT_RUN_ON_HOLD, "stop_now")
+        for key in ("starting_at", "started_at", "job_ref", "finished_at", "on_hold_reason"):
+            run.pop(key, None)
+        self._set_run(run, RunStatus.PENDING, "stop_now")
+        self.s["runs"].remove(run)
+        self.s["runs"].insert(0, run)
+        self.effects.append(AbortRunEffect("stop_now"))
+        self._set_schedule(ScheduleStatus.PAUSED, "stop_now")
+
 
     # -- Checks and starting a Run ----------------------------------------
 
@@ -754,6 +824,7 @@ class _Machine:
             run["job_ref"] = snapshot.job_ref
             self._set_run(run, RunStatus.MOWING)
             self._arm_stall(snapshot)
+            self._begin_height_verify(run, snapshot)
             return
         if self._deadline_due(DEADLINE_START_WINDOW):
             self._fail_run(run, "did_not_start", abort=True)
@@ -795,7 +866,72 @@ class _Machine:
         if self._recharge_stalled(snapshot):
             self._enter_hold(run, HOLD_RECHARGE_STALL)
             return
-        self._evaluate_stall(run, snapshot)
+        self._evaluate_height(run, snapshot)
+        if run["status"] == RunStatus.MOWING:
+            self._evaluate_stall(run, snapshot)
+
+    # -- Blade height verification (spec §7.6) -----------------------------
+
+    def _begin_height_verify(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        """Start a verification segment: called on every entry into `mowing`
+        (first start, and re-entry after recharge, hold or resume)."""
+        run["height_check"] = None
+        self._cancel_deadline(DEADLINE_HEIGHT_STABLE)
+        if self.env.height_readback_resolution_mm is None:
+            self._height_unverified(run)
+            return
+        self.s["height_verify"] = {
+            "unavailable": not snapshot.available,
+            "ignore_until": None,
+            "seen": False,
+        }
+        self._arm(DEADLINE_HEIGHT_VERIFY, self.now + self.env.height_verify_window)
+
+    def _height_unverified(self, run: dict[str, Any]) -> None:
+        """Proceed without verification: event only, no push (spec §7.6.6)."""
+        run["height_check"] = "unverified"
+        self._end_height_verify()
+        self._emit("height_unverified", run_id=run["id"], zone_name=run["zone_name"])
+
+    def _end_height_verify(self) -> None:
+        self.s["height_verify"] = None
+        self._cancel_deadline(DEADLINE_HEIGHT_VERIFY)
+        self._cancel_deadline(DEADLINE_HEIGHT_STABLE)
+
+    def _evaluate_height(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        verify = self.s["height_verify"]
+        resolution = self.env.height_readback_resolution_mm
+        if run.get("height_check") is not None or verify is None or resolution is None:
+            return  # decided for this segment; no continuous drift monitoring
+        # Readings while unavailable, and in the 60 s after becoming available,
+        # are ignored (the false 100 mm reconnect blip).
+        if not snapshot.available:
+            verify["unavailable"] = True
+            verify["ignore_until"] = None
+        elif verify["unavailable"]:
+            verify["unavailable"] = False
+            verify["ignore_until"] = iso(self.now + STABILITY_WINDOW)
+        ignore_until = verify["ignore_until"]
+        usable = (
+            snapshot.available
+            and snapshot.blade_height_mm is not None
+            and (ignore_until is None or self.now >= parse(ignore_until))
+        )
+        in_tolerance = False
+        if usable:
+            verify["seen"] = True
+            target = run["settings"]["blade_height_mm"]
+            in_tolerance = abs(snapshot.blade_height_mm - target) <= resolution
+        if self._stable(DEADLINE_HEIGHT_STABLE, in_tolerance):
+            run["height_check"] = "verified"
+            run["height_readback_mm"] = snapshot.blade_height_mm
+            self._end_height_verify()
+        elif self._deadline_due(DEADLINE_HEIGHT_VERIFY):
+            if verify["seen"]:
+                run["height_check"] = "not_reached"
+                self._fail_run(run, "height_not_reached", abort=True)
+            else:
+                self._height_unverified(run)
 
     # -- On hold (spec §7.4) -------------------------------------------------
 
@@ -839,6 +975,7 @@ class _Machine:
             DEADLINE_RECHARGE_STALL,
         ):
             self._cancel_deadline(name)
+        self._end_height_verify()
         run["on_hold_reason"] = cause
         self._set_run(run, RunStatus.ON_HOLD, cause)
         if cause != HOLD_DEVICE_WORK_HOURS:  # the Mower resumes by itself
@@ -858,6 +995,7 @@ class _Machine:
         self._set_run(run, RunStatus.MOWING)
         self._arm_stall(snapshot)
         self.s["battery_trend"] = None
+        self._begin_height_verify(run, snapshot)  # re-verify on every return (§7.6.5)
         self._evaluate_mowing(run)
 
     def _on_hold_run(self) -> dict[str, Any] | None:
@@ -1067,12 +1205,15 @@ class _Machine:
             DEADLINE_DONE_STABLE,
             DEADLINE_STOPPED_STABLE,
             DEADLINE_STALL,
+            DEADLINE_HEIGHT_VERIFY,
+            DEADLINE_HEIGHT_STABLE,
             DEADLINE_PAUSE_STABLE,
             DEADLINE_HOLD_CLEAR_STABLE,
             DEADLINE_RECHARGE_STALL,
             DEADLINE_CONTACT_LOST,
         ):
             self._cancel_deadline(name)
+        self.s["height_verify"] = None
         self.s["active_run_id"] = None
 
     def _finish_run(self, run: dict[str, Any]) -> None:
@@ -1087,9 +1228,13 @@ class _Machine:
             del samples[:-DURATION_SAMPLES_MAX]
         self._archive_run(run)
         if next_run(self.s) is not None:
-            self._set_schedule(ScheduleStatus.WAITING, "run_done")
-            self._evaluate()
+            if self.s["schedule"]["pause_requested"]:
+                self._set_schedule(ScheduleStatus.PAUSED, "pause_requested")
+            else:
+                self._set_schedule(ScheduleStatus.WAITING, "run_done")
+                self._evaluate()
         else:
+            self.s["schedule"]["pause_requested"] = False
             plan_ids = sorted({r["plan_id"] for r in self.h["runs"][-50:]})
             self._set_schedule(ScheduleStatus.IDLE, "schedule_completed")
             self._emit("schedule_completed", plan_id=run["plan_id"], plan_ids=plan_ids)

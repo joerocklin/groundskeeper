@@ -149,6 +149,9 @@
     "prompt_reason_stopped_off_dock": {
       "message": "The Mower stopped away from its dock."
     },
+    "prompt_reason_height_not_reached": {
+      "message": "Blade didn't reach {height} mm"
+    },
     "prompt_reason_stalled": {
       "message": "The Mower stopped making progress."
     },
@@ -161,14 +164,23 @@
     "prompt_reason_superseded": {
       "message": "Another job started on the Mower."
     },
-    "prompt_reason_height_not_reached": {
-      "message": "Blade didn't reach {height} mm"
-    },
     "prompt_not_pending": {
       "message": "That Prompt is no longer waiting for an answer."
     },
     "prompt_action_invalid": {
       "message": "That Prompt does not offer the action \"{action}\"."
+    },
+    "nothing_to_pause": {
+      "message": "The Schedule is not waiting or running, so there is nothing to pause."
+    },
+    "no_active_run": {
+      "message": "No Run is active (starting, mowing or on hold), so there is nothing to stop."
+    },
+    "schedule_not_paused": {
+      "message": "The Schedule is not paused."
+    },
+    "failure_needs_answer": {
+      "message": "A Run failed. Answer with Retry, Skip Plan or Cancel instead."
     },
     "no_hold_to_answer": {
       "message": "No Run is on hold."
@@ -219,6 +231,23 @@
       },
       "pending_prompts": {
         "name": "Pending Prompts"
+      }
+    },
+    "button": {
+      "start": {
+        "name": "Start"
+      },
+      "pause": {
+        "name": "Pause"
+      },
+      "resume": {
+        "name": "Resume"
+      },
+      "stop_now": {
+        "name": "Stop now"
+      },
+      "cancel": {
+        "name": "Cancel"
       }
     }
   },
@@ -314,6 +343,36 @@
         "action": {
           "name": "Action",
           "description": "One of the Prompt's actions, for example retry, skip_plan or abort."
+        }
+      }
+    },
+    "pause": {
+      "name": "Pause",
+      "description": "Pause softly: the Schedule pauses when the current Run ends, or at once if waiting. Never commands the Mower.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "stop_now": {
+      "name": "Stop now",
+      "description": "Stop the active Run: it returns to pending at the head, the Schedule pauses and the Mower is told to abort.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "resume": {
+      "name": "Resume",
+      "description": "Resume a paused Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
         }
       }
     },
