@@ -1,8 +1,9 @@
-"""Mammotion adapter: read-only observations (issue #8, spec §3.2, §3.6, §3.8).
+"""Mammotion adapter: observations and commands (issues #8/#10, spec §3).
 
 Turns one Mammotion Mower's HA state into normalised snapshots, signals,
-limits and metadata. Commands land in ticket #10; here they are typed
-stubs that refuse.
+limits and metadata, and issues its commands through the closed result
+union (spec §3.3): one service call per command, mapped errors, never a
+retry (ADR 0002).
 
 Everything is discovered through the device and `unique_id`
 (`{device_name}_{key}`, research/mammotion-ha-surface.md §6), never
@@ -18,6 +19,7 @@ and the per-Zone task sensors are created and removed while a job runs.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -31,12 +33,17 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceNotFound,
+    ServiceValidationError,
+)
 from homeassistant.helpers import device_registry as dr, entity_registry as er, selector
 from homeassistant.loader import IntegrationNotFound, async_get_integration
 from homeassistant.util import dt as dt_util
 
 from ..adapter import (
+    Accepted,
     AdapterSignal,
     AdapterSink,
     Channel,
@@ -52,6 +59,7 @@ from ..adapter import (
     RunSettings,
     SelfCheckReason,
     Snapshot,
+    Unconfirmed,
     Zone,
     ZoneTaskAborted,
     ZoneTaskComplete,
@@ -91,6 +99,31 @@ _HEIGHT_READBACK_MM = 5
 
 # The app and the device both refuse a start below 15 % (error 2700).
 _MIN_START_BATTERY_PCT = 15
+
+# Upstream 500 keys whose outcome is unknown: the command may still have
+# been carried out (`command_unconfirmed`, research §2) or a 60 s mode
+# wait expired after the command was sent (`*_failed`).
+_UNCONFIRMED_KEYS = frozenset(
+    {
+        "command_unconfirmed",
+        "pause_failed",
+        "start_failed",
+        "resume_failed",
+        "dock_failed",
+        "dock_cancel_failed",
+    }
+)
+# Upstream 500 keys that are definite nos (research §3).
+_REFUSED_KEYS = frozenset(
+    {
+        "device_not_ready",
+        "account_in_use",
+        "api_limit_exceeded",
+        "device_not_in_account",
+        "command_failed",
+        "no_job_to_continue",
+    }
+)
 
 
 def _int_field(key: str, label: str, minimum: int, maximum: int, default: int) -> ExtrasField:
@@ -168,6 +201,38 @@ def _number(value: str | None) -> float | None:
 def _int(value: str | None) -> int | None:
     number = _number(value)
     return None if number is None else int(number)
+
+
+# `source_version` as a comparable tuple; anything unparseable (a dev
+# checkout) degrades to the TypeError belt instead of a guess.
+_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
+
+
+def _fold_toward(bearing_deg: float) -> int:
+    """Absolute stripe bearing -> Mammotion `toward` in -90..90 (spec §3.7).
+
+    Mode 1 counts counter-clockwise from map east, so `toward = 90 -
+    bearing`; a stripe has no direction, so the value is folded into
+    -90..90 (mod 180, then the upper half mirrors negative).
+    """
+    folded = (90.0 - bearing_deg) % 180.0
+    if folded > 90.0:
+        folded -= 180.0
+    return round(folded)
+
+
+# `sys_status` modes where `start_mow` plans and starts (upstream
+# `async_start_mowing` branch list, research §2). Every other mode -
+# LOCK, CHARGING, CHARGING_PAUSE, SYSTEM_ERROR, UPDATING, MANUAL_MOWING,
+# SLEEPING, unknown - is a silent no-op returning HTTP 200, so the
+# adapter pre-checks and refuses instead.
+_ROUTE_MODES = frozenset(
+    {"MODE_INITIALIZATION", "MODE_READY", "MODE_WORKING", "MODE_RETURNING", "MODE_PAUSE"}
+)
+
+# Extras fallbacks, from the declared schema (the core validates extras
+# against it, so a missing key only happens on a bare dict).
+_EXTRAS_DEFAULTS: dict[str, Any] = {field.key: field.default for field in _EXTRAS_SCHEMA}
 
 
 class MammotionAdapter:
@@ -543,26 +608,199 @@ class MammotionAdapter:
 
     # -- commands (ticket #10) ----------------------------------------------
 
+    async def _call(
+        self, domain: str, service: str, data: dict[str, Any]
+    ) -> CommandResult:
+        """One service call, mapped to the closed command union (spec §3.3).
+
+        Every command path goes through here exactly once: the adapter
+        never re-issues (ADR 0002), so the mapping is the only retry
+        question that ever gets asked, and the answer is always no.
+        Catch order matters - `ServiceNotFound` and
+        `ServiceNotSupported` both subclass `ServiceValidationError`.
+        """
+        try:
+            await self._hass.services.async_call(
+                domain, service, data, blocking=True
+            )
+        except ServiceNotFound:
+            # The Mammotion entry has not loaded its services yet.
+            return Refused("mammotion_not_ready")
+        except ServiceValidationError as err:
+            # 400: a definite no (also covers ServiceNotSupported).
+            return Refused(str(err))
+        except HomeAssistantError as err:
+            key = err.translation_key
+            if key in _UNCONFIRMED_KEYS:
+                # 500 command_unconfirmed or an expired 60 s mode wait:
+                # the command may still have been carried out.
+                return Unconfirmed()
+            if key in _REFUSED_KEYS:
+                return Refused(str(err) or key)
+            # Unknown 500: outcome unknown, never retry (ADR 0002).
+            return Unconfirmed()
+        return Accepted()
+
     async def start_run(self, zone: str, settings: RunSettings) -> CommandResult:
-        """Not implemented until ticket #10."""
-        del zone, settings
-        return Refused("not_implemented")
+        """One Zone via `mammotion.start_mow`, every route field explicit.
+
+        Omitted fields inherit the HA-side number/select entity values,
+        so none are omitted (spec §3.4); `modify` is never sent. Upstream
+        silently no-ops (HTTP 200) outside the route modes, so the mode
+        is pre-checked and refused locally (issue #10 AC).
+        """
+        mode = self._state("sensor", "activity_mode")
+        if mode not in _ROUTE_MODES:
+            return Refused(f"start_mow silently no-ops in mode {mode!r}")
+
+        switches = self._zone_switches()
+        entry = switches.get(zone)
+        if entry is None:
+            return Refused(f"unknown zone {zone}")
+        state = self._hass.states.get(entry.entity_id)
+        if state is None or "hash" not in state.attributes:
+            # Upstream drops area entities without a `hash` attribute and
+            # falls back to the ON switches: a wrong-zone hazard
+            # (mammotion-ha-surface §5). Refuse instead.
+            return Refused(f"zone {zone} switch carries no hash attribute")
+
+        entity_id = self._entity_id("lawn_mower", "mower")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+
+        extras = settings.extras
+        return await self._call(
+            MAMMOTION,
+            "start_mow",
+            {
+                "entity_id": [entity_id],
+                "areas": [entry.entity_id],
+                "blade_height": int(settings.blade_height_mm),
+                "toward_mode": 1,
+                "toward": _fold_toward(settings.bearing_deg),
+                "channel_width": int(settings.spacing_cm),
+                "speed": float(settings.speed_m_s),
+                "mowing_laps": int(settings.perimeter_laps),
+                # Explicit 0: a stale number entity must not resume
+                # mid-Zone.
+                "start_progress": 0,
+                # Always sent: pymammotion zeroes toward_included_angle
+                # unless channel_mode == 1, so a stale value is harmless.
+                "toward_included_angle": int(
+                    extras.get("toward_included_angle", _EXTRAS_DEFAULTS["toward_included_angle"])
+                ),
+                # The select's value is a string ("1"); the schema wants
+                # an int.
+                "ultra_wave": int(extras.get("ultra_wave", _EXTRAS_DEFAULTS["ultra_wave"])),
+                "border_mode": int(extras.get("border_mode", _EXTRAS_DEFAULTS["border_mode"])),
+                "obstacle_laps": int(
+                    extras.get("obstacle_laps", _EXTRAS_DEFAULTS["obstacle_laps"])
+                ),
+                "channel_mode": int(
+                    extras.get("channel_mode", _EXTRAS_DEFAULTS["channel_mode"])
+                ),
+                "auto_change_direction": int(
+                    extras.get("auto_change_direction", _EXTRAS_DEFAULTS["auto_change_direction"])
+                ),
+                "ride_boundary_distance": float(
+                    extras.get(
+                        "ride_boundary_distance", _EXTRAS_DEFAULTS["ride_boundary_distance"]
+                    )
+                ),
+            },
+        )
 
     async def abort_run(self) -> CommandResult:
-        """Not implemented until ticket #10."""
-        return Refused("not_implemented")
+        """`lawn_mower.stop`, then `lawn_mower.dock` (spec §3.4).
+
+        A stop that is not cleanly accepted leaves the Mower's state
+        unknown or unchanged: return that result WITHOUT docking - a
+        dock could fight a command whose outcome is unknown (research
+        §3). One call each, never a retry (ADR 0002).
+        """
+        stopped = await self._lawn_mower_call("stop")
+        if not isinstance(stopped, Accepted):
+            return stopped
+        return await self._lawn_mower_call("dock")
 
     async def dock(self) -> CommandResult:
-        """Not implemented until ticket #10."""
-        return Refused("not_implemented")
+        """`lawn_mower.dock`: return to the dock (spec §3.4)."""
+        return await self._lawn_mower_call("dock")
+
+    async def _lawn_mower_call(self, service: str) -> CommandResult:
+        entity_id = self._entity_id("lawn_mower", "mower")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+        return await self._call("lawn_mower", service, {"entity_id": [entity_id]})
 
     async def resume_run(self) -> CommandResult:
-        """Not implemented until ticket #10."""
-        return Refused("not_implemented")
+        """Resume a held job, choosing a path that works on the installed
+        Mammotion-HA (spec §3.4, research §2).
+
+        Pre-check: only PAUSE, or READY while a breakpoint is live
+        (`job_active`), may resume. Plain `start_mowing` when NOT
+        mid-job plans a fresh job from the ON switches, and CHARGING_PAUSE
+        is a recharge the core owns, so both are refused with zero calls.
+
+        v0.6.19+ upstream bug: the READY-breakpoint branch of
+        `async_start_mowing` calls
+        `async_send_command("start_job", "todev_taskctrl_ack", priority=...)`
+        and the second positional binds to `priority` -> TypeError,
+        raised AFTER the route query was sent. On >= 0.6.19 press
+        `continue_last_job` instead; on older (or unknown) versions try
+        `start_mowing` and fall back to the button on TypeError. The
+        fallback never re-calls `start_mowing` (ADR 0002).
+        """
+        mode = self._state("sensor", "activity_mode")
+        if mode == "MODE_CHARGING_PAUSE":
+            return Refused("recharging")
+        if mode == "MODE_READY":
+            if not self._job_active(mode):
+                return Refused("no job to resume")
+        elif mode != "MODE_PAUSE":
+            return Refused(f"nothing to resume in mode {mode!r}")
+
+        if self._resume_via_button():
+            button = self._entity_id("button", "continue_last_job")
+            if button is None:
+                return Refused("mammotion_not_ready")
+            return await self._call("button", "press", {"entity_id": [button]})
+
+        entity_id = self._entity_id("lawn_mower", "mower")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+        try:
+            result = await self._call(
+                "lawn_mower", "start_mowing", {"entity_id": [entity_id]}
+            )
+        except TypeError:
+            # The v0.6.19+ positional-collision bug fired after the
+            # route query was sent: fall back to the button, never
+            # re-call start_mowing.
+            button = self._entity_id("button", "continue_last_job")
+            if button is None:
+                # A command was already sent and its outcome is unknown.
+                return Unconfirmed()
+            return await self._call("button", "press", {"entity_id": [button]})
+        return result
+
+    @callback
+    def _resume_via_button(self) -> bool:
+        """True when the installed Mammotion-HA has the broken plain
+        resume path (>= 0.6.19); unknown versions degrade to trying it
+        with the TypeError belt."""
+        match = _VERSION.match(self._source_version or "")
+        if match is None:
+            return False
+        return tuple(int(part) for part in match.groups()) >= (0, 6, 19)
 
     async def refresh(self) -> CommandResult:
-        """Not implemented until ticket #10."""
-        return Refused("not_implemented")
+        """Press `button.{name}_refresh_status`: fresh telemetry at
+        Priority.USER (spec §3.4, decision A8)."""
+        entity_id = self._entity_id("button", "refresh_status")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+        return await self._call("button", "press", {"entity_id": [entity_id]})
 
     # -- catalogues (delegated to the ticket #9 catalogue) -------------------
 
