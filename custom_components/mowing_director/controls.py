@@ -103,3 +103,10 @@ async def async_wet_grass_done_today(director: Director) -> None:
     """Call it a day for rain (spec §9.4): Wet grass fails until the next
     Work hours start plus the morning dry-out."""
     await director.async_wet_grass_done_today()
+
+
+async def async_dismiss_anomaly(director: Director, detector: str) -> None:
+    """Dismiss an active Anomaly (spec §11.7)."""
+    if director.active_anomaly(detector) is None:
+        raise fail("anomaly_not_active")
+    await director.async_dismiss_anomaly(detector)

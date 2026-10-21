@@ -21,6 +21,7 @@ from homeassistant.core import (
 from homeassistant.exceptions import ServiceValidationError
 
 from .const import DOMAIN
+from .core import DETECTORS
 from . import controls
 from .schedule_ops import POSITIONS, ScheduleError, create_plan, remove_plan
 from .runtime import Director, async_get_director
@@ -37,6 +38,7 @@ ATTR_POSITION = "position"
 ATTR_PLAN_ID = "plan_id"
 ATTR_PROMPT_ID = "prompt_id"
 ATTR_ACTION = "action"
+ATTR_DETECTOR = "detector"
 
 _ENTRY = {vol.Optional(ATTR_CONFIG_ENTRY_ID): str}
 
@@ -114,6 +116,15 @@ def async_register_services(hass: HomeAssistant) -> None:
             raise _fail("prompt_action_invalid", action=call.data[ATTR_ACTION])
         await director.async_answer_prompt(prompt["prompt_id"], call.data[ATTR_ACTION])
 
+    async def dismiss_anomaly(call: ServiceCall) -> None:
+        await controls.async_dismiss_anomaly(_director(hass, call), call.data[ATTR_DETECTOR])
+
+    hass.services.async_register(
+        DOMAIN,
+        "dismiss_anomaly",
+        dismiss_anomaly,
+        schema=vol.Schema({**_ENTRY, vol.Required(ATTR_DETECTOR): vol.In(DETECTORS)}),
+    )
     hass.services.async_register(
         DOMAIN,
         "answer_prompt",

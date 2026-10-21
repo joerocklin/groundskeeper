@@ -25,7 +25,7 @@ from homeassistant.helpers.dispatcher import (
 )
 
 from .const import DOMAIN
-from .core import plan_status
+from .core import DETECTORS, plan_status
 from .heights import MAX_MAX_CUT, MIN_MAX_CUT
 from .run_settings import SettingsError, finishing_set, mower_run_defaults, validate_overrides
 from .runtime import Director, async_get_director
@@ -101,6 +101,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_set_zone_range,
         ws_reset_zone_range,
         ws_set_zone_range_tolerance,
+        ws_dismiss_anomaly,
+        ws_set_anomaly_action,
     ):
         websocket_api.async_register_command(hass, cmd)
 
@@ -800,3 +802,50 @@ async def ws_delete_check(hass, connection, msg) -> None:
         return {}
 
     await _checks_call(hass, connection, msg, call)
+
+
+# -- Anomaly detectors (spec §11, §16) --------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/dismiss_anomaly",
+        vol.Required("entry_id"): str,
+        vol.Required("detector"): vol.In(DETECTORS),
+    }
+)
+@websocket_api.async_response
+async def ws_dismiss_anomaly(hass, connection, msg) -> None:
+    """Dismiss an active Anomaly from the panel."""
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    if director.active_anomaly(msg["detector"]) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Anomaly not active")
+        return
+    await director.async_dismiss_anomaly(msg["detector"])
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], {})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_anomaly_action",
+        vol.Required("entry_id"): str,
+        vol.Required("detector"): vol.In(DETECTORS),
+        vol.Required("action"): vol.In(["off", "notify", "pause"]),
+    }
+)
+@websocket_api.async_response
+async def ws_set_anomaly_action(hass, connection, msg) -> None:
+    """Set a detector's per-Mower action (`off` / `notify` / `pause`)."""
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    await director.async_set_anomaly_action(msg["detector"], msg["action"])
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], {})

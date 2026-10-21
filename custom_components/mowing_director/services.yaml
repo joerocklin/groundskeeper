@@ -178,3 +178,20 @@ wet_grass_done_today:
       selector:
         config_entry:
           integration: mowing_director
+
+dismiss_anomaly:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+    detector:
+      required: true
+      example: charge_not_rising
+      selector:
+        select:
+          options:
+            - charge_not_rising
+            - run_too_long
+          translation_key: anomaly_detector
