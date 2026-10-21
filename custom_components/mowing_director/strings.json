@@ -233,6 +233,9 @@
     },
     "prompt_reason_ended_by_user": {
       "message": "You ended the Run."
+    },
+    "prompt_headline_is_raining": {
+      "message": "Is it raining?"
     }
   },
   "entity": {
@@ -468,6 +471,16 @@
     "end_run": {
       "name": "End Run",
       "description": "Answer an on-hold Run with End Run: abort the job and fail the Run.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "wet_grass_done_today": {
+      "name": "Wet grass: done for today",
+      "description": "Call it a day for rain: the Wet grass Check fails until the next Work hours start plus the morning dry-out.",
       "fields": {
         "config_entry_id": {
           "name": "Mower",

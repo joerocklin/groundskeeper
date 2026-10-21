@@ -362,7 +362,8 @@ def test_rain_stop_while_mowing_returns_run_pending_without_command_or_failure()
     assert run["status"] == "pending"
     assert state["state"]["schedule"]["status"] == "waiting"
     assert not [e for e in fx if isinstance(e, AbortRunEffect)]
-    assert [p["kind"] for p in state["state"]["prompts"]] == []
+    # unconfirmed rain: the Wet grass confirm-or-ask flow asks (spec §7.5, §9.4)
+    assert [p["kind"] for p in state["state"]["prompts"]] == ["is_raining"]
     assert state["state"]["active_run_id"] is None
     assert state["state"]["deadlines"].keys().isdisjoint({"stall", "done_stable"})
     assert state["history"]["runs"] == []

@@ -15,7 +15,7 @@ the reducer as a result per Check.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 TYPE_MOWER_READY = "mower_ready"
@@ -23,7 +23,11 @@ TYPE_ZONE_READY = "zone_ready"
 TYPE_BATTERY = "battery"
 TYPE_WORK_HOURS = "work_hours"
 TYPE_CUSTOM = "custom"
-TYPES = (TYPE_MOWER_READY, TYPE_ZONE_READY, TYPE_BATTERY, TYPE_WORK_HOURS, TYPE_CUSTOM)
+TYPE_WET_GRASS = "wet_grass"
+TYPES = (
+    TYPE_MOWER_READY, TYPE_ZONE_READY, TYPE_BATTERY, TYPE_WORK_HOURS, TYPE_WET_GRASS,
+    TYPE_CUSTOM,
+)
 ALWAYS_ON = (TYPE_MOWER_READY, TYPE_ZONE_READY)  # spec §9.1: cannot be disabled
 
 POLICY_NOTIFY = "notify"
@@ -33,6 +37,12 @@ POLICIES = (POLICY_NOTIFY, POLICY_PAUSE)
 MOWER_READY_TIMEOUT_S = 15 * 60  # spec §9.2
 ZONE_READY_TIMEOUT_S = 30 * 60
 DEFAULT_BATTERY_PCT = 80
+WET_TIMEOUT_S = 12 * 3600  # spec §9.2
+DEFAULT_DRY_OUT_S = 3 * 3600  # spec §9.3
+DEFAULT_MORNING_DRY_OUT = True
+DEFAULT_MORNING_OFFSET_S = 2 * 3600  # sunrise + 2 h
+DEFAULT_PRECIP_PCT = 50  # spec §9.4
+WET_CONDITIONS = ("rainy", "pouring", "lightning-rainy", "snowy", "hail")
 DEFAULT_WINDOW = ("08:00", "00:00")  # "00:00" as the end means midnight
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
@@ -59,6 +69,13 @@ def default_check_records() -> list[dict[str, Any]]:
          "enabled": True,
          "config": {"days": {day: list(DEFAULT_WINDOW) for day in WEEKDAYS}},
          "timeout_s": None, "policy": POLICY_NOTIFY},
+        {"id": TYPE_WET_GRASS, "type": TYPE_WET_GRASS, "name": "Wet grass",
+         "enabled": True,
+         "config": {"mower_rain": True, "weather": [], "sensors": [],
+                    "dry_out_s": DEFAULT_DRY_OUT_S, "morning": DEFAULT_MORNING_DRY_OUT,
+                    "morning_offset_s": DEFAULT_MORNING_OFFSET_S,
+                    "precip_pct": DEFAULT_PRECIP_PCT},
+         "timeout_s": WET_TIMEOUT_S, "policy": POLICY_NOTIFY},
     ]
 
 
@@ -68,6 +85,8 @@ def normalise_checks(records: Iterable[Mapping[str, Any]] | None) -> list[dict[s
     out: list[dict[str, Any]] = []
     for default in default_check_records():
         rec = {**default, **stored.pop(default["id"], {})}
+        if rec["type"] == TYPE_WET_GRASS:
+            rec["config"] = {**default["config"], **rec["config"]}
         if rec["type"] in ALWAYS_ON:
             rec["enabled"] = True
             rec["timeout_s"] = default["timeout_s"]
@@ -93,6 +112,18 @@ def validate_record(rec: Mapping[str, Any]) -> None:
     elif rec["type"] == TYPE_WORK_HOURS:
         for window in rec["config"].get("days", {}).values():
             _parse_window(window)
+    elif rec["type"] == TYPE_WET_GRASS:
+        cfg = rec["config"]
+        for key in ("weather", "sensors"):
+            if not isinstance(cfg.get(key, []), list):
+                raise ValueError("Weather entities and sensors are lists")
+        for key in ("dry_out_s", "morning_offset_s"):
+            value = cfg.get(key, 0)
+            if not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("Dry-out times must be zero or more seconds")
+        pct = cfg.get("precip_pct", DEFAULT_PRECIP_PCT)
+        if not isinstance(pct, (int, float)) or not 0 <= pct <= 100:
+            raise ValueError("Precipitation probability must be 0 to 100 %")
     elif rec["type"] == TYPE_CUSTOM:
         cfg = rec["config"]
         if cfg.get("mode") == MODE_ENTITY:
@@ -136,6 +167,19 @@ def work_hours_open(config: Mapping[str, Any], local_now: datetime) -> bool:
     return start <= local_now.hour * 60 + local_now.minute < end
 
 
+def next_work_start(config: Mapping[str, Any], local_now: datetime) -> datetime:
+    """The next Work hours start strictly after `local_now` (local time)."""
+    days = config.get("days", {})
+    for offset in range(0, 8):
+        day = local_now + timedelta(days=offset)
+        window = days.get(WEEKDAYS[day.weekday()], DEFAULT_WINDOW)
+        start, _ = _parse_window(window)
+        candidate = day.replace(hour=start // 60, minute=start % 60, second=0, microsecond=0)
+        if candidate > local_now:
+            return candidate
+    return local_now + timedelta(days=1)
+
+
 def _number(value: Any) -> float:
     try:
         return float(value)
@@ -163,3 +207,21 @@ def condition_result(config: Mapping[str, Any], state: str | None) -> str | None
             return "not_a_number"
         ok = value > bound if operator == "above" else value < bound
     return None if ok else "condition_false"
+
+
+def weather_condition_wet(condition: str | None) -> bool:
+    """Whether a `weather.*` condition reads wet (spec §9.3)."""
+    return condition in WET_CONDITIONS
+
+
+def forecast_confirms_rain(
+    entries: Iterable[Mapping[str, Any]], precip_pct: float
+) -> bool:
+    """Whether any given forecast hour (current/next) says rain (spec §9.4)."""
+    for entry in entries:
+        if weather_condition_wet(entry.get("condition")):
+            return True
+        probability = entry.get("precipitation_probability")
+        if isinstance(probability, (int, float)) and probability >= precip_pct:
+            return True
+    return False

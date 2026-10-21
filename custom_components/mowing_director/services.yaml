@@ -170,3 +170,11 @@ end_run:
       selector:
         config_entry:
           integration: mowing_director
+
+wet_grass_done_today:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director

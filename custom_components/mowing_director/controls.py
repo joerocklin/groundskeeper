@@ -97,3 +97,9 @@ async def async_resume_run(director: Director) -> None:
 async def async_end_run(director: Director) -> None:
     _require_on_hold(director)
     await director.async_end_run()
+
+
+async def async_wet_grass_done_today(director: Director) -> None:
+    """Call it a day for rain (spec §9.4): Wet grass fails until the next
+    Work hours start plus the morning dry-out."""
+    await director.async_wet_grass_done_today()
