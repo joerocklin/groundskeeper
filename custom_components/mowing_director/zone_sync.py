@@ -18,16 +18,20 @@ in by `ZoneSync` after every reconcile.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import ulid as ulid_util
 
 from .adapter import AdapterSignal, MowerAdapter, Zone, ZonesChanged
 from .const import DOMAIN
 from .zone_angles import angle_estimates, refresh_zone_angles
+
+_LOGGER = logging.getLogger(__name__)
 
 ISSUE_MISSING_ZONES = "missing_zones_{}"
 
@@ -170,7 +174,7 @@ class ZoneSync:
         background, so geometry never blocks setup."""
         self._unsub = self._adapter.subscribe(_Sink(self))
         self._task = self._hass.async_create_background_task(
-            self.async_sync(), f"{DOMAIN} zone sync {self._entry_id}"
+            self._async_sync_logged(), f"{DOMAIN} zone sync {self._entry_id}"
         )
 
     def async_stop(self) -> None:
@@ -185,19 +189,22 @@ class ZoneSync:
     def _on_signal(self, signal: AdapterSignal) -> None:
         if isinstance(signal, ZonesChanged):
             self._hass.async_create_background_task(
-                self.async_sync(), f"{DOMAIN} zone resync {self._entry_id}"
+                self._async_sync_logged(), f"{DOMAIN} zone resync {self._entry_id}"
             )
+
+    async def _async_sync_logged(self) -> None:
+        """Background sync: the source integration may not be loaded yet, so
+        a failure is logged and the next ZonesChanged or refresh retries."""
+        try:
+            await self.async_sync()
+        except HomeAssistantError as err:
+            _LOGGER.warning("Zone sync failed, will retry on change: %s", err)
 
     # -- state --------------------------------------------------------------
 
     async def _config(self) -> dict:
         if self._data is None:
-            loaded = await self._store.async_load()
-            if loaded is None:
-                from .store import empty_store_data
-
-                loaded = empty_store_data()
-            self._data = loaded
+            self._data = await self._store.async_data()
         cfg = self._data.setdefault("config", {})
         cfg.setdefault("zones", [])
         cfg.setdefault("channels", [])

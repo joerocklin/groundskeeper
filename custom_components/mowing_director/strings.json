@@ -100,6 +100,115 @@
     },
     "entry_ambiguous": {
       "message": "More than one Mower is loaded; pass config_entry_id."
+    },
+    "unknown_zone": {
+      "message": "No Zone is called or has the id \"{zone}\"."
+    },
+    "ambiguous_zone": {
+      "message": "More than one Zone is called \"{zone}\"; pass its id."
+    },
+    "invalid_height": {
+      "message": "{error}"
+    },
+    "step_down_unsupported": {
+      "message": "Start and end height must be equal for now; step-down Plans are not supported yet."
+    },
+    "schedule_already_active": {
+      "message": "The Schedule is already waiting or running."
+    },
+    "nothing_to_start": {
+      "message": "There are no pending Runs to start."
+    },
+    "nothing_to_cancel": {
+      "message": "The Schedule is already idle and empty."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "schedule": {
+        "name": "Schedule",
+        "state": {
+          "idle": "Idle",
+          "waiting": "Waiting",
+          "running": "Running",
+          "paused": "Paused"
+        }
+      },
+      "current_run": {
+        "name": "Current Run",
+        "state": {
+          "none": "None",
+          "pending": "Pending",
+          "starting": "Starting",
+          "mowing": "Mowing",
+          "on_hold": "On hold",
+          "done": "Done",
+          "failed": "Failed",
+          "skipped": "Skipped",
+          "cancelled": "Cancelled"
+        }
+      },
+      "next_run": {
+        "name": "Next Run"
+      }
+    }
+  },
+  "services": {
+    "refresh_zones": {
+      "name": "Refresh Zones",
+      "description": "Re-read the Mower's Zones and Channels.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "add_plan": {
+      "name": "Add Plan",
+      "description": "Add a Plan of one Run to the Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        },
+        "zone": {
+          "name": "Zone",
+          "description": "Zone id or exact name (case-insensitive)."
+        },
+        "start_height_mm": {
+          "name": "Start height",
+          "description": "Blade height of the first Run."
+        },
+        "end_height_mm": {
+          "name": "End height",
+          "description": "Blade height of the last Run; must equal the start height for now."
+        },
+        "start": {
+          "name": "Start",
+          "description": "Start the Schedule if it is idle."
+        }
+      }
+    },
+    "start": {
+      "name": "Start",
+      "description": "Start an idle or paused Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "cancel": {
+      "name": "Cancel",
+      "description": "Abort: cancel every Run and empty the Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
     }
   }
 }

@@ -13,3 +13,6 @@ PANEL_ELEMENT = "mowing-director-panel"
 PANEL_STATIC_URL = "/mowing_director/panel"
 PANEL_JS = "mowing-director-panel.js"
 PANEL_JS_MIN = "mowing-director-panel.min.js"
+
+# The one bus event every Mowing Director automation hook listens to (spec §13.4).
+EVENT_TYPE = "mowing_director_event"
