@@ -114,8 +114,38 @@
     "invalid_height": {
       "message": "{error}"
     },
-    "step_down_unsupported": {
-      "message": "Start and end height must be equal for now; step-down Plans are not supported yet."
+    "invalid_settings": {
+      "message": "{error}"
+    },
+    "invalid_position": {
+      "message": "Position must be end or front, not \"{position}\"."
+    },
+    "unknown_run": {
+      "message": "No Run has the id \"{run_id}\"."
+    },
+    "run_not_pending": {
+      "message": "Run \"{run_id}\" has started or finished; only pending Runs can be changed."
+    },
+    "move_not_pending": {
+      "message": "Run \"{run_id}\" has started or finished; only pending Runs can be moved."
+    },
+    "move_unknown_run": {
+      "message": "No Run has the id \"{run_id}\"."
+    },
+    "move_bad_position": {
+      "message": "That position is outside the pending Runs."
+    },
+    "move_before_earlier_run": {
+      "message": "A Run cannot be moved ahead of an earlier Run of the same Plan."
+    },
+    "remove_plan_run_active": {
+      "message": "A Run of this Plan is active; wait for it to end or use cancel."
+    },
+    "remove_plan_unknown_plan": {
+      "message": "No Plan has the id \"{plan_id}\"."
+    },
+    "plan_started": {
+      "message": "Plan \"{plan_id}\" has started and can no longer be re-derived."
     },
     "schedule_already_active": {
       "message": "The Schedule is already waiting or running."
@@ -258,7 +288,29 @@
       }
     }
   },
+  "selector": {
+    "position": {
+      "options": {
+        "end": "End of the Schedule",
+        "front": "Front of the pending Runs"
+      }
+    }
+  },
   "services": {
+    "remove_plan": {
+      "name": "Remove Plan",
+      "description": "Cancel a Plan's pending Runs. Refused while one of its Runs is active; never commands the Mower.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        },
+        "plan_id": {
+          "name": "Plan",
+          "description": "The plan_id returned by add_plan."
+        }
+      }
+    },
     "refresh_zones": {
       "name": "Refresh Zones",
       "description": "Re-read the Mower's Zones and Channels.",
@@ -271,7 +323,7 @@
     },
     "add_plan": {
       "name": "Add Plan",
-      "description": "Add a Plan of one Run to the Schedule.",
+      "description": "Derive a step-down Plan from start and end heights and add it to the Schedule.",
       "fields": {
         "config_entry_id": {
           "name": "Mower",
@@ -287,7 +339,27 @@
         },
         "end_height_mm": {
           "name": "End height",
-          "description": "Blade height of the last Run; must equal the start height for now."
+          "description": "Blade height of the last Run; must not exceed the start height. Equal heights make one maintenance Run."
+        },
+        "max_cut_pct": {
+          "name": "Max cut",
+          "description": "Largest drop per Run as a percent of the height (5-33). Defaults to the Mower option."
+        },
+        "base_angle": {
+          "name": "Base angle",
+          "description": "Finishing angle relative to the Zone bearing, in degrees."
+        },
+        "finishing": {
+          "name": "Finishing Run",
+          "description": "Force the Finishing Run override on or off for the last Run (never a single Run)."
+        },
+        "settings": {
+          "name": "Settings",
+          "description": "Run setting overrides in SI units: spacing_cm, speed_m_s, perimeter_laps, crossing_angle_deg, min_separation_deg, extras."
+        },
+        "position": {
+          "name": "Position",
+          "description": "Where the Plan goes on the Schedule: the end (default) or in front of the pending Runs."
         },
         "start": {
           "name": "Start",

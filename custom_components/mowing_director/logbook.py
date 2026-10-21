@@ -25,6 +25,8 @@ def describe(data: dict[str, Any]) -> str:
             return "Schedule completed"
         case "plan_added":
             return f"Plan added for {zone}"
+        case "plan_removed":
+            return f"Plan removed for {zone}"
         case "prompt_sent":
             return f"Prompt sent: {data.get('kind')}"
         case "prompt_answered":

@@ -58,6 +58,11 @@ from .core import (
     ChecksEdited,
     AddPlan,
     AnswerPrompt,
+    DeleteRun,
+    EditRun,
+    MoveRun,
+    RemovePlan,
+    ReplacePlan,
     ArmTimer,
     CancelSchedule,
     CancelTimer,
@@ -583,9 +588,38 @@ class Director:
     # -- user-facing operations -----------------------------------------------------
 
     async def async_add_plan(
-        self, plan: dict[str, Any], runs: list[dict[str, Any]], start: bool
+        self,
+        plan: dict[str, Any],
+        runs: list[dict[str, Any]],
+        start: bool,
+        position: str = "end",
     ) -> None:
-        await self.dispatch(lambda now: AddPlan(now, plan, runs, start))
+        await self.dispatch(lambda now: AddPlan(now, plan, runs, start, position))
+
+    async def async_edit_run(self, run_id: str, changes: dict[str, Any]) -> None:
+        await self.dispatch(lambda now: EditRun(now, run_id, changes))
+
+    async def async_delete_run(self, run_id: str) -> None:
+        await self.dispatch(lambda now: DeleteRun(now, run_id))
+
+    async def async_move_run(self, run_id: str, position: int) -> None:
+        await self.dispatch(lambda now: MoveRun(now, run_id, position))
+
+    async def async_remove_plan(self, plan_id: str) -> None:
+        await self.dispatch(lambda now: RemovePlan(now, plan_id))
+
+    async def async_replace_plan(
+        self, plan: dict[str, Any], runs: list[dict[str, Any]]
+    ) -> None:
+        await self.dispatch(lambda now: ReplacePlan(now, plan, runs))
+
+    async def async_edit_config(self, edit: Callable[[dict[str, Any]], None]) -> None:
+        """Apply `edit` to the Store `config` and save; never reloads the entry."""
+        async with self._lock:
+            edit(self._data.setdefault("config", {}))
+            await self._store.async_save(self._data)
+            for listener in list(self._listeners):
+                listener()
 
     async def async_start(self) -> None:
         await self.dispatch(StartSchedule)
