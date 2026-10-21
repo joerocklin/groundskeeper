@@ -15,6 +15,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
+from .panel import async_register_panel, async_remove_panel
+from .websocket_api import async_register_commands
 from .store import MowerStore, empty_store_data
 
 type MowingDirectorConfigEntry = ConfigEntry[MowerStore]
@@ -24,6 +26,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Mowing Director. Services are registered here, never per entry."""
+    async_register_commands(hass)
     # The service set lands in a later ticket; nothing to register yet.
     return True
 
@@ -40,6 +43,7 @@ async def async_setup_entry(
         data = empty_store_data()
         await store.async_save(data)
     entry.runtime_data = store
+    await async_register_panel(hass)
     return True
 
 
@@ -47,6 +51,13 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: MowingDirectorConfigEntry
 ) -> bool:
     """Unload a Mower. Never commands the Mower; state is already persisted."""
+    others = [
+        e
+        for e in hass.config_entries.async_loaded_entries(DOMAIN)
+        if e.entry_id != entry.entry_id
+    ]
+    if not others:
+        async_remove_panel(hass)
     return True
 
 
