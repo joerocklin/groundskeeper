@@ -25,7 +25,19 @@ from homeassistant.helpers.dispatcher import (
 )
 
 from .const import DOMAIN
-from .runtime import async_get_director
+from .core import plan_status
+from .heights import MAX_MAX_CUT, MIN_MAX_CUT
+from .run_settings import SettingsError, finishing_set, mower_run_defaults, validate_overrides
+from .runtime import Director, async_get_director
+from .schedule_ops import (
+    ScheduleError,
+    create_plan,
+    delete_run,
+    edit_run,
+    move_run,
+    rederive,
+    remove_plan,
+)
 from .zone_sync import async_get_zone_sync
 
 SIGNAL_STATE_CHANGED = f"{DOMAIN}_state_changed_{{}}"
@@ -69,6 +81,16 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_prompts)
     websocket_api.async_register_command(hass, ws_subscribe_prompts)
     for cmd in (
+        ws_get_schedule,
+        ws_add_plan,
+        ws_edit_run,
+        ws_delete_run,
+        ws_move_run,
+        ws_remove_plan,
+        ws_rederive_plan,
+        ws_get_run_settings,
+        ws_set_mower_run_settings,
+        ws_set_zone_run_settings,
         ws_get_zone_angles,
         ws_set_zone_bearing,
         ws_reset_zone_bearing,
@@ -377,3 +399,290 @@ async def ws_subscribe_prompts(hass, connection, msg) -> None:
     connection.subscriptions[msg["id"]] = director.async_add_listener(_changed)
     connection.send_result(msg["id"])
     await _push()
+
+
+# -- Schedule: add / edit / reorder / remove (spec §5.7, §5.8, §13.2) --------------
+# Panel-only: heights and settings are SI (the panel converts for display, §5.9).
+
+
+def _director_or_error(hass, connection, msg) -> Director | None:
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+    return director
+
+
+async def _schedule_call(hass, connection, msg, call) -> None:
+    """Run `call(director)`; a refused operation is a clean error carrying its key."""
+    director = _director_or_error(hass, connection, msg)
+    if director is None:
+        return
+    try:
+        result = await call(director)
+    except ScheduleError as err:
+        connection.send_error(msg["id"], err.key, err.placeholders.get("error", err.key))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], result)
+
+
+def schedule_view(director: Director) -> dict[str, Any]:
+    """Plans (with derived status) and pending/active Runs on the Schedule."""
+    core = director.core_state
+    state = core["state"]
+    plans = [
+        {**plan, "status": plan_status(core, plan_id).value}
+        for plan_id, plan in state["plans"].items()
+    ]
+    return {
+        "schedule": dict(state["schedule"]),
+        "plans": plans,
+        "runs": [dict(r) for r in state["runs"]],
+    }
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/get_schedule", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_get_schedule(hass, connection, msg) -> None:
+    """The Schedule: status, Plans and Runs in order."""
+    await _schedule_call(hass, connection, msg, lambda d: _ready(schedule_view(d)))
+
+
+async def _ready(value):
+    return value
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/add_plan",
+        vol.Required("entry_id"): str,
+        vol.Required("zone"): str,
+        vol.Required("start_height_mm"): vol.Coerce(float),
+        vol.Required("end_height_mm"): vol.Coerce(float),
+        vol.Optional("max_cut_pct"): vol.Coerce(float),
+        vol.Optional("base_angle"): vol.Coerce(float),
+        vol.Optional("finishing"): vol.Any(None, bool),
+        vol.Optional("settings"): dict,
+        vol.Optional("start", default=False): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_add_plan(hass, connection, msg) -> None:
+    """Panel add path: the new Plan merges into the Schedule by step index."""
+    await _schedule_call(
+        hass, connection, msg,
+        lambda d: create_plan(
+            d,
+            zone=msg["zone"],
+            start_height_mm=msg["start_height_mm"],
+            end_height_mm=msg["end_height_mm"],
+            max_cut_pct=msg.get("max_cut_pct"),
+            base_angle=msg.get("base_angle"),
+            finishing=msg.get("finishing"),
+            settings=msg.get("settings"),
+            start=msg["start"],
+            position="merge",
+            origin="panel",
+        ),
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/edit_run",
+        vol.Required("entry_id"): str,
+        vol.Required("run_id"): str,
+        vol.Optional("height_mm"): vol.Coerce(float),
+        vol.Optional("angle_deg"): vol.Coerce(float),
+        vol.Optional("settings"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_edit_run(hass, connection, msg) -> None:
+    """Edit a pending Run within the device limits; warnings come back."""
+    changes = {k: msg[k] for k in ("height_mm", "angle_deg", "settings") if k in msg}
+    await _schedule_call(hass, connection, msg, lambda d: edit_run(d, msg["run_id"], changes))
+
+
+async def _done(coro) -> dict:
+    await coro
+    return {}
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/delete_run", vol.Required("entry_id"): str,
+     vol.Required("run_id"): str}
+)
+@websocket_api.async_response
+async def ws_delete_run(hass, connection, msg) -> None:
+    """Delete a pending Run."""
+    await _schedule_call(
+        hass, connection, msg, lambda d: _done(delete_run(d, msg["run_id"]))
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/move_run", vol.Required("entry_id"): str,
+     vol.Required("run_id"): str, vol.Required("position"): vol.All(int, vol.Range(min=0))}
+)
+@websocket_api.async_response
+async def ws_move_run(hass, connection, msg) -> None:
+    """Move a pending Run to a position among the pending Runs."""
+    await _schedule_call(
+        hass, connection, msg, lambda d: _done(move_run(d, msg["run_id"], msg["position"]))
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/remove_plan", vol.Required("entry_id"): str,
+     vol.Required("plan_id"): str}
+)
+@websocket_api.async_response
+async def ws_remove_plan(hass, connection, msg) -> None:
+    """Remove a Plan from the Schedule (the `remove_plan` service's panel twin)."""
+    await _schedule_call(
+        hass, connection, msg, lambda d: _done(remove_plan(d, msg["plan_id"]))
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/rederive_plan", vol.Required("entry_id"): str,
+     vol.Required("plan_id"): str}
+)
+@websocket_api.async_response
+async def ws_rederive_plan(hass, connection, msg) -> None:
+    """Re-derive a not-started Plan from current defaults (spec §5.1)."""
+    await _schedule_call(hass, connection, msg, lambda d: rederive(d, msg["plan_id"]))
+
+
+# -- Default Run settings, Max cut and the Finishing Run override (spec §5.1, §5.6) --
+
+
+def run_settings_view(director: Director) -> dict[str, Any]:
+    cfg = director.data.get("config", {})
+    return {
+        "mower": {
+            "run_defaults": mower_run_defaults(director.adapter.limits, cfg),
+            "overrides": cfg.get("run_defaults") or {},
+            "max_cut_pct": cfg.get("max_cut_pct", 13),
+            "finishing": cfg.get("finishing"),
+        },
+        "zones": [
+            {
+                "zone_id": z["id"],
+                "run_defaults": z.get("run_defaults") or {},
+                "finishing": z.get("finishing"),
+                "effective_finishing": finishing_set(cfg, z),
+            }
+            for z in cfg.get("zones", [])
+        ],
+    }
+
+
+_SETTINGS_SET = vol.Any(None, dict)
+
+
+def _check_sets(director: Director, msg: dict) -> None:
+    for key in ("run_defaults", "finishing"):
+        if msg.get(key):
+            validate_overrides(director.adapter.limits, msg[key])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/get_run_settings", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_get_run_settings(hass, connection, msg) -> None:
+    """Mower and Zone default Run settings, Max cut and Finishing Run overrides."""
+    await _schedule_call(hass, connection, msg, lambda d: _ready(run_settings_view(d)))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_mower_run_settings",
+        vol.Required("entry_id"): str,
+        vol.Optional("run_defaults"): _SETTINGS_SET,
+        vol.Optional("max_cut_pct"): vol.All(
+            vol.Coerce(float), vol.Range(min=MIN_MAX_CUT * 100, max=MAX_MAX_CUT * 100)
+        ),
+        vol.Optional("finishing"): _SETTINGS_SET,
+    }
+)
+@websocket_api.async_response
+async def ws_set_mower_run_settings(hass, connection, msg) -> None:
+    """Edit Mower defaults (`null` clears a set). Plans already built keep theirs."""
+
+    async def call(director: Director) -> dict:
+        try:
+            _check_sets(director, msg)
+        except SettingsError as err:
+            raise ScheduleError("invalid_settings", error=str(err)) from None
+
+        def edit(cfg: dict) -> None:
+            for key in ("run_defaults", "finishing"):
+                if key in msg:
+                    if msg[key]:
+                        cfg[key] = msg[key]
+                    else:
+                        cfg.pop(key, None)
+            if "max_cut_pct" in msg:
+                cfg["max_cut_pct"] = msg["max_cut_pct"]
+
+        await director.async_edit_config(edit)
+        return run_settings_view(director)
+
+    await _schedule_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_zone_run_settings",
+        vol.Required("entry_id"): str,
+        vol.Required("zone_id"): str,
+        vol.Optional("run_defaults"): _SETTINGS_SET,
+        vol.Optional("finishing"): _SETTINGS_SET,
+    }
+)
+@websocket_api.async_response
+async def ws_set_zone_run_settings(hass, connection, msg) -> None:
+    """Edit a Zone's default Run settings / Finishing override (`null` clears)."""
+
+    async def call(director: Director) -> dict:
+        zone = next(
+            (z for z in director.data.get("config", {}).get("zones", [])
+             if z["id"] == msg["zone_id"]),
+            None,
+        )
+        if zone is None:
+            raise ScheduleError("unknown_zone", zone=msg["zone_id"])
+        try:
+            _check_sets(director, msg)
+        except SettingsError as err:
+            raise ScheduleError("invalid_settings", error=str(err)) from None
+
+        def edit(cfg: dict) -> None:
+            for z in cfg["zones"]:
+                if z["id"] == msg["zone_id"]:
+                    for key in ("run_defaults", "finishing"):
+                        if key in msg:
+                            if msg[key]:
+                                z[key] = msg[key]
+                            else:
+                                z.pop(key, None)
+
+        await director.async_edit_config(edit)
+        return run_settings_view(director)
+
+    await _schedule_call(hass, connection, msg, call)

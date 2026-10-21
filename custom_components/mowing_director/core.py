@@ -139,12 +139,60 @@ class PlanStatus(StrEnum):
 
 @dataclass(frozen=True)
 class AddPlan:
-    """Append a built Plan and its Runs (end of Schedule); optionally start."""
+    """Place a built Plan and its Runs on the Schedule; optionally start.
+
+    `position`: `end` (default), `front` (before the first pending Run) or
+    `merge` (by step index, panel add path; spec §5.8).
+    """
 
     now: datetime
     plan: dict[str, Any]
     runs: list[dict[str, Any]]
     start: bool = False
+    position: str = "end"
+
+
+@dataclass(frozen=True)
+class EditRun:
+    """Edit a pending Run: `height_mm`, `angle_deg`, `settings` (patch)."""
+
+    now: datetime
+    run_id: str
+    changes: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DeleteRun:
+    """Delete a pending Run."""
+
+    now: datetime
+    run_id: str
+
+
+@dataclass(frozen=True)
+class MoveRun:
+    """Move a pending Run to `position` among the pending Runs (0-based)."""
+
+    now: datetime
+    run_id: str
+    position: int
+
+
+@dataclass(frozen=True)
+class RemovePlan:
+    """Cancel a Plan's pending Runs (never commands the Mower)."""
+
+    now: datetime
+    plan_id: str
+
+
+@dataclass(frozen=True)
+class ReplacePlan:
+    """Swap a not-started Plan's Runs for re-derived ones (spec §5.1)."""
+
+    now: datetime
+    plan: dict[str, Any]
+    runs: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -287,6 +335,11 @@ class Reconcile:
 type CoreInput = (
     Reconcile
     | AddPlan
+    | EditRun
+    | DeleteRun
+    | MoveRun
+    | RemovePlan
+    | ReplacePlan
     | StartSchedule
     | PauseSchedule
     | StopNow
@@ -542,6 +595,50 @@ def next_run(state: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def pending_runs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Every `pending` Run, in Schedule order."""
+    return [r for r in state["runs"] if r["status"] == RunStatus.PENDING]
+
+
+def _plan_in_order(runs: list[Mapping[str, Any]]) -> bool:
+    """Each Plan's Runs appear in step order."""
+    last: dict[str, int] = {}
+    for run in runs:
+        if run["index"] < last.get(run["plan_id"], 0):
+            return False
+        last[run["plan_id"]] = run["index"]
+    return True
+
+
+def move_blocker(state: Mapping[str, Any], run_id: str, position: int) -> str | None:
+    """Why a manual reorder is refused, or None (spec §5.7).
+
+    `position` indexes the pending Runs. A Run may never be moved ahead of an
+    earlier Run of its own Plan, and a Run may never be pushed behind a later
+    one: either leaves the Plan out of step order.
+    """
+    pending = pending_runs(state)
+    run = next((r for r in pending if r["id"] == run_id), None)
+    if run is None:
+        known = any(r["id"] == run_id for r in state["runs"])
+        return "not_pending" if known else "unknown_run"
+    if not 0 <= position < len(pending):
+        return "bad_position"
+    moved = [r for r in pending if r is not run]
+    moved.insert(position, run)
+    return None if _plan_in_order(moved) else "before_earlier_run"
+
+
+def remove_plan_blocker(state: Mapping[str, Any], plan_id: str) -> str | None:
+    """Why `remove_plan` is refused, or None (spec §13.2)."""
+    runs = [r for r in state["runs"] if r["plan_id"] == plan_id]
+    if plan_id not in state["plans"] and not runs:
+        return "unknown_plan"
+    if any(r["status"] in ACTIVE_RUN for r in runs):
+        return "run_active"
+    return None
+
+
 def run_ordinal(state: Mapping[str, Any], run: Mapping[str, Any]) -> tuple[int, int]:
     """`(n, m)`: the Run's place among its Plan's Runs."""
     return run["index"], run["of"]
@@ -611,6 +708,16 @@ class _Machine:
         match event:
             case AddPlan():
                 self._add_plan(event)
+            case EditRun():
+                self._edit_run(event)
+            case DeleteRun():
+                self._delete_run(event)
+            case MoveRun():
+                self._move_run(event)
+            case RemovePlan():
+                self._remove_plan(event)
+            case ReplacePlan():
+                self._replace_plan(event)
             case StartSchedule():
                 self._start_schedule("user_start")
             case PauseSchedule():
@@ -715,10 +822,38 @@ class _Machine:
 
     # -- AddPlan / Start --------------------------------------------------
 
+    def _insert_at(self, runs: list[dict[str, Any]], position: str) -> None:
+        """Place new Runs: `end`, `front` or `merge` by step index (spec §5.8)."""
+        current = self.s["runs"]
+        if position == "front":
+            at = next(
+                (i for i, r in enumerate(current) if r["status"] == RunStatus.PENDING),
+                len(current),
+            )
+            current[at:at] = runs
+        elif position == "merge":
+            floor = next(
+                (i for i, r in enumerate(current) if r["status"] == RunStatus.PENDING),
+                len(current),
+            )
+            for run in runs:
+                at = next(
+                    (
+                        i
+                        for i in range(floor, len(current))
+                        if current[i]["index"] > run["index"]
+                    ),
+                    len(current),
+                )
+                current.insert(at, run)
+                floor = at + 1
+        else:
+            current.extend(runs)
+
     def _add_plan(self, event: AddPlan) -> None:
         plan = copy.deepcopy(event.plan)
         self.s["plans"][plan["id"]] = plan
-        self.s["runs"].extend(copy.deepcopy(event.runs))
+        self._insert_at(copy.deepcopy(event.runs), event.position)
         self._emit(
             "plan_added",
             plan_id=plan["id"],
@@ -731,6 +866,100 @@ class _Machine:
         # only and paused never resumes (spec §13.3).
         if event.start and self.status == ScheduleStatus.IDLE:
             self._start_schedule("add_plan")
+
+    # -- Editing the Schedule (spec §5.7, §13.2) --------------------------------
+    # Only `pending` Runs change, in any Schedule status; the active Run is frozen.
+
+    def _pending(self, run_id: str) -> dict[str, Any] | None:
+        return next((r for r in pending_runs(self.s) if r["id"] == run_id), None)
+
+    def _edit_run(self, event: EditRun) -> None:
+        run = self._pending(event.run_id)
+        if run is None:
+            return
+        changes = event.changes
+        if "height_mm" in changes:
+            run["height_mm"] = changes["height_mm"]
+            run["settings"]["blade_height_mm"] = int(changes["height_mm"])
+        if "angle_deg" in changes:
+            run["angle_deg"] = changes["angle_deg"]
+            run["angle_edited"] = True
+        patch = dict(changes.get("settings") or {})
+        extras = patch.pop("extras", None)
+        run["settings"].update(patch)
+        if extras:
+            run["settings"]["extras"] = {**run["settings"]["extras"], **extras}
+
+    def _drop_plan_if_empty(self, plan_id: str) -> None:
+        """A Plan with no Run left on the Schedule leaves it; its inputs are kept
+        in `history` only if some Run of it was finished."""
+        if any(r["plan_id"] == plan_id for r in self.s["runs"]):
+            return
+        plan = self.s["plans"].pop(plan_id, None)
+        if plan is not None and any(r["plan_id"] == plan_id for r in self.h["runs"]):
+            self.h["plans"][plan_id] = plan
+
+    def _settle_empty(self, reason: str) -> None:
+        """Nothing left to run: a `waiting` Schedule with no pending Run, or a
+        `paused` one with no Run at all, goes `idle`."""
+        empty = not self.s["runs"]
+        if (self.status == ScheduleStatus.WAITING and next_run(self.s) is None) or (
+            self.status == ScheduleStatus.PAUSED and empty
+        ):
+            self._cancel_deadline(DEADLINE_STABILITY)
+            self.s["waiting_on"] = []
+            self.s["schedule"]["pause_requested"] = False
+            self._set_schedule(ScheduleStatus.IDLE, reason)
+
+    def _delete_run(self, event: DeleteRun) -> None:
+        run = self._pending(event.run_id)
+        if run is None:
+            return
+        self.s["runs"].remove(run)
+        plan = self.s["plans"].get(run["plan_id"])
+        if plan is not None and run["id"] in plan.get("run_ids", []):
+            plan["run_ids"].remove(run["id"])
+        self._drop_plan_if_empty(run["plan_id"])
+        self._settle_empty("run_deleted")
+
+    def _move_run(self, event: MoveRun) -> None:
+        if move_blocker(self.s, event.run_id, event.position) is not None:
+            return
+        pending = pending_runs(self.s)
+        run = next(r for r in pending if r["id"] == event.run_id)
+        slots = [i for i, r in enumerate(self.s["runs"]) if r["status"] == RunStatus.PENDING]
+        order = [r for r in pending if r is not run]
+        order.insert(event.position, run)
+        for slot, item in zip(slots, order):
+            self.s["runs"][slot] = item
+
+    def _remove_plan(self, event: RemovePlan) -> None:
+        if remove_plan_blocker(self.s, event.plan_id) is not None:
+            return
+        plan = self.s["plans"].get(event.plan_id)
+        for run in [r for r in self.s["runs"] if r["plan_id"] == event.plan_id]:
+            if run["status"] == RunStatus.PENDING:
+                run["finished_at"] = iso(self.now)
+                self._set_run(run, RunStatus.CANCELLED, "plan_removed")
+                self._archive_run(run)
+        self._emit(
+            "plan_removed",
+            plan_id=event.plan_id,
+            zone_id=plan["zone_id"] if plan else None,
+            zone_name=plan["zone_name"] if plan else None,
+        )
+        self._settle_empty("plan_removed")
+
+    def _replace_plan(self, event: ReplacePlan) -> None:
+        plan_id = event.plan["id"]
+        old = [r for r in self.s["runs"] if r["plan_id"] == plan_id]
+        started = any(r["plan_id"] == plan_id for r in self.h["runs"])
+        if not old or started or any(r["status"] != RunStatus.PENDING for r in old):
+            return
+        at = self.s["runs"].index(old[0])
+        self.s["runs"] = [r for r in self.s["runs"] if r["plan_id"] != plan_id]
+        self.s["runs"][at:at] = copy.deepcopy(event.runs)
+        self.s["plans"][plan_id] = copy.deepcopy(event.plan)
 
     def _start_schedule(self, reason: str) -> None:
         if self.status not in (ScheduleStatus.IDLE, ScheduleStatus.PAUSED):
