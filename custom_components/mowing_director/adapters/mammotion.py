@@ -26,27 +26,34 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_UNIT_OF_MEASUREMENT,
     CONF_DEVICE,
+    EVENT_STATE_CHANGED,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.util import dt as dt_util
 
 from ..adapter import (
     AdapterSignal,
     AdapterSink,
     Channel,
     CommandResult,
+    JobStarted,
     Limits,
     Movement,
     NativeTask,
+    NewError,
+    RainStop,
     Refused,
     RunSettings,
     SelfCheckReason,
     Snapshot,
     Zone,
+    ZoneTaskAborted,
+    ZoneTaskComplete,
+    ZonesChanged,
 )
 from ..heights import from_display
 
@@ -73,6 +80,9 @@ _SELF_CHECK = {
 }
 
 _INCH_UNITS = frozenset({"in", "inches", '"'})
+
+# Mammotion code for "rain sensor triggered, job ended" (spec §3.2).
+_RAIN_STOP_CODE = 1003
 
 # Readback granularity of the height sensor, mm (spec §3.6, live-verified).
 _HEIGHT_READBACK_MM = 5
@@ -119,8 +129,12 @@ class MammotionAdapter:
         self._listening = False
         self._snapshot = self._derive_snapshot()
         self._seen_error_times: set[datetime] = set()
+        self._error_pair: tuple[str, str] = ("", "")
         self._seen_task_states: dict[str, str] = {}
-        self._was_mowing = False
+        self._was_mowing = (
+            self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
+        )
+        self._zone_hashes = frozenset(self._zone_switches())
 
     # -- discovery ---------------------------------------------------------
 
@@ -153,16 +167,22 @@ class MammotionAdapter:
     @callback
     def _zone_switches(self) -> dict[str, er.RegistryEntry]:
         """Zone switches by hash: the device's `mammotion` switches whose
-        unique_id ends in a long integer (research §5)."""
+        state carries a `hash` attribute, falling back to a long integer
+        unique_id suffix when the switch is unavailable (research §5)."""
         reg = er.async_get(self._hass)
         found: dict[str, er.RegistryEntry] = {}
         for entry in er.async_entries_for_device(reg, self._device_id):
             if entry.domain != "switch" or entry.platform != MAMMOTION:
                 continue
-            suffix = entry.unique_id.removeprefix(f"{self._name}_")
-            if not suffix.lstrip("-").isdigit() or len(suffix.lstrip("-")) < 10:
+            state = self._hass.states.get(entry.entity_id)
+            zone_hash = state.attributes.get("hash") if state else None
+            if zone_hash is not None:
+                found[str(zone_hash)] = entry
                 continue
-            found[suffix] = entry
+            suffix = entry.unique_id.removeprefix(f"{self._name}_")
+            digits = suffix.lstrip("-")
+            if digits.isdigit() and len(digits) >= 10:
+                found[suffix] = entry
         return found
 
     # -- snapshot (spec §3.2) ----------------------------------------------
@@ -302,7 +322,7 @@ class MammotionAdapter:
             return
         self._listening = True
         self._unsubs.append(
-            async_track_state_change_event(self._hass, None, self._on_state_event)
+            self._hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state_event)
         )
         self._unsubs.append(
             self._hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry_event)
@@ -331,27 +351,99 @@ class MammotionAdapter:
         self._check_errors()
         self._check_task_areas()
         self._check_job_started()
+        self._check_zones_changed()
         self._publish()
 
     @callback
     def _on_registry_event(self, event: Event) -> None:
         del event
+        # Zone switches are created/re-keyed/removed in the registry, and
+        # the ephemeral task sensors vanish at job end; re-check both.
+        self._check_task_areas()
+        self._check_zones_changed()
 
     @callback
     def _on_mammotion_event(self, event: Event) -> None:
-        del event
+        """rain_stop from `mammotion_event` (research §7). Over BLE no
+        event arrives; the error-sensor path covers errors there."""
+        data = event.data
+        if data.get("device_id") != self._device_id:
+            return
+        codes = data.get("codes") or []
+        if any(int(code.get("code", 0)) == _RAIN_STOP_CODE for code in codes):
+            self._emit_signal(RainStop())
 
     @callback
     def _check_errors(self) -> None:
-        """NewError from the rolling error sensors (works over BLE)."""
+        """NewError from the rolling error sensors (works over BLE).
+
+        The error log is rolling ten-slot history that never empties, so
+        a non-zero code alone is not "new": a new fault is a change of
+        the observed (code, time) pair with code != 0 (research §4.2).
+        Deduped by time. While `error_1_time` is still `unknown` the
+        fault is held: emitting it with a made-up time would double-count
+        the same fault when the firmware stamps the real one.
+        """
+        code = self._state("sensor", "error_1_code") or ""
+        raw_time = self._state("sensor", "error_1_time") or ""
+        pair = (code, raw_time)
+        if pair == self._error_pair:
+            return
+        self._error_pair = pair
+        if not code or code == "0":
+            return
+        stamp = dt_util.parse_datetime(raw_time)
+        if stamp is None or stamp in self._seen_error_times:
+            return
+        self._seen_error_times.add(stamp)
+        message = self._state("sensor", "error_1_message") or ""
+        self._emit_signal(NewError(code=code, message=message, time=stamp))
 
     @callback
     def _check_task_areas(self) -> None:
-        """ZoneTaskComplete/Aborted from the ephemeral task sensors."""
+        """ZoneTaskComplete/Aborted from the ephemeral `{hash}_task_area`
+        sensors. They are removed when the job ends, so discovery runs on
+        every registry change too; entity ids are never cached."""
+        reg = er.async_get(self._hass)
+        for entry in er.async_entries_for_device(reg, self._device_id):
+            if (
+                entry.domain != "sensor"
+                or entry.platform != MAMMOTION
+                or not entry.unique_id.startswith(f"{self._name}_")
+                or not entry.unique_id.endswith("_task_area")
+            ):
+                continue
+            zone = entry.unique_id[len(self._name) + 1 : -len("_task_area")]
+            state = _state_of(self._hass, entry.entity_id)
+            previous = self._seen_task_states.get(zone)
+            self._seen_task_states[zone] = state or ""
+            if state == previous:
+                continue
+            if state == "COMPLETE":
+                self._emit_signal(ZoneTaskComplete(zone))
+            elif state == "ABORTED":
+                self._emit_signal(ZoneTaskAborted(zone))
 
     @callback
     def _check_job_started(self) -> None:
-        """JobStarted on a transition into mowing."""
+        """JobStarted when activity transitions into `mowing`. The core
+        decides externality from its own command log (ticket 06 §5a)."""
+        mowing = self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
+        if mowing and not self._was_mowing:
+            self._emit_signal(
+                JobStarted(job_ref=None, zone=self._zone_ref(), started_at=dt_util.utcnow())
+            )
+        self._was_mowing = mowing
+
+    @callback
+    def _check_zones_changed(self) -> None:
+        """ZonesChanged when the Zone hash set changes (map rebuild,
+        re-keyed switches)."""
+        hashes = frozenset(self._zone_switches())
+        if hashes == self._zone_hashes:
+            return
+        self._zone_hashes = hashes
+        self._emit_signal(ZonesChanged())
 
     @property
     def limits(self) -> Limits:

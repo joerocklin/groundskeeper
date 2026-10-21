@@ -7,13 +7,23 @@ service is ever called.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.mowing_director.adapter import (
+    JobStarted,
+    NewError,
+    RainStop,
+    ZoneTaskAborted,
+    ZoneTaskComplete,
+    ZonesChanged,
+)
 from custom_components.mowing_director.adapter import Movement, Snapshot
 from custom_components.mowing_director.adapters import ADAPTER_REGISTRY
 from custom_components.mowing_director.const import DOMAIN
@@ -123,3 +133,192 @@ async def test_blade_height_unit_conversion_and_guards(hass: HomeAssistant) -> N
     entity_id = reg.async_get_entity_id("sensor", "mammotion", f"{NAME}_blade_height")
     hass.states.async_remove(entity_id)
     assert adapter.snapshot.blade_height_mm is None
+
+
+async def test_restored_unavailable_is_not_ready(hass: HomeAssistant) -> None:
+    """`unavailable` + `restored: true` means Mammotion has not added the
+    entity yet (spec §2.3): available False, activity None, no crash."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    reg = er.async_get(hass)
+    entity_id = reg.async_get_entity_id("lawn_mower", "mammotion", f"{NAME}_mower")
+    hass.states.async_set(entity_id, "unavailable", {"restored": True})
+    adapter = make_adapter(hass, entry)
+
+    snapshot = adapter.snapshot
+    assert snapshot.available is False
+    assert snapshot.activity is None
+
+
+# -- signals ----------------------------------------------------------------
+
+
+class _Recorder:
+    """Sink that records pushes."""
+
+    def __init__(self) -> None:
+        self.signals: list = []
+        self.snapshots: list[Snapshot] = []
+
+    def on_snapshot(self, snapshot: Snapshot) -> None:
+        self.snapshots.append(snapshot)
+
+    def on_signal(self, signal) -> None:
+        self.signals.append(signal)
+
+
+async def _adapter_with_sink(hass: HomeAssistant) -> tuple[object, _Recorder, object, object]:
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    adapter = make_adapter(hass, entry)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+    return adapter, recorder, entry, mower
+
+
+async def test_new_error_from_error_sensors(hass: HomeAssistant) -> None:
+    """A new (code, time) pair with code != 0 emits NewError; the same
+    pair again does not (works over BLE, no mammotion_event)."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+
+    set_entity(
+        hass, entry, mower, NAME, "sensor:error_1_code", "2748", {}
+    )
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Angle position sensor of lift motor disconnected", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-19T18:59:58+00:00", {})
+    await hass.async_block_till_done()
+
+    assert recorder.signals == [
+        NewError(
+            code="2748",
+            message="Angle position sensor of lift motor disconnected",
+            time=datetime(2026, 10, 19, 18, 59, 58, tzinfo=UTC),
+        )
+    ]
+
+    # Same pair again: no re-emit (rolling log re-reads are common).
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "changed wording", {})
+    await hass.async_block_till_done()
+    assert len(recorder.signals) == 1
+
+    # A recurrence gets a new time: it is a new error.
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-20T06:30:00+00:00", {})
+    await hass.async_block_till_done()
+    assert len(recorder.signals) == 2
+    assert recorder.signals[1].time == datetime(2026, 10, 20, 6, 30, tzinfo=UTC)
+
+
+async def test_error_without_time_waits_for_the_stamp(hass: HomeAssistant) -> None:
+    """`error_1_time` may stay `unknown` until the firmware stamps it;
+    the error is held, then reported once when the time arrives (never
+    with a made-up time, which would double-count the same fault)."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "5004", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "some fault", {})
+    await hass.async_block_till_done()
+    assert recorder.signals == []
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-20T06:00:00+00:00", {})
+    await hass.async_block_till_done()
+    errors = [s for s in recorder.signals if isinstance(s, NewError)]
+    assert errors == [
+        NewError(code="5004", message="some fault", time=datetime(2026, 10, 20, 6, tzinfo=UTC))
+    ]
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "same fault", {})
+    await hass.async_block_till_done()
+    assert len([s for s in recorder.signals if isinstance(s, NewError)]) == 1
+
+
+async def test_rain_stop_from_mammotion_event(hass: HomeAssistant) -> None:
+    """mammotion_event code 1003 for this device emits RainStop once."""
+    adapter, recorder, _, _ = await _adapter_with_sink(hass)
+
+    hass.bus.async_fire(
+        "mammotion_event",
+        {
+            "type": "device_warning_code_event",
+            "device_id": adapter._device_id,
+            "device_name": NAME,
+            "codes": [{"code": 1003, "time": "2026-10-19T18:10:00+00:00", "message": "rain sensor"}],
+        },
+    )
+    await hass.async_block_till_done()
+    assert RainStop() in recorder.signals
+
+    # A different device's event is ignored.
+    recorder.signals.clear()
+    hass.bus.async_fire(
+        "mammotion_event",
+        {"type": "device_warning_code_event", "device_id": "other", "codes": [{"code": 1003}]},
+    )
+    await hass.async_block_till_done()
+    assert recorder.signals == []
+
+
+async def test_zone_task_complete_and_aborted(hass: HomeAssistant) -> None:
+    """Ephemeral `{hash}_task_area` sensors reaching COMPLETE/ABORTED emit
+    zone signals; the sensors vanishing at job end emits nothing."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    side = "1000000000000000007"
+    back = "1000000000000000001"
+
+    set_entity(hass, entry, mower, NAME, f"sensor:{side}_task_area", "MOWING", {})
+    await hass.async_block_till_done()
+    assert recorder.signals == []
+
+    set_entity(hass, entry, mower, NAME, f"sensor:{side}_task_area", "COMPLETE", {})
+    await hass.async_block_till_done()
+    assert recorder.signals == [ZoneTaskComplete(side)]
+
+    set_entity(hass, entry, mower, NAME, f"sensor:{back}_task_area", "ABORTED", {})
+    await hass.async_block_till_done()
+    assert recorder.signals == [ZoneTaskComplete(side), ZoneTaskAborted(back)]
+
+    # Job ends: the sensors are removed from the registry (research §4.2).
+    reg = er.async_get(hass)
+    reg.async_remove(
+        reg.async_get_entity_id("sensor", "mammotion", f"{NAME}_{side}_task_area")
+    )
+    await hass.async_block_till_done()
+    assert recorder.signals == [ZoneTaskComplete(side), ZoneTaskAborted(back)]
+
+
+async def test_job_started_on_mowing_transition(hass: HomeAssistant) -> None:
+    """A transition into `mowing` emits JobStarted (job_ref None; the core
+    decides externality from its own command log)."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+
+    started = [s for s in recorder.signals if isinstance(s, JobStarted)]
+    assert len(started) == 1
+    assert started[0].job_ref is None
+    assert started[0].started_at.tzinfo is not None
+
+    # Staying mowing does not re-emit.
+    set_entity(hass, entry, mower, NAME, "sensor:progress", "5", {})
+    await hass.async_block_till_done()
+    assert len([s for s in recorder.signals if isinstance(s, JobStarted)]) == 1
+
+
+async def test_zones_changed_on_registry_and_rekey(hass: HomeAssistant) -> None:
+    """A Zone switch appearing, and a map rebuild re-keying the hash set,
+    both emit ZonesChanged."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+
+    set_entity(hass, entry, mower, NAME, "switch:9999999999999999", "on", {"hash": 9999999999999999})
+    await hass.async_block_till_done()
+    assert recorder.signals == [ZonesChanged()]
+
+    # Re-key without a registry change: the hash attribute moved.
+    reg = er.async_get(hass)
+    entity_id = reg.async_get_entity_id("switch", "mammotion", f"{NAME}_9999999999999999")
+    hass.states.async_set(entity_id, "on", {"hash": 8888888888888888})
+    await hass.async_block_till_done()
+    assert recorder.signals.count(ZonesChanged()) == 2
+
