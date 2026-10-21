@@ -37,12 +37,15 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 from .adapter import (
     AdapterSignal,
     CommandKind,
+    JobStarted,
     CommandResult as AdapterCommandResult,
     Movement,
     NewError,
+    Position,
     RunSettings,
     SelfCheckReason,
     Snapshot,
+    ZoneTaskAborted,
     ZoneTaskComplete,
 )
 
@@ -54,6 +57,9 @@ DURATION_SAMPLES_MAX = 20  # spec §14.6
 DEADLINE_STABILITY = "stability"
 DEADLINE_START_WINDOW = "start_window"
 DEADLINE_DONE_STABLE = "done_stable"
+DEADLINE_STOPPED_STABLE = "stopped_stable"
+DEADLINE_STALL = "stall"
+DEFAULT_STALL_WINDOW = timedelta(minutes=60)  # spec §7.3, §19
 
 
 class ScheduleStatus(StrEnum):
@@ -281,6 +287,7 @@ class Env:
     zones: Mapping[str, ZoneView]
     min_start_battery_pct: int
     start_window: timedelta = DEFAULT_START_WINDOW
+    stall_window: timedelta = DEFAULT_STALL_WINDOW
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +316,7 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("last_error_time", None)
     state.setdefault("blocking_error", None)
     state.setdefault("waiting_on", [])
+    state.setdefault("stall_movement", None)
     history = dict(data.get("history") or {})
     history.setdefault("runs", [])
     history.setdefault("plans", {})
@@ -328,7 +336,7 @@ def parse(moment: str) -> datetime:
 
 
 def snapshot_to_dict(snapshot: Snapshot) -> dict[str, Any]:
-    """The persisted snapshot summary (no position: not needed to judge)."""
+    """The persisted snapshot summary (position kept: it is a stall indicator)."""
     return {
         "activity": snapshot.activity.value if snapshot.activity else None,
         "available": snapshot.available,
@@ -341,10 +349,26 @@ def snapshot_to_dict(snapshot: Snapshot) -> dict[str, Any]:
         "movement": {
             "progress_pct": snapshot.movement.progress_pct,
             "area_m2": snapshot.movement.area_m2,
+            "position": (
+                [snapshot.movement.position.latitude, snapshot.movement.position.longitude]
+                if snapshot.movement.position
+                else None
+            ),
         },
         "job_ref": snapshot.job_ref,
         "rain": snapshot.rain,
         "self_check": snapshot.self_check.value if snapshot.self_check else None,
+    }
+
+
+def movement_to_dict(snapshot: Snapshot) -> dict[str, Any]:
+    """Every `movement` indicator, position included, for the stall rule."""
+    movement = snapshot.movement
+    position = movement.position
+    return {
+        "progress_pct": movement.progress_pct,
+        "area_m2": movement.area_m2,
+        "position": [position.latitude, position.longitude] if position else None,
     }
 
 
@@ -363,6 +387,7 @@ def snapshot_from_dict(data: Mapping[str, Any]) -> Snapshot:
         movement=Movement(
             progress_pct=movement.get("progress_pct"),
             area_m2=movement.get("area_m2"),
+            position=Position(*movement["position"]) if movement.get("position") else None,
         ),
         job_ref=data["job_ref"],
         rain=data.get("rain"),
@@ -702,6 +727,7 @@ class _Machine:
             run["started_at"] = iso(self.now)
             run["job_ref"] = snapshot.job_ref
             self._set_run(run, RunStatus.MOWING)
+            self._arm_stall(snapshot)
             return
         if self._deadline_due(DEADLINE_START_WINDOW):
             self._fail_run(run, "did_not_start", abort=True)
@@ -717,12 +743,45 @@ class _Machine:
             snapshot.activity in (LawnMowerActivity.RETURNING, LawnMowerActivity.DOCKED)
             and not snapshot.job_active
         )
-        if not off_job:
-            self._cancel_deadline(DEADLINE_DONE_STABLE)
-        elif DEADLINE_DONE_STABLE not in self.s["deadlines"]:
-            self._arm(DEADLINE_DONE_STABLE, self.now + STABILITY_WINDOW)
-        elif self._deadline_due(DEADLINE_DONE_STABLE):
+        if self._stable(DEADLINE_DONE_STABLE, off_job):
             self._finish_run(run)
+            return
+        # idle + no job after start: the Mower stopped off dock (spec §7.3).
+        stopped = snapshot.activity is LawnMowerActivity.IDLE and not snapshot.job_active
+        if self._stable(DEADLINE_STOPPED_STABLE, stopped):
+            self._fail_run(run, "stopped_off_dock", abort=False)
+            return
+        self._evaluate_stall(run, snapshot)
+
+    def _arm_stall(self, snapshot: Snapshot) -> None:
+        self.s["stall_movement"] = movement_to_dict(snapshot)
+        self._arm(DEADLINE_STALL, self.now + self.env.stall_window)
+
+    def _evaluate_stall(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        """No change in any `movement` indicator for the stall window while
+        `mowing`/`returning` aborts the job (spec §7.3). Any other activity
+        (a mid-job recharge, a breakpoint) holds the clock: it restarts when
+        the Mower moves again. There is no Run time limit."""
+        if snapshot.activity not in (LawnMowerActivity.MOWING, LawnMowerActivity.RETURNING):
+            self._arm_stall(snapshot)
+        elif movement_to_dict(snapshot) != self.s["stall_movement"]:
+            self._arm_stall(snapshot)  # evidence first: movement beats the clock
+        elif self._deadline_due(DEADLINE_STALL):
+            self._fail_run(run, "stalled", abort=True)
+
+    def _stable(self, name: str, holds: bool) -> bool:
+        """True once `holds` has held for the 60 s stability window (spec §7.7).
+
+        The first holding snapshot arms the window, any non-holding one
+        cancels it (flicker), and the window counts only when it is due.
+        """
+        if not holds:
+            self._cancel_deadline(name)
+            return False
+        if name not in self.s["deadlines"]:
+            self._arm(name, self.now + STABILITY_WINDOW)
+            return False
+        return self._deadline_due(name)
 
     def _signal(self, signal: AdapterSignal) -> None:
         if isinstance(signal, ZoneTaskComplete):
@@ -738,13 +797,43 @@ class _Machine:
             if last is not None and signal.time <= parse(last):
                 return  # the adapter re-emits after a restart; dedupe by time
             self.s["last_error_time"] = iso(signal.time)
-            if self.status == ScheduleStatus.WAITING:
-                self.s["blocking_error"] = {
-                    "code": signal.code,
-                    "message": signal.message,
-                    "time": iso(signal.time),
-                }
+            error = {
+                "code": signal.code,
+                "message": signal.message,
+                "time": iso(signal.time),
+            }
+            run = self._mowing_run()
+            if run is not None:
+                # Every code is treated alike; the Mower is usually locked in
+                # `error`, so no command (spec §7.3).
+                run["error"] = error
+                self._fail_run(run, "error", abort=False)
+            elif self.status == ScheduleStatus.WAITING:
+                self.s["blocking_error"] = error
                 self._evaluate()
+        elif isinstance(signal, ZoneTaskAborted):
+            run = self._mowing_run()
+            if run is not None and signal.zone == run.get("native_ref"):
+                self._fail_run(run, "externally_aborted", abort=False)
+        elif isinstance(signal, JobStarted):
+            run = self._mowing_run()
+            if run is not None and self._is_external_job(run, signal):
+                self._fail_run(run, "superseded", abort=False)
+
+    def _mowing_run(self) -> dict[str, Any] | None:
+        run = active_run(self.s)
+        if run is not None and run["status"] == RunStatus.MOWING:
+            return run
+        return None
+
+    @staticmethod
+    def _is_external_job(run: Mapping[str, Any], signal: JobStarted) -> bool:
+        """A job start the director did not command (spec §8.5): a different
+        `job_ref` than the one recorded at the `mowing` transition, or, with
+        no `job_ref` either side, a different Zone."""
+        if signal.job_ref is not None and run.get("job_ref") is not None:
+            return signal.job_ref != run["job_ref"]
+        return signal.zone != run.get("native_ref")
 
     def _command_outcome(self, event: CommandOutcome) -> None:
         for entry in reversed(self.s["command_log"]):
@@ -764,7 +853,7 @@ class _Machine:
     # -- Run endings --------------------------------------------------------
 
     def _clear_run_deadlines(self) -> None:
-        for name in (DEADLINE_START_WINDOW, DEADLINE_DONE_STABLE):
+        for name in (DEADLINE_START_WINDOW, DEADLINE_DONE_STABLE, DEADLINE_STOPPED_STABLE, DEADLINE_STALL):
             self._cancel_deadline(name)
         self.s["active_run_id"] = None
 

@@ -12,10 +12,12 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 
 from custom_components.mowing_director.adapter import (
     Accepted,
+    JobStarted,
     NewError,
     Refused,
     SelfCheckReason,
     Unconfirmed,
+    ZoneTaskAborted,
     ZoneTaskComplete,
 )
 from custom_components.mowing_director.core import (
@@ -643,3 +645,211 @@ def test_unanswered_failure_stays_paused_no_clock_decides():
         state, _ = step(state, SnapshotReceived(at(t), DOCKED))
         assert state["state"]["schedule"]["status"] == "paused"
         assert run_status(state) == ["failed"]
+
+
+# --- Failure rules while mowing (spec §7.3, §7.7; ticket #16) -----------------
+
+
+def failed_with(state, reason):
+    run = state["state"]["runs"][0]
+    assert (run["status"], run["reason"]) == ("failed", reason)
+    assert state["state"]["schedule"]["status"] == "paused"
+    assert state["state"]["active_run_id"] is None
+
+
+def no_abort(fx):
+    assert not [e for e in fx if isinstance(e, AbortRunEffect)]
+
+
+@pytest.mark.parametrize("code", ["2741", "1003", "9999", "unknown"])
+def test_new_error_while_mowing_fails_run_with_no_command(code):
+    state = mowing_state()
+    state, fx = step(state, SignalReceived(at(500), NewError(code, "boom", at(499))))
+    failed_with(state, "error")
+    no_abort(fx)
+    assert state["state"]["last_error_time"] == at(499).isoformat()
+
+
+def test_replayed_error_older_than_persisted_does_not_fail_run():
+    state = mowing_state()
+    state["state"]["last_error_time"] = at(600).isoformat()
+    state, _ = step(state, SignalReceived(at(700), NewError("1", "old", at(599))))
+    assert run_status(state) == ["mowing"]
+
+
+def test_zone_task_aborted_fails_run_externally_aborted_no_command():
+    state = mowing_state()
+    state, fx = step(state, SignalReceived(at(500), ZoneTaskAborted("11111111")))
+    failed_with(state, "externally_aborted")
+    no_abort(fx)
+
+
+def test_zone_task_aborted_for_other_zone_is_ignored():
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(500), ZoneTaskAborted("99")))
+    assert run_status(state) == ["mowing"]
+
+
+def test_external_job_start_fails_run_superseded_no_command():
+    state = mowing_state()
+    state, fx = step(state, SignalReceived(at(500), JobStarted("j2", "11111111", at(499))))
+    failed_with(state, "superseded")
+    no_abort(fx)
+
+
+def test_job_started_matching_recorded_job_ref_is_our_own():
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(500), JobStarted("j1", "11111111", at(499))))
+    assert run_status(state) == ["mowing"]
+
+
+def test_job_started_while_starting_is_the_directors_own_start():
+    state = starting_state()
+    state, _ = step(state, SignalReceived(at(62), JobStarted("j1", "11111111", at(62))))
+    assert run_status(state) == ["starting"]
+
+
+def test_job_started_without_job_ref_is_external_only_for_another_zone():
+    state = starting_state()
+    state, _ = step(state, SnapshotReceived(at(70), replace(MOWING, job_ref=None)))
+    own, _ = step(state, SignalReceived(at(80), JobStarted(None, "11111111", at(79))))
+    assert run_status(own) == ["mowing"]
+    other, _ = step(state, SignalReceived(at(80), JobStarted(None, "99", at(79))))
+    failed_with(other, "superseded")
+
+
+def test_signals_while_not_mowing_do_not_fail_the_waiting_schedule():
+    state = waiting_state()
+    state, _ = step(state, SignalReceived(at(5), ZoneTaskAborted("11111111")))
+    state, _ = step(state, SignalReceived(at(6), JobStarted("j9", "11111111", at(6))))
+    assert state["state"]["schedule"]["status"] == "waiting"
+
+
+IDLE_OFF_JOB = replace(DOCKED, activity=LawnMowerActivity.IDLE, job_active=False)
+
+
+def test_idle_without_job_stable_60s_fails_stopped_off_dock_no_command():
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(1000), IDLE_OFF_JOB))
+    assert state["state"]["deadlines"]["stopped_stable"] == at(1060).isoformat()
+    state, fx = step(state, TimerFired(at(1030)))
+    assert run_status(state) == ["mowing"]
+    state, fx = step(state, TimerFired(at(1061)))
+    failed_with(state, "stopped_off_dock")
+    no_abort(fx)
+    assert "stopped_stable" not in state["state"]["deadlines"]
+
+
+def test_idle_flicker_resets_stopped_off_dock_window():
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(1000), IDLE_OFF_JOB))
+    state, _ = step(state, SnapshotReceived(at(1030), MOWING))
+    assert "stopped_stable" not in state["state"]["deadlines"]
+    state, _ = step(state, SnapshotReceived(at(1040), IDLE_OFF_JOB))
+    state, _ = step(state, TimerFired(at(1070)))
+    assert run_status(state) == ["mowing"]
+    state, _ = step(state, TimerFired(at(1101)))
+    failed_with(state, "stopped_off_dock")
+
+
+def test_idle_with_job_active_is_not_stopped_off_dock():
+    state = mowing_state()
+    snap = replace(IDLE_OFF_JOB, job_active=True)
+    state, _ = step(state, SnapshotReceived(at(1000), snap))
+    state, _ = step(state, TimerFired(at(2000)))
+    assert run_status(state) == ["mowing"]
+
+
+def moving(progress=None, area=None, lat=None, activity=LawnMowerActivity.MOWING):
+    from custom_components.mowing_director.adapter import Movement, Position
+
+    pos = Position(lat, 0.0) if lat is not None else None
+    return replace(MOWING, activity=activity, movement=Movement(progress, area, pos))
+
+
+def test_entering_mowing_arms_stall_window_default_60_min():
+    state = mowing_state()
+    assert state["state"]["deadlines"]["stall"] == at(70 + 3600).isoformat()
+
+
+def test_stall_window_is_per_mower_via_env():
+    env = replace(ENV, stall_window=timedelta(minutes=20))
+    state, _ = step(initial_core_state(), AddPlan(at(0), *make_plan(), start=True), env)
+    state, _ = step(state, SnapshotReceived(at(0), DOCKED), env)
+    state, _ = step(state, TimerFired(at(61)), env)
+    state, _ = step(state, SnapshotReceived(at(70), MOWING), env)
+    assert state["state"]["deadlines"]["stall"] == at(70 + 1200).isoformat()
+
+
+def test_unchanged_movement_for_the_window_aborts_and_fails_stalled():
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(100), moving(progress=5)))
+    state, fx = step(state, TimerFired(at(100 + 3599)))
+    assert run_status(state) == ["mowing"]
+    state, fx = step(state, TimerFired(at(100 + 3601)))
+    failed_with(state, "stalled")
+    assert [e for e in fx if isinstance(e, AbortRunEffect)] == [AbortRunEffect("stalled")]
+    assert "stall" not in state["state"]["deadlines"]
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (moving(progress=5), moving(progress=6)),
+        (moving(area=1.0), moving(area=1.5)),
+        (moving(lat=10.0), moving(lat=10.0001)),
+    ],
+)
+def test_any_movement_indicator_change_resets_stall_clock(first, second):
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(100), first))
+    state, _ = step(state, SnapshotReceived(at(3000), second))
+    assert state["state"]["deadlines"]["stall"] == at(3000 + 3600).isoformat()
+    state, _ = step(state, TimerFired(at(3000 + 3599)))
+    assert run_status(state) == ["mowing"]
+
+
+def test_repeated_identical_snapshots_do_not_reset_stall_clock():
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(100), moving(progress=5)))
+    armed = state["state"]["deadlines"]["stall"]
+    state, _ = step(state, SnapshotReceived(at(2000), moving(progress=5)))
+    assert state["state"]["deadlines"]["stall"] == armed
+
+
+def test_returning_counts_for_the_stall_rule():
+    state = mowing_state()
+    ret = moving(progress=5, activity=LawnMowerActivity.RETURNING)
+    state, _ = step(state, SnapshotReceived(at(100), ret))
+    state, fx = step(state, SnapshotReceived(at(100 + 3601), ret))
+    failed_with(state, "stalled")
+
+
+def test_midjob_recharge_stays_mowing_and_never_stalls():
+    state = mowing_state()
+    charging = replace(
+        MOWING, activity=LawnMowerActivity.DOCKED, recharging=True, battery=20,
+    )
+    state, _ = step(state, SnapshotReceived(at(100), charging))
+    for t in (5000, 10000, 20000):
+        state, fx = step(state, SnapshotReceived(at(t), charging))
+        state, fx = step(state, TimerFired(at(t + 1)))
+        assert run_status(state) == ["mowing"]
+        no_abort(fx)
+    assert state["state"]["snapshot"]["recharging"] is True
+
+
+def test_mowing_with_progress_has_no_run_time_limit():
+    state = mowing_state()
+    for i in range(1, 11):
+        state, _ = step(state, SnapshotReceived(at(i * 3000), moving(progress=i)))
+        state, _ = step(state, TimerFired(at(i * 3000 + 1)))
+    assert run_status(state) == ["mowing"]
+
+
+def test_stall_deadline_due_but_fresh_movement_wins_over_the_clock():
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(100), moving(progress=5)))
+    state, _ = step(state, SnapshotReceived(at(3699), moving(progress=6)))
+    state, _ = step(state, TimerFired(at(3702)))
+    assert run_status(state) == ["mowing"]
