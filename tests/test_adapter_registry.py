@@ -1,9 +1,8 @@
 """Adapter registry tests (spec §3.1).
 
 The core obtains adapters from a registry keyed by source integration
-domain. Phase 1 registers only `mammotion` (the real adapter lands in
-tickets #8-#10), so the registry ships empty and the lookup helper is
-the contract.
+domain. Phase 1 registers `mammotion` (read-only observations from
+ticket #8), and the lookup helper is the contract.
 """
 
 from __future__ import annotations
@@ -15,9 +14,9 @@ from custom_components.mowing_director.adapters import (
 )
 
 
-def test_registry_is_empty_in_phase_one() -> None:
-    """Phase 1 ships no adapter implementations yet (spec §3.1)."""
-    assert ADAPTER_REGISTRY == {}
+def test_registry_has_mammotion() -> None:
+    """Phase 1 registers the `mammotion` adapter (spec §3.1)."""
+    assert set(ADAPTER_REGISTRY) == {"mammotion"}
 
 
 def test_unknown_domain_has_no_factory() -> None:

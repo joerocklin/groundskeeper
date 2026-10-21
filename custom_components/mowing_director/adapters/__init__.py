@@ -2,9 +2,9 @@
 
 A factory takes the HomeAssistant instance and the Mowing Director
 config entry and returns a live (unstarted) adapter for that Mower.
-Phase 1 registers only `mammotion`; the real Mammotion adapter lands in
-tickets #8-#10, so the registry ships empty here. `const.ADAPTER_DOMAINS`
-remains the eligibility list for the config flow.
+Phase 1 registers only `mammotion` (read-only observations from ticket
+#8; commands land in #10). `const.ADAPTER_DOMAINS` remains the
+eligibility list for the config flow.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from homeassistant.core import HomeAssistant
 
 from ..adapter import MowerAdapter
 
+from .mammotion import adapter_factory as _mammotion_factory
+
 if TYPE_CHECKING:
     # Imported for typing only: `__init__.py` will look adapters up at entry
     # setup, so a runtime import here would be circular.
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 
 type AdapterFactory = Callable[[HomeAssistant, MowingDirectorConfigEntry], MowerAdapter]
 
-ADAPTER_REGISTRY: dict[str, AdapterFactory] = {}
+ADAPTER_REGISTRY: dict[str, AdapterFactory] = {"mammotion": _mammotion_factory}
 
 
 def get_adapter_factory(source_domain: str) -> AdapterFactory | None:
