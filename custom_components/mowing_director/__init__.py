@@ -8,6 +8,7 @@ command, and the Store is simply released.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import voluptuous as vol
@@ -20,6 +21,7 @@ from homeassistant.helpers import device_registry as dr
 
 from .adapters import get_adapter_factory
 from .const import DOMAIN
+from .core import active_run, normalise_core_state
 from .housekeeping import async_detach_housekeeping
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
@@ -32,9 +34,11 @@ from .zone_sync import (
     async_get_zone_sync,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 type MowingDirectorConfigEntry = ConfigEntry[MowerStore]
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.BUTTON, Platform.SENSOR]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -116,8 +120,20 @@ async def async_unload_entry(
 async def async_remove_entry(
     hass: HomeAssistant, entry: MowingDirectorConfigEntry
 ) -> None:
-    """Delete the Mower's Store and the `.bak` files our migrations create."""
+    """Delete the Mower's Store and the `.bak` files our migrations create.
+
+    Deleting an entry while a Run is active sends `abort_run` first (spec
+    §2.4); HA's own delete confirmation dialog is the user's confirmation.
+    The entry is already unloaded, so the adapter is rebuilt from the device.
+    """
     store = MowerStore(hass, entry.entry_id)
+    if active_run(normalise_core_state(await store.async_data())["state"]) is not None:
+        adapter = _adapter_for(hass, entry)
+        if adapter is not None:
+            try:
+                await adapter.abort_run()
+            except Exception:  # noqa: BLE001 - removal must still finish
+                _LOGGER.exception("abort_run on entry removal raised")
     await store.async_remove()
 
     def _remove_backups() -> None:

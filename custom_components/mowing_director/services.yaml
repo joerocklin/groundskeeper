@@ -33,12 +33,30 @@ add_plan:
           max: 200
           unit_of_measurement: mm
     start:
+  fields:
+    config_entry_id:
       required: false
-      default: false
       selector:
-        boolean:
+        config_entry:
+          integration: mowing_director
 
-start:
+pause:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+stop_now:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+resume:
   fields:
     config_entry_id:
       required: false
@@ -47,6 +65,22 @@ start:
           integration: mowing_director
 
 cancel:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+retry_run:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+
+skip_plan:
   fields:
     config_entry_id:
       required: false
