@@ -213,3 +213,22 @@ def async_attach_housekeeping(
 def async_detach_housekeeping(hass: HomeAssistant, entry_id: str) -> None:
     """Forget a Mower's Housekeeping (unload)."""
     hass.data.get(DOMAIN, {}).get("housekeeping", {}).pop(entry_id, None)
+
+
+@callback
+def async_set_run_active_provider(
+    hass: HomeAssistant, entry_id: str, provider: Callable[[], bool]
+) -> None:
+    """Register how to ask whether a Run is `starting`/`mowing`/`on hold`.
+
+    The core registers this when it owns Run state; until then no Run is
+    ever active and a rebind is never refused.
+    """
+    hass.data.setdefault(DOMAIN, {}).setdefault("run_active", {})[entry_id] = provider
+
+
+@callback
+def async_run_active(hass: HomeAssistant, entry_id: str) -> bool:
+    """Whether a Run is in flight for this Mower (blocks a device rebind)."""
+    provider = hass.data.get(DOMAIN, {}).get("run_active", {}).get(entry_id)
+    return bool(provider and provider())

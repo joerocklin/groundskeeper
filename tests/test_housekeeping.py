@@ -15,6 +15,7 @@ from custom_components.mowing_director.housekeeping import (
     ISSUE_SOURCE_TOO_OLD,
     ISSUE_NATIVE_SCHEDULE,
     async_attach_housekeeping,
+    async_set_run_active_provider,
 )
 from tests.conftest import make_mammotion_mower
 from tests.fake_mower import FakeMower
@@ -189,3 +190,69 @@ async def test_issues_are_re_created_by_the_load_checks_after_restart(hass) -> N
         ir.async_delete_issue(hass, DOMAIN, issue_id)
     await hk.async_check_all()  # what a load runs
     assert all(_issue(hass, i) is not None for i in ids)
+
+
+async def _entry_for(hass, mower_dev):
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={CONF_DEVICE: mower_dev.id}, unique_id=mower_dev.id
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry
+
+
+async def _second_mower(hass, mammotion_entry):
+    dev_reg, ent_reg = dr.async_get(hass), er.async_get(hass)
+    dev = dev_reg.async_get_or_create(
+        config_entry_id=mammotion_entry.entry_id,
+        identifiers={("mammotion", "Luba-NEW")},
+        name="Luba-NEW",
+    )
+    ent_reg.async_get_or_create(
+        "lawn_mower", "mammotion", "Luba-NEW_mower",
+        config_entry=mammotion_entry, device_id=dev.id,
+    )
+    return dev
+
+
+async def test_reconfigure_rebinds_device_keeping_entry_and_store(hass) -> None:
+    m_entry, old, _ = await make_mammotion_mower(hass)
+    entry = await _entry_for(hass, old)
+    store_before = await entry.runtime_data.async_load()
+    store_before["config"]["marker"] = "kept"
+    await entry.runtime_data.async_save(store_before)
+    new = await _second_mower(hass, m_entry)
+    dr.async_get(hass).async_remove_device(old.id)
+
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["type"].value == "form"
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_DEVICE: new.id}
+    )
+    assert result["type"].value == "abort" and result["reason"] == "reconfigure_successful"
+    await hass.async_block_till_done()
+
+    assert entry.data[CONF_DEVICE] == new.id and entry.unique_id == new.id
+    assert (await entry.runtime_data.async_load())["config"]["marker"] == "kept"
+
+
+async def test_reconfigure_refused_while_a_run_is_active(hass) -> None:
+    m_entry, old, _ = await make_mammotion_mower(hass)
+    entry = await _entry_for(hass, old)
+    await _second_mower(hass, m_entry)
+    async_set_run_active_provider(hass, entry.entry_id, lambda: True)
+
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["type"].value == "abort" and result["reason"] == "run_active"
+    assert entry.data[CONF_DEVICE] == old.id
+
+
+async def test_reconfigure_does_not_offer_devices_bound_elsewhere(hass) -> None:
+    m_entry, old, _ = await make_mammotion_mower(hass)
+    entry = await _entry_for(hass, old)
+    other = await _second_mower(hass, m_entry)
+    await _entry_for(hass, other)
+
+    result = await entry.start_reconfigure_flow(hass)
+    assert result["type"].value == "abort" and result["reason"] == "no_supported_mower"
