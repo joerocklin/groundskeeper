@@ -22,10 +22,20 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import TemplateError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.event import async_call_later, async_track_point_in_utc_time
+from homeassistant.helpers.event import (
+    TrackTemplate,
+    async_call_later,
+    async_track_point_in_utc_time,
+    async_track_state_change_event,
+    async_track_template_result,
+)
+from homeassistant.helpers.template import Template, result_as_boolean
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
+from homeassistant.util import ulid as ulid_util
 
 from .prompts import async_prompt_strings, render_content
 from .adapter import (
@@ -36,8 +46,16 @@ from .adapter import (
     Unconfirmed,
 )
 from .const import DOMAIN, EVENT_TYPE
+from .checks import (
+    MODE_ENTITY,
+    TYPE_CUSTOM,
+    condition_result,
+    normalise_checks,
+    validate_record,
+)
 from .core import (
     AbortRunEffect,
+    ChecksEdited,
     AddPlan,
     AnswerPrompt,
     ArmTimer,
@@ -157,6 +175,7 @@ class Director:
         self._frozen_signals: list[AdapterSignal] = []
         self._wait_cancel: CALLBACK_TYPE | None = None
         self._cancel_started: CALLBACK_TYPE | None = None
+        self._check_unsubs: list[CALLBACK_TYPE] = []
 
     # -- read access ----------------------------------------------------------
 
@@ -197,8 +216,12 @@ class Director:
         from datetime import timedelta
 
         window = timedelta(seconds=cfg.get("start_window_s", 300))
+        checks = normalise_checks(cfg.get("checks"))
         return Env(
             zones=zones,
+            checks=tuple(checks),
+            custom_results=self._custom_results(checks),
+            tz=dt_util.get_default_time_zone(),
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
             start_window=window,
             stall_window=timedelta(seconds=cfg.get("stall_window_s", 3600)),
@@ -311,11 +334,13 @@ class Director:
         async with self._lock:
             for name, at in self.state["deadlines"].items():
                 self._arm(name, parse(at))
+        self._resubscribe_checks()
 
     @callback
     def async_unload(self) -> None:
         """Stop timers and observation. Never commands the Mower."""
         self._closed = True
+        self._unsubscribe_checks()
         for cancel in (self._wait_cancel, self._cancel_started, self._unsub_adapter):
             if cancel:
                 cancel()
@@ -323,6 +348,143 @@ class Director:
         for cancel in self._timers.values():
             cancel()
         self._timers.clear()
+
+    # -- Checks (spec §9) -----------------------------------------------------------
+
+    @property
+    def checks(self) -> list[dict[str, Any]]:
+        """Check records with the built-ins always present."""
+        return normalise_checks(self._data.get("config", {}).get("checks"))
+
+    def _custom_results(self, checks: list[dict[str, Any]]) -> dict[str, str | None]:
+        """Reason each enabled Custom Check fails, None when it passes."""
+        return {
+            rec["id"]: self._custom_result(rec["config"])
+            for rec in checks
+            if rec["type"] == TYPE_CUSTOM and rec["enabled"]
+        }
+
+    def _custom_result(self, cfg: dict[str, Any]) -> str | None:
+        if cfg["mode"] == MODE_ENTITY:
+            entity_id = er.async_resolve_entity_id(er.async_get(self.hass), cfg["entity"])
+            state = self.hass.states.get(entity_id) if entity_id else None
+            return condition_result(cfg, state.state if state else None)
+        try:
+            rendered = Template(cfg["template"], self.hass).async_render(parse_result=False)
+        except TemplateError:
+            return "render_error"
+        if rendered.strip().lower() in ("unavailable", "unknown"):
+            return rendered.strip().lower()
+        return None if result_as_boolean(rendered) else "condition_false"
+
+    def _unsubscribe_checks(self) -> None:
+        for cancel in self._check_unsubs:
+            cancel()
+        self._check_unsubs.clear()
+
+    @callback
+    def _resubscribe_checks(self) -> None:
+        """Re-evaluate when anything a Custom Check reads changes."""
+        self._unsubscribe_checks()
+        if self._closed:
+            return
+        registry = er.async_get(self.hass)
+        entities: list[str] = []
+        templates: list[TrackTemplate] = []
+        for rec in self.checks:
+            if rec["type"] != TYPE_CUSTOM or not rec["enabled"]:
+                continue
+            cfg = rec["config"]
+            if cfg["mode"] == MODE_ENTITY:
+                if (eid := er.async_resolve_entity_id(registry, cfg["entity"])) is not None:
+                    entities.append(eid)
+            else:
+                templates.append(TrackTemplate(Template(cfg["template"], self.hass), None))
+
+        @callback
+        def _changed(*_args: Any) -> None:
+            self.submit(TimerFired)
+
+        if entities:
+            self._check_unsubs.append(
+                async_track_state_change_event(self.hass, entities, _changed)
+            )
+        if templates:
+            info = async_track_template_result(self.hass, templates, _changed)
+            self._check_unsubs.append(info.async_remove)
+
+        @callback
+        def _registry_changed(event: Any) -> None:
+            if event.data.get("action") == "update":
+                self._resubscribe_checks()
+                self.submit(TimerFired)
+
+        self._check_unsubs.append(
+            self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, _registry_changed)
+        )
+
+    def _registry_id(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        """Picked entities are stored as registry ids, entity_id as fallback."""
+        if cfg.get("mode") == MODE_ENTITY and cfg.get("entity"):
+            entry = er.async_get(self.hass).async_get(cfg["entity"])
+            if entry is not None:
+                return {**cfg, "entity": entry.id}
+        return cfg
+
+    def _validate_check(self, rec: dict[str, Any]) -> None:
+        validate_record(rec)
+        if rec["type"] == TYPE_CUSTOM and rec["config"]["mode"] == "template":
+            try:
+                Template(rec["config"]["template"], self.hass).ensure_valid()
+            except TemplateError as err:
+                raise ValueError(f"Template error: {err}") from err
+
+    async def _checks_saved(self, checks: list[dict[str, Any]], check_id: str) -> None:
+        self._data.setdefault("config", {})["checks"] = checks
+        await self._store.async_save(self._data)
+        self._resubscribe_checks()
+        await self.dispatch(lambda now: ChecksEdited(now, (check_id,)))
+        for listener in list(self._listeners):
+            listener()
+
+    async def async_create_check(self, fields: dict[str, Any]) -> dict[str, Any]:
+        """Add a Custom Check; raises `ValueError` when it cannot be saved."""
+        rec = {
+            "id": self.entry_new_id(),
+            "type": TYPE_CUSTOM,
+            "name": fields["name"],
+            "enabled": fields.get("enabled", True),
+            "config": self._registry_id(dict(fields["config"])),
+            "timeout_s": fields.get("timeout_s"),
+            "policy": fields.get("policy", "notify"),
+        }
+        self._validate_check(rec)
+        await self._checks_saved([*self.checks, rec], rec["id"])
+        return rec
+
+    async def async_update_check(self, check_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        """Edit a Check; `KeyError` if unknown, `ValueError` if it cannot be saved."""
+        checks = self.checks
+        rec = next(r for r in checks if r["id"] == check_id)
+        if rec["type"] in ("mower_ready", "zone_ready"):
+            if set(changes) - {"name"} or changes.get("name", rec["name"]) != rec["name"]:
+                raise ValueError("Mower ready and Zone ready are built in and always on")
+        if "config" in changes:
+            changes = {**changes, "config": self._registry_id(dict(changes["config"]))}
+        rec.update(changes)
+        self._validate_check(rec)
+        await self._checks_saved(checks, check_id)
+        return rec
+
+    async def async_delete_check(self, check_id: str) -> None:
+        checks = self.checks
+        rec = next(r for r in checks if r["id"] == check_id)
+        if rec["type"] != TYPE_CUSTOM:
+            raise ValueError("Only Custom Checks can be deleted")
+        await self._checks_saved([r for r in checks if r["id"] != check_id], check_id)
+
+    def entry_new_id(self) -> str:
+        return ulid_util.ulid()
 
     # -- inputs ------------------------------------------------------------------
 
