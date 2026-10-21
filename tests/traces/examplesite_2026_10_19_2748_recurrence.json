@@ -1,0 +1,77 @@
+{
+  "source": "HAND-BUILT from research records, not a raw REST dump. Facts come from private research notes section 5 (ExampleSite history 2026-10-19, read-only REST) and section 1.2.",
+  "scenario": "2026-10-19: the 2748 lift-motor fault recurs at 18:59:58Z; a rain self_check span 18:09-18:35Z after the mower was rinsed; a non_working_hours self_check span 04:00-12:05Z; the non_work_hours sensor flaps between two device messages many times a day and must never drive self_check.",
+  "device_name": "Luba-SERIAL1",
+  "notes": [
+    "sensor.garden_example_mower_self_check = non_working_hours from 04:00:28Z to 12:05:28Z.",
+    "Pick-up and rinse: self_check stop_button, then tilted, then emergency_stop at 18:06Z.",
+    "binary_sensor rain_detected on 18:09:38Z-18:35:06Z with self_check rain for the same span; the mower was docked; switch rain_detection was on all day.",
+    "Latest notification payload: code 2748 'Angle position sensor of lift motor disconnected' at 2026-10-19T18:59:58Z, plus 5004.",
+    "sensor.example_mower_non_work_hours flips between '12:00am - 08:00am' and a sunrise-sunset value within milliseconds, many times a day."
+  ],
+  "steps": [
+    {
+      "at": "2026-10-19T04:00:28Z",
+      "note": "device non-work window starts blocking a start",
+      "states": {
+        "sensor:self_check": ["non_working_hours", {}],
+        "lawn_mower:mower": ["docked", {}],
+        "sensor:activity_mode": ["MODE_READY", {}],
+        "binary_sensor:charging": ["on", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T08:00:01Z",
+      "note": "non_work_hours sensor flap 1 (unreliable field, two device messages)",
+      "states": {
+        "sensor:non_work_hours": ["12:00am - 08:00am", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T08:00:01Z",
+      "note": "non_work_hours sensor flap 2, milliseconds later",
+      "states": {
+        "sensor:non_work_hours": ["07:46am - 06:59pm", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T12:05:28Z",
+      "note": "window ends; self_check clears to normal",
+      "states": {
+        "sensor:self_check": ["normal", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T18:06:00Z",
+      "note": "user picks the mower up: stop_button -> tilted -> emergency_stop",
+      "states": {
+        "sensor:self_check": ["emergency_stop", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T18:09:38Z",
+      "note": "after the rinse the rain sensor reads wet",
+      "states": {
+        "sensor:self_check": ["rain", {}],
+        "binary_sensor:rain_detected": ["on", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T18:35:06Z",
+      "note": "dry again",
+      "states": {
+        "sensor:self_check": ["normal", {}],
+        "binary_sensor:rain_detected": ["off", {}]
+      }
+    },
+    {
+      "at": "2026-10-19T18:59:58Z",
+      "note": "the lift-motor fault recurs: error_1 slot 0 becomes 2748",
+      "states": {
+        "sensor:error_1_code": ["2748", {}],
+        "sensor:error_1_message": ["Angle position sensor of lift motor disconnected", {}],
+        "sensor:error_1_time": ["2026-10-19T18:59:58+00:00", {}]
+      }
+    }
+  ]
+}

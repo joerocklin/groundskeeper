@@ -1,0 +1,37 @@
+{
+  "source": "HAND-BUILT from research records, not a raw REST dump. ExampleSite REST credentials are not available on this machine. Facts come from private research notes (the 10-18 step-down attempt) and private research notes sections 3 and 9.",
+  "scenario": "2026-10-18 step-down run: start_mow pass 1 at 79 mm returned HTTP 500 command_unconfirmed, the mower stayed docked, and the height readback never moved off 3.1496 in (80 mm).",
+  "device_name": "Luba-SERIAL1",
+  "notes": [
+    "set_blade_height 79 mm 500'd six times of six (lift-motor angle fault 2748 blocks the knife reply).",
+    "start_mow returned 200 with response [] at 21:43:16; startup polls every 20 s read state=docked progress=0.",
+    "The readback sensor reports inches on ExampleSite (live inventory: 3.1496 in = 80 mm)."
+  ],
+  "steps": [
+    {
+      "at": "2026-10-18T21:43:16+00:00",
+      "note": "start_mow pass 1 accepted (200, response []); mower still docked",
+      "states": {
+        "lawn_mower:mower": ["docked", {}],
+        "sensor:activity_mode": ["MODE_READY", {}],
+        "sensor:progress": ["0", {}],
+        "sensor:battery_percent": ["100", {}]
+      }
+    },
+    {
+      "at": "2026-10-18T21:43:36+00:00",
+      "note": "startup poll 1: docked, progress 0",
+      "states": {}
+    },
+    {
+      "at": "2026-10-18T21:44:16+00:00",
+      "note": "startup poll 3: still docked, progress 0",
+      "states": {}
+    },
+    {
+      "at": "2026-10-18T21:45:56+00:00",
+      "note": "startup poll 8: still docked; the job never started",
+      "states": {}
+    }
+  ]
+}
