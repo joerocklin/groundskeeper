@@ -36,6 +36,7 @@ from .schedule_ops import (
     edit_run,
     move_run,
     rederive,
+    reroll_angles,
     remove_plan,
 )
 from .zone_sync import async_get_zone_sync
@@ -90,6 +91,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_move_run,
         ws_remove_plan,
         ws_rederive_plan,
+        ws_reroll_angles,
         ws_get_run_settings,
         ws_set_mower_run_settings,
         ws_set_zone_run_settings,
@@ -564,6 +566,17 @@ async def ws_remove_plan(hass, connection, msg) -> None:
 async def ws_rederive_plan(hass, connection, msg) -> None:
     """Re-derive a not-started Plan from current defaults (spec §5.1)."""
     await _schedule_call(hass, connection, msg, lambda d: rederive(d, msg["plan_id"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/reroll_angles", vol.Required("entry_id"): str,
+     vol.Required("plan_id"): str}
+)
+@websocket_api.async_response
+async def ws_reroll_angles(hass, connection, msg) -> None:
+    """Re-roll angles: redraw a not-started Plan's angles (spec §5.5)."""
+    await _schedule_call(hass, connection, msg, lambda d: reroll_angles(d, msg["plan_id"]))
 
 
 # -- Default Run settings, Max cut and the Finishing Run override (spec §5.1, §5.6) --

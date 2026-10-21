@@ -62,6 +62,7 @@ from .core import (
     EditRun,
     MoveRun,
     RemovePlan,
+    RedrawAngles,
     ReplacePlan,
     ArmTimer,
     CancelSchedule,
@@ -612,6 +613,15 @@ class Director:
         self, plan: dict[str, Any], runs: list[dict[str, Any]]
     ) -> None:
         await self.dispatch(lambda now: ReplacePlan(now, plan, runs))
+
+    async def async_redraw_angles(
+        self,
+        plan_id: str,
+        runs: list[dict[str, Any]],
+        note: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        await self.dispatch(lambda now: RedrawAngles(now, plan_id, runs, note, warnings))
 
     async def async_edit_config(self, edit: Callable[[dict[str, Any]], None]) -> None:
         """Apply `edit` to the Store `config` and save; never reloads the entry."""

@@ -209,6 +209,18 @@ class ReplacePlan:
 
 
 @dataclass(frozen=True)
+class RedrawAngles:
+    """Replace the angles (and angle-draw records) of pending Runs: Re-roll, or
+    a provisional redraw when the Zone's range arrives (spec §5.5)."""
+
+    now: datetime
+    plan_id: str
+    runs: list[dict[str, Any]]  # each: id, angle_deg, angle_draw
+    note: str | None = None
+    warnings: list[str] | None = None
+
+
+@dataclass(frozen=True)
 class StartSchedule:
     """`start` service / button: `idle`/`paused` to `waiting`."""
 
@@ -365,6 +377,7 @@ type CoreInput = (
     | MoveRun
     | RemovePlan
     | ReplacePlan
+    | RedrawAngles
     | StartSchedule
     | PauseSchedule
     | StopNow
@@ -777,6 +790,8 @@ class _Machine:
                 self._remove_plan(event)
             case ReplacePlan():
                 self._replace_plan(event)
+            case RedrawAngles():
+                self._redraw_angles(event)
             case StartSchedule():
                 self._start_schedule("user_start")
             case PauseSchedule():
@@ -1027,6 +1042,19 @@ class _Machine:
         self.s["runs"] = [r for r in self.s["runs"] if r["plan_id"] != plan_id]
         self.s["runs"][at:at] = copy.deepcopy(event.runs)
         self.s["plans"][plan_id] = copy.deepcopy(event.plan)
+
+    def _redraw_angles(self, event: RedrawAngles) -> None:
+        by_id = {r["id"]: r for r in event.runs}
+        for run in self.s["runs"]:
+            new = by_id.get(run["id"])
+            if new is not None and run["status"] == RunStatus.PENDING:
+                run["angle_deg"] = new["angle_deg"]
+                run["angle_draw"] = copy.deepcopy(new["angle_draw"])
+                run.pop("angle_edited", None)
+        plan = self.s["plans"].get(event.plan_id)
+        if plan is not None and event.note:
+            plan["note"] = event.note
+            plan["angle_warnings"] = list(event.warnings or [])
 
     def _start_schedule(self, reason: str) -> None:
         if self.status not in (ScheduleStatus.IDLE, ScheduleStatus.PAUSED):

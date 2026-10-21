@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .adapter import Limits
-from .angle_draw import DEFAULT_CROSSING, DEFAULT_SEPARATION
+from .angle_draw import DEFAULT_CROSSING, DEFAULT_FINISH_JITTER, DEFAULT_SEPARATION
 from .angle_range import Basis
 
 BASE_ANGLE_MODES = ("fixed", "random")
@@ -30,6 +30,7 @@ SCALAR_KEYS = (
     "min_separation_deg",
     "base_angle_mode",
     "base_angle_deg",
+    "finish_jitter_deg",
 )
 # Stored on each Run's `settings` (the angle-mode keys live on the Plan).
 RUN_KEYS = (
@@ -62,6 +63,9 @@ def mower_run_defaults(limits: Limits, config: Mapping[str, Any]) -> dict[str, A
         "min_separation_deg": o.get("min_separation_deg", DEFAULT_SEPARATION),
         "base_angle_mode": o.get("base_angle_mode", "fixed"),
         "base_angle_deg": o.get("base_angle_deg", 0.0),
+        "finish_jitter_deg": o.get(
+            "finish_jitter_deg", config.get("finish_jitter", DEFAULT_FINISH_JITTER)
+        ),
         "extras": {f.key: f.default for f in limits.extras_schema}
         | dict(o.get("extras") or {}),
     }
@@ -122,7 +126,7 @@ def validate_overrides(limits: Limits, overrides: Mapping[str, Any]) -> None:
         elif key == "perimeter_laps":
             if int(value) != value or value < 0:
                 raise SettingsError("perimeter_laps must be a whole number, 0 or more")
-        elif key in ("crossing_angle_deg", "min_separation_deg"):
+        elif key in ("crossing_angle_deg", "min_separation_deg", "finish_jitter_deg"):
             if not 0 <= value <= 90:
                 raise SettingsError(f"{key} must be between 0 and 90")
         elif key == "base_angle_mode":
