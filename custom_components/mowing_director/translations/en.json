@@ -233,6 +233,90 @@
     },
     "prompt_reason_ended_by_user": {
       "message": "You ended the Run."
+    },
+    "prompt_action_retry": {
+      "message": "Retry"
+    },
+    "prompt_action_skip_plan": {
+      "message": "Skip Plan"
+    },
+    "prompt_action_abort": {
+      "message": "Abort"
+    },
+    "prompt_action_resume": {
+      "message": "Resume"
+    },
+    "prompt_action_end_run": {
+      "message": "End Run"
+    },
+    "prompt_action_no": {
+      "message": "No"
+    },
+    "prompt_action_yes": {
+      "message": "Yes"
+    },
+    "prompt_action_yes_done_today": {
+      "message": "Yes, done today"
+    },
+    "prompt_action_opened": {
+      "message": "I opened it"
+    },
+    "prompt_action_closed": {
+      "message": "Closed"
+    },
+    "prompt_action_dismiss": {
+      "message": "Dismiss"
+    },
+    "prompt_channel_run_failed": {
+      "message": "Mowing Director: Run failed"
+    },
+    "prompt_channel_run_on_hold": {
+      "message": "Mowing Director: Run on hold"
+    },
+    "prompt_channel_check_waits": {
+      "message": "Mowing Director: Check waits"
+    },
+    "prompt_channel_rain_question": {
+      "message": "Mowing Director: Is it raining?"
+    },
+    "prompt_channel_gate": {
+      "message": "Mowing Director: Gates"
+    },
+    "prompt_channel_anomaly": {
+      "message": "Mowing Director: Anomalies"
+    },
+    "prompt_channel_run_started": {
+      "message": "Mowing Director: Run started"
+    },
+    "prompt_channel_run_done": {
+      "message": "Mowing Director: Run done"
+    },
+    "prompt_channel_schedule_completed": {
+      "message": "Mowing Director: Schedule completed"
+    },
+    "prompt_headline_run_started": {
+      "message": "Run started"
+    },
+    "prompt_headline_run_done": {
+      "message": "Run done"
+    },
+    "prompt_headline_schedule_completed": {
+      "message": "Schedule completed"
+    },
+    "prompt_summary_plans": {
+      "message": "Plans: {plans}"
+    },
+    "prompt_summary_runs": {
+      "message": "Runs done: {done}, skipped: {skipped}"
+    },
+    "prompt_summary_time": {
+      "message": "Mowing time: {minutes} min"
+    },
+    "prompt_summary_anomalies": {
+      "message": "Anomalies: {count}"
+    },
+    "prompt_open_panel": {
+      "message": "Open Mowing Director"
     }
   },
   "entity": {

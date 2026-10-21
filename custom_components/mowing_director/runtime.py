@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -27,6 +27,7 @@ from homeassistant.helpers.event import async_call_later, async_track_point_in_u
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
+from .notifier import Notifier
 from .prompts import async_prompt_strings, render_content
 from .adapter import (
     AdapterSignal,
@@ -61,6 +62,8 @@ from .core import (
     RetryRun,
     SkipPlan,
     CoreInput,
+    DEFAULT_WORK_END,
+    DEFAULT_WORK_START,
     EmitEvent,
     Reconcile,
     Env,
@@ -82,6 +85,14 @@ _LOGGER = logging.getLogger(__name__)
 
 DELAYED_SAVE_S = 60  # spec §14.4
 WAIT_FOR_MOWER_S = 300  # spec §8 item 2: max wait for the first usable snapshot
+
+
+def _parse_hhmm(value: Any, default: time) -> time:
+    try:
+        hour, minute = str(value).split(":")
+        return time(int(hour) % 24, int(minute))
+    except (ValueError, TypeError):
+        return default
 
 
 def snapshot_usable(snapshot: Snapshot) -> bool:
@@ -151,6 +162,7 @@ class Director:
         self.entry = entry
         self.adapter = adapter
         self._store = store
+        self.notifier = Notifier(self)
         self._data: dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._timers: dict[str, CALLBACK_TYPE] = {}
@@ -203,7 +215,12 @@ class Director:
         from datetime import timedelta
 
         window = timedelta(seconds=cfg.get("start_window_s", 300))
+        work_start = _parse_hhmm(cfg.get("work_hours_start"), DEFAULT_WORK_START)
+        work_end = _parse_hhmm(cfg.get("work_hours_end"), DEFAULT_WORK_END)
         return Env(
+            work_start=work_start,
+            work_end=work_end,
+            tz=dt_util.get_default_time_zone(),
             zones=zones,
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
             start_window=window,
@@ -371,6 +388,7 @@ class Director:
             match effect:
                 case EmitEvent():
                     self._fire(effect)
+                    await self.notifier.async_handle(effect.type, effect.payload)
                 case ArmTimer():
                     self._arm(effect.name, effect.at)
                 case CancelTimer():
@@ -403,6 +421,10 @@ class Director:
         except Exception:  # noqa: BLE001 - adapters should not raise; never re-issue
             _LOGGER.exception("Mower command raised; treating as unconfirmed")
             return Unconfirmed()
+
+    def fire_event(self, type_: str, **payload: Any) -> None:
+        """Fire a `mowing_director_event` from outside the reducer."""
+        self._fire(EmitEvent(type_, payload))
 
     def _fire(self, effect: EmitEvent) -> None:
         payload = {
@@ -512,9 +534,7 @@ class Director:
         `prompt_ignored` path (spec §12.5). Returns whether it answered."""
         prompt = self.find_prompt(prompt_id)
         if prompt is None or action not in prompt["actions"]:
-            self._fire(
-                EmitEvent("prompt_ignored", {"prompt_id": prompt_id, "action": action})
-            )
+            self.fire_event("prompt_ignored", prompt_id=prompt_id, action=action)
             return False
         await self.async_answer_prompt(prompt_id, action)
         return True
@@ -532,6 +552,11 @@ class Director:
 def async_get_director(hass: HomeAssistant, entry_id: str) -> Director | None:
     """The running Director for a Mower entry, if any."""
     return hass.data.get(DOMAIN, {}).get("director", {}).get(entry_id)
+
+
+@callback
+def async_all_directors(hass: HomeAssistant) -> list[Director]:
+    return list(hass.data.get(DOMAIN, {}).get("director", {}).values())
 
 
 @callback
