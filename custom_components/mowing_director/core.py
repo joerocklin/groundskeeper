@@ -28,7 +28,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from enum import StrEnum
 from typing import Any
 
@@ -82,6 +82,9 @@ RESTART_WINDOWS = (
     DEADLINE_CONTACT_LOST,
 )
 PROMPT_REMINDER_AFTER = timedelta(hours=1)  # spec §12.4: first reminder at +1 h
+DEADLINE_PROMPT_REMINDER = "prompt_reminder"  # earliest due Prompt reminder
+DEFAULT_WORK_START = time(8, 0)  # spec §19: Work hours 08:00-00:00 daily
+DEFAULT_WORK_END = time(0, 0)  # 00:00 means midnight, the end of the day
 
 PROMPT_RUN_FAILED = "run_failed"  # spec §12.1: Retry / Skip Plan / Abort
 ACTION_RETRY = "retry"
@@ -461,6 +464,10 @@ class Env:
     height_readback_resolution_mm: int | None = None
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
+    # Work hours window for reminders (spec §12.4), in the HA time zone.
+    work_start: time = DEFAULT_WORK_START
+    work_end: time = DEFAULT_WORK_END
+    tz: tzinfo = timezone.utc
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +707,7 @@ def reduce(core_state: Mapping[str, Any], event: CoreInput, env: Env) -> Reducti
     """`(state, input) -> (new state, effects)`; never mutates its argument."""
     machine = _Machine(copy.deepcopy(dict(core_state)), env, event.now)
     machine.apply(event)
+    machine.sync_reminder_deadline()
     return Reduction(machine.core, tuple(machine.effects))
 
 
@@ -766,6 +774,7 @@ class _Machine:
                 self._command_outcome(event)
             case TimerFired():
                 self._evaluate()
+                self._fire_due_reminders()
             case Reconcile():
                 self._reconcile(event)
 
@@ -799,6 +808,8 @@ class _Machine:
         before = sched["status"]
         sched["status"] = status.value
         sched["reason"] = reason
+        if before == ScheduleStatus.IDLE and status != ScheduleStatus.IDLE:
+            sched["started_at"] = iso(self.now)  # anchors the completion summary
         if before != status.value:
             self._emit(
                 "schedule_status_changed",
@@ -1073,7 +1084,7 @@ class _Machine:
             job_check = self._reconcile_superseded(run, snapshot, event.signals)
         self._rearm_height_verify()
         self._evaluate()
-        self._fire_expired_reminders()
+        self._fire_due_reminders()
         run = active_run(self.s)
         if run is None or run["status"] != RunStatus.ON_HOLD:
             self._answer_kind(PROMPT_RUN_ON_HOLD, "reconciled")
@@ -1149,12 +1160,40 @@ class _Machine:
         verify["ignore_until"] = None
         self._arm(DEADLINE_HEIGHT_VERIFY, self.now + self.env.height_verify_window)
 
-    def _fire_expired_reminders(self) -> None:
-        """A reminder that fell due during downtime fires once on load."""
+    def _in_work_hours(self, moment: datetime) -> bool:
+        env = self.env
+        at = moment.astimezone(env.tz).time()
+        if env.work_end == time(0, 0):
+            return at >= env.work_start
+        if env.work_start < env.work_end:
+            return env.work_start <= at < env.work_end
+        return at >= env.work_start or at < env.work_end
+
+    def _next_work_open(self, moment: datetime) -> datetime:
+        """The next moment the Work hours window opens, strictly after `moment`."""
+        local = moment.astimezone(self.env.tz)
+        day = local.date()
+        for _ in range(3):
+            opens = datetime.combine(day, self.env.work_start, tzinfo=self.env.tz)
+            if opens > local:
+                return opens.astimezone(timezone.utc)
+            day += timedelta(days=1)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _fire_due_reminders(self) -> None:
+        """Send each due reminder once; overnight ones wait for the morning.
+
+        After a reminder (or a deferral) the next one is the next Work hours
+        opening, so a Prompt left alone gets one reminder each morning
+        (spec §12.4). A reminder that fell due during downtime therefore also
+        fires once on load, not once per missed slot (spec §12.11).
+        """
         for prompt in self.s["prompts"]:
             due = prompt.get("next_reminder_at")
-            if due is not None and parse(due) <= self.now:
-                prompt["next_reminder_at"] = None  # later reminders: Notifications
+            if due is None or parse(due) > self.now:
+                continue
+            prompt["next_reminder_at"] = iso(self._next_work_open(self.now))
+            if self._in_work_hours(self.now):
                 self._emit(
                     "prompt_reminder",
                     prompt_id=prompt["prompt_id"],
@@ -1164,6 +1203,19 @@ class _Machine:
                     plan_id=prompt["context"].get("plan_id"),
                     run_id=prompt["context"].get("run_id"),
                 )
+
+    def sync_reminder_deadline(self) -> None:
+        """Keep one persisted deadline on the earliest pending reminder."""
+        dues = [
+            parse(p["next_reminder_at"])
+            for p in self.s["prompts"]
+            if p.get("next_reminder_at")
+        ]
+        current = self.s["deadlines"].get(DEADLINE_PROMPT_REMINDER)
+        if not dues:
+            self._cancel_deadline(DEADLINE_PROMPT_REMINDER)
+        elif current != iso(min(dues)):
+            self._arm(DEADLINE_PROMPT_REMINDER, min(dues))
 
     # -- Checks and starting a Run ----------------------------------------
 
@@ -1660,7 +1712,34 @@ class _Machine:
             self.s["schedule"]["pause_requested"] = False
             plan_ids = sorted({r["plan_id"] for r in self.h["runs"][-50:]})
             self._set_schedule(ScheduleStatus.IDLE, "schedule_completed")
-            self._emit("schedule_completed", plan_id=run["plan_id"], plan_ids=plan_ids)
+            self._emit(
+                "schedule_completed",
+                plan_id=run["plan_id"],
+                plan_ids=plan_ids,
+                summary=self._schedule_summary(),
+            )
+
+    def _schedule_summary(self) -> dict[str, Any]:
+        """What the finished Schedule did (spec §12.9), from archived Runs."""
+        began = self.s["schedule"].get("started_at")
+        runs = [
+            r
+            for r in self.h["runs"]
+            if began is None or (r.get("finished_at") or "") >= began
+        ]
+        done = [r for r in runs if r["status"] == RunStatus.DONE]
+        mowing_s = sum(
+            (parse(r["finished_at"]) - parse(r["started_at"])).total_seconds()
+            for r in done
+            if r.get("started_at") and r.get("finished_at")
+        )
+        return {
+            "plans": len({r["plan_id"] for r in runs}),
+            "runs_done": len(done),
+            "runs_skipped": sum(1 for r in runs if r["status"] == RunStatus.SKIPPED),
+            "mowing_s": round(mowing_s),
+            "anomalies": len(self.s.get("schedule_anomalies", [])),
+        }
 
     def _fail_run(self, run: dict[str, Any], reason: str, *, abort: bool) -> None:
         """Run `failed`: it stays in `state`; the Schedule pauses for a decision."""
