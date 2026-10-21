@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_CONFIG_ENTRY_ID, CONF_DEVICE, Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
@@ -26,6 +27,7 @@ from .housekeeping import async_detach_housekeeping
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
 from .runtime import Director, async_register_director, async_unregister_director
+from .schedule_ops import redraw_provisional
 from .services import async_register_services, target_entry
 from .store import MowerStore
 from .zone_sync import (
@@ -90,10 +92,19 @@ async def async_setup_entry(
 
     adapter = _adapter_for(hass, entry)
     if adapter is not None:
-        async_attach_zone_sync(hass, entry.entry_id, adapter, store)
+        sync = async_attach_zone_sync(hass, entry.entry_id, adapter, store)
         director = Director(hass, entry, adapter, store)
         async_register_director(hass, director)
         await director.async_load()
+
+        @callback
+        def _range_changed(zone_id: str, _angle_range: Any) -> None:
+            """A Zone's range arrived or changed: redraw provisional angles."""
+            entry.async_create_background_task(
+                hass, redraw_provisional(director, zone_id), "mowing_director_redraw"
+            )
+
+        entry.async_on_unload(sync.subscribe_range_changes(_range_changed))
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
