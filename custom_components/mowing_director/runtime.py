@@ -48,6 +48,9 @@ from .core import (
     SkipPlan,
     StopNow,
     CommandOutcome,
+    EndRun,
+    ResumeRun,
+    ResumeRunEffect,
     RetryRun,
     SkipPlan,
     CoreInput,
@@ -271,6 +274,13 @@ class Director:
                     )
                 case AbortRunEffect():
                     await self._command(self.adapter.abort_run())
+                case ResumeRunEffect():
+                    result = await self._command(self.adapter.resume_run())
+                    follow_ups.append(
+                        lambda now, r=result, i=effect.run_id: CommandOutcome(
+                            now, i, "resume_run", r
+                        )
+                    )
         return follow_ups
 
     async def _command(self, awaitable: Any) -> CommandResult:
@@ -327,6 +337,12 @@ class Director:
 
     async def async_skip_plan(self) -> None:
         await self.dispatch(SkipPlan)
+
+    async def async_resume_run(self) -> None:
+        await self.dispatch(ResumeRun)
+
+    async def async_end_run(self) -> None:
+        await self.dispatch(EndRun)
 
     # -- Prompts (spec §12) -----------------------------------------------------
 

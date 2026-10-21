@@ -150,7 +150,7 @@
       "message": "The Mower stopped away from its dock."
     },
     "prompt_reason_height_not_reached": {
-      "message": "The blade did not reach the commanded height."
+      "message": "Blade didn't reach {height} mm"
     },
     "prompt_reason_stalled": {
       "message": "The Mower stopped making progress."
@@ -163,9 +163,6 @@
     },
     "prompt_reason_superseded": {
       "message": "Another job started on the Mower."
-    },
-    "prompt_reason_height_not_reached": {
-      "message": "Blade didn't reach {height} mm"
     },
     "prompt_not_pending": {
       "message": "That Prompt is no longer waiting for an answer."
@@ -184,6 +181,24 @@
     },
     "failure_needs_answer": {
       "message": "A Run failed. Answer with Retry, Skip Plan or Cancel instead."
+    },
+    "no_hold_to_answer": {
+      "message": "No Run is on hold."
+    },
+    "prompt_headline_run_on_hold": {
+      "message": "Run on hold"
+    },
+    "prompt_reason_external_pause": {
+      "message": "The Mower was paused from outside Mowing Director."
+    },
+    "prompt_reason_recharge_stall": {
+      "message": "The Mower's battery has not risen for an hour of recharging."
+    },
+    "prompt_reason_contact_lost": {
+      "message": "Lost contact with the Mower."
+    },
+    "prompt_reason_ended_by_user": {
+      "message": "You ended the Run."
     }
   },
   "entity": {
@@ -354,6 +369,26 @@
     "resume": {
       "name": "Resume",
       "description": "Resume a paused Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "resume_run": {
+      "name": "Resume Run",
+      "description": "Answer an on-hold Run with Resume: ask the Mower to continue. The Run stays on hold until the cause clears.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "end_run": {
+      "name": "End Run",
+      "description": "Answer an on-hold Run with End Run: abort the job and fail the Run.",
       "fields": {
         "config_entry_id": {
           "name": "Mower",

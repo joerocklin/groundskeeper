@@ -180,6 +180,8 @@ def async_register_services(hass: HomeAssistant) -> None:
         ("cancel", controls.async_cancel),
         ("retry_run", controls.async_retry_run),
         ("skip_plan", controls.async_skip_plan),
+        ("resume_run", controls.async_resume_run),
+        ("end_run", controls.async_end_run),
     ):
         hass.services.async_register(
             DOMAIN, name, control(action), schema=vol.Schema(_ENTRY)
