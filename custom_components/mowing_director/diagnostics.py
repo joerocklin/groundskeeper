@@ -1,7 +1,7 @@
 """Diagnostics download for one Mower (issue #8, spec §15).
 
 Snapshot + limits + version metadata with the device serial redacted.
-Debug recording itself is a later ticket; #8 emits the read-only view.
+Carries the debug recording summary only (spec §15.5).
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from homeassistant.helpers import device_registry as dr
 
 from .adapter import Limits, MowerAdapter
 from .adapters import get_adapter_factory
+from .recording import async_get_recording, redact
 
 
 async def async_get_config_entry_diagnostics(
@@ -46,6 +47,10 @@ async def async_get_config_entry_diagnostics(
     finally:
         await adapter.async_close()
 
+    rec = async_get_recording(hass, entry.entry_id)
+    data["debug_recording"] = (
+        await hass.async_add_executor_job(rec.summary) if rec else {"enabled": False}
+    )
     return cast(dict[str, object], _redact(data, adapter.redact))
 
 
@@ -76,20 +81,4 @@ def _limits_payload(limits: Limits) -> dict[str, object]:
     return payload
 
 
-def _redact(data: object, terms: list[str]) -> object:
-    """Replace every serial-bearing term inside string values.
-
-    `homeassistant.helpers.redact.async_redact_data` masks by key; the
-    serial also appears inside values (device names, entity ids), so the
-    adapter's term list drives a substring pass instead.
-    """
-    if isinstance(data, str):
-        for term in terms:
-            if term:
-                data = data.replace(term, "**REDACTED**")
-        return data
-    if isinstance(data, dict):
-        return {key: _redact(value, terms) for key, value in data.items()}
-    if isinstance(data, list):
-        return [_redact(value, terms) for value in data]
-    return data
+_redact = redact

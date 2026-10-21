@@ -25,9 +25,10 @@ from .const import DOMAIN
 from .core import active_run, normalise_core_state
 from .housekeeping import async_detach_housekeeping
 from .notifier import ACTION_EVENT, async_handle_action_event
+from .recording import async_notify_files_kept
 from .panel import async_register_panel, async_remove_panel
 from .websocket_api import async_register_commands
-from .runtime import Director, async_register_director, async_unregister_director
+from .runtime import Director, async_get_director, async_register_director, async_unregister_director
 from .schedule_ops import redraw_provisional
 from .services import async_register_services, target_entry
 from .store import MowerStore
@@ -121,7 +122,10 @@ async def async_unload_entry(
     """Unload a Mower. Never commands the Mower; state is already persisted."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    director = async_get_director(hass, entry.entry_id)
     async_unregister_director(hass, entry.entry_id)
+    if director is not None and director.recording is not None:
+        await director.recording.async_stop()
     async_detach_zone_sync(hass, entry.entry_id)
     async_detach_housekeeping(hass, entry.entry_id)
     others = [
@@ -152,6 +156,7 @@ async def async_remove_entry(
             except Exception:  # noqa: BLE001 - removal must still finish
                 _LOGGER.exception("abort_run on entry removal raised")
     await store.async_remove()
+    async_notify_files_kept(hass, entry)
 
     def _remove_backups() -> None:
         storage_dir = Path(hass.config.path(".storage"))
