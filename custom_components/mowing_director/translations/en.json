@@ -89,6 +89,10 @@
     "source_too_old": {
       "title": "Mammotion integration is too old",
       "description": "Mammotion {version} is older than the supported {minimum}. Mowing Director may misbehave; update the Mammotion integration."
+    },
+    "store_unusable": {
+      "title": "Saved state could not be read",
+      "description": "The saved Schedule and Run state for {mower} could not be read, so the Schedule was reset to idle and empty. Mowing Director did not command the Mower or adopt any job it is running. Zones and settings are kept; add your Plans again."
     }
   },
   "exceptions": {

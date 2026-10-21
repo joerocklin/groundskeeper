@@ -71,6 +71,16 @@ DEADLINE_RECHARGE_STALL = "recharge_stall"
 DEADLINE_CONTACT_LOST = "contact_lost"
 RECHARGE_STALL_WINDOW = timedelta(minutes=60)  # spec §7.4, §19
 CONTACT_LOST_GRACE = timedelta(minutes=10)  # spec §7.4, §19
+# Stability windows are evidence about the live Mower: they restart on load.
+RESTART_WINDOWS = (
+    DEADLINE_STABILITY,
+    DEADLINE_DONE_STABLE,
+    DEADLINE_STOPPED_STABLE,
+    DEADLINE_PAUSE_STABLE,
+    DEADLINE_HOLD_CLEAR_STABLE,
+    DEADLINE_HEIGHT_STABLE,
+    DEADLINE_CONTACT_LOST,
+)
 PROMPT_REMINDER_AFTER = timedelta(hours=1)  # spec §12.4: first reminder at +1 h
 
 PROMPT_RUN_FAILED = "run_failed"  # spec §12.1: Retry / Skip Plan / Abort
@@ -258,8 +268,25 @@ class TimerFired:
     now: datetime
 
 
+@dataclass(frozen=True)
+class Reconcile:
+    """Restart reconciliation (spec §8): the one load path for every Mower.
+
+    `snapshot` is the first usable live snapshot, or None when none arrived
+    within the wait-for-Mower limit. `signals` are what the adapter pushed
+    while the reducer was frozen. `loaded_at` anchors the contact-lost grace:
+    HA downtime is not evidence of lost contact.
+    """
+
+    now: datetime
+    loaded_at: datetime
+    snapshot: Snapshot | None
+    signals: tuple[AdapterSignal, ...] = ()
+
+
 type CoreInput = (
-    AddPlan
+    Reconcile
+    | AddPlan
     | StartSchedule
     | PauseSchedule
     | StopNow
@@ -617,6 +644,8 @@ class _Machine:
                 self._command_outcome(event)
             case TimerFired():
                 self._evaluate()
+            case Reconcile():
+                self._reconcile(event)
 
     # -- small helpers ----------------------------------------------------
 
@@ -744,6 +773,141 @@ class _Machine:
         self._set_schedule(ScheduleStatus.PAUSED, "stop_now")
 
 
+    # -- Restart reconciliation (spec §8) ------------------------------------
+
+    def _summary(self) -> dict[str, Any]:
+        run = self._current_run()
+        return {"schedule": self.status, "run": run["status"] if run else None}
+
+    def _current_run(self) -> dict[str, Any] | None:
+        """The Run in flight, or the failed one awaiting a decision."""
+        return active_run(self.s) or next(
+            (r for r in self.s["runs"] if r["status"] == RunStatus.FAILED), None
+        )
+
+    def _reconcile(self, event: Reconcile) -> None:
+        """Test live evidence against the Run rules before any clock fires.
+
+        Never emits `start_run`; the only command is `abort_run`, through the
+        normal start-window and stall rules.
+        """
+        before = self._summary()
+        run_before = active_run(self.s)
+        run_id = run_before["id"] if run_before else None
+        # Stability windows are state-derived: downtime does not count.
+        for name in RESTART_WINDOWS:
+            self.s["deadlines"].pop(name, None)
+        reasons: list[str] = []
+        job_check: str | None = None
+        snapshot = event.snapshot
+        if snapshot is None:
+            reasons.append("no_usable_snapshot")
+            self._mark_unavailable()
+            if (run := active_run(self.s)) is not None and run["status"] == RunStatus.MOWING:
+                self.s["deadlines"][DEADLINE_CONTACT_LOST] = iso(
+                    event.loaded_at + CONTACT_LOST_GRACE
+                )
+        else:
+            self.s["snapshot"] = snapshot_to_dict(snapshot)
+        for signal in event.signals:  # missed errors, external jobs
+            self._signal(signal)
+        run = active_run(self.s)
+        if run is not None and snapshot is not None:
+            job_check = self._reconcile_superseded(run, snapshot, event.signals)
+        self._rearm_height_verify()
+        self._evaluate()
+        self._fire_expired_reminders()
+        run = active_run(self.s)
+        if run is None or run["status"] != RunStatus.ON_HOLD:
+            self._answer_kind(PROMPT_RUN_ON_HOLD, "reconciled")
+        after = self._summary()
+        if run_id is None:
+            reasons.append("no_run")
+        else:
+            moved = next(
+                (r for r in [*self.s["runs"], *self.h["runs"]] if r["id"] == run_id), None
+            )
+            if moved is not None and moved["status"] != before["run"]:
+                reasons.append(moved.get("reason") or moved["status"])
+            else:
+                reasons.append("unchanged")
+        payload: dict[str, Any] = {
+            "before": before,
+            "after": after,
+            "reasons": reasons,
+            "snapshot": "live" if snapshot is not None else "none",
+        }
+        if job_check is not None:
+            payload["job_check"] = job_check
+        self._emit("reconciled", **payload)
+
+    def _mark_unavailable(self) -> None:
+        """No live evidence: the persisted summary must not read as live."""
+        raw = self.s["snapshot"]
+        if raw:
+            raw.update(
+                available=False, activity=None, job_active=False,
+                recharging=False, job_ref=None,
+            )
+
+    def _reconcile_superseded(
+        self, run: dict[str, Any], snapshot: Snapshot, signals: tuple[AdapterSignal, ...]
+    ) -> str | None:
+        """Fail the Run "superseded" when the live job is not ours.
+
+        Returns which check applied: `job_ref`, or the weaker `zone`.
+        """
+        if run["status"] == RunStatus.STARTING:
+            intent = self.s["intent"]
+            issued = parse(intent["issued_at"]) if intent else None
+            early = any(
+                isinstance(sig, JobStarted) and issued is not None and sig.started_at < issued
+                for sig in signals
+            )
+            mowing = snapshot.activity is LawnMowerActivity.MOWING and snapshot.job_active
+            zone_off = (
+                mowing and snapshot.zone is not None and snapshot.zone != run.get("native_ref")
+            )
+            if early or zone_off:
+                self._fail_run(run, "superseded", abort=False)
+            return "zone" if mowing else None
+        if run["status"] not in (RunStatus.MOWING, RunStatus.ON_HOLD) or not snapshot.job_active:
+            return None
+        if snapshot.job_ref is not None and run.get("job_ref") is not None:
+            if snapshot.job_ref != run["job_ref"]:
+                self._fail_run(run, "superseded", abort=False)
+            return "job_ref"
+        if snapshot.zone is not None and snapshot.zone != run.get("native_ref"):
+            self._fail_run(run, "superseded", abort=False)
+        return "zone"
+
+    def _rearm_height_verify(self) -> None:
+        """An open verification restarts: readback is tested first (by the
+        evaluation that follows), the stability window is already cleared and
+        the deadline is re-armed from now."""
+        verify = self.s["height_verify"]
+        if verify is None or active_run(self.s) is None:
+            return
+        verify["unavailable"] = False
+        verify["ignore_until"] = None
+        self._arm(DEADLINE_HEIGHT_VERIFY, self.now + self.env.height_verify_window)
+
+    def _fire_expired_reminders(self) -> None:
+        """A reminder that fell due during downtime fires once on load."""
+        for prompt in self.s["prompts"]:
+            due = prompt.get("next_reminder_at")
+            if due is not None and parse(due) <= self.now:
+                prompt["next_reminder_at"] = None  # later reminders: Notifications
+                self._emit(
+                    "prompt_reminder",
+                    prompt_id=prompt["prompt_id"],
+                    kind=prompt["kind"],
+                    subject=prompt["subject"],
+                    tag=prompt["tag"],
+                    plan_id=prompt["context"].get("plan_id"),
+                    run_id=prompt["context"].get("run_id"),
+                )
+
     # -- Checks and starting a Run ----------------------------------------
 
     def _evaluate(self) -> None:
@@ -867,7 +1031,9 @@ class _Machine:
             self._enter_hold(run, HOLD_RECHARGE_STALL)
             return
         self._evaluate_height(run, snapshot)
-        if run["status"] == RunStatus.MOWING:
+        # Off the job (returning/docked/idle, no job) is the finish or stop
+        # rule's to decide, never a stall.
+        if run["status"] == RunStatus.MOWING and not (off_job or stopped):
             self._evaluate_stall(run, snapshot)
 
     # -- Blade height verification (spec §7.6) -----------------------------
