@@ -81,3 +81,19 @@ async def async_skip_plan(director: Director) -> None:
     if _status(director) != ScheduleStatus.PAUSED or not _has_failed_run(director):
         raise fail("no_failure_to_answer")
     await director.async_skip_plan()
+
+
+def _require_on_hold(director: Director) -> None:
+    run = active_run(director.state)
+    if run is None or run["status"] != RunStatus.ON_HOLD:
+        raise fail("no_hold_to_answer")
+
+
+async def async_resume_run(director: Director) -> None:
+    _require_on_hold(director)
+    await director.async_resume_run()
+
+
+async def async_end_run(director: Director) -> None:
+    _require_on_hold(director)
+    await director.async_end_run()

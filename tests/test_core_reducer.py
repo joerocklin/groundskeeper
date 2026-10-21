@@ -831,8 +831,8 @@ def test_midjob_recharge_stays_mowing_and_never_stalls():
         MOWING, activity=LawnMowerActivity.DOCKED, recharging=True, battery=20,
     )
     state, _ = step(state, SnapshotReceived(at(100), charging))
-    for t in (5000, 10000, 20000):
-        state, fx = step(state, SnapshotReceived(at(t), charging))
+    for t, battery in ((5000, 30), (10000, 40), (20000, 50)):  # charging, so rising
+        state, fx = step(state, SnapshotReceived(at(t), replace(charging, battery=battery)))
         state, fx = step(state, TimerFired(at(t + 1)))
         assert run_status(state) == ["mowing"]
         no_abort(fx)

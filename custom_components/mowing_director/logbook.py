@@ -33,6 +33,14 @@ def describe(data: dict[str, Any]) -> str:
             return f"Prompt {data.get('kind')} answered: {data.get('action')}"
         case "prompt_ignored":
             return f"Ignored a stale Prompt answer: {data.get('action')}"
+        case "reconciled":
+            before, after = data.get("before") or {}, data.get("after") or {}
+            return (
+                f"Restart reconciled: Schedule {before.get('schedule')} to "
+                f"{after.get('schedule')}, Run {before.get('run')} to {after.get('run')}"
+            )
+        case "prompt_reminder":
+            return f"Prompt reminder: {data.get('kind')}"
         case "height_unverified":
             return f"Blade height on {zone} could not be verified"
         case _:
