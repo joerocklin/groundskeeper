@@ -37,6 +37,27 @@ const STYLE = `
   .card { background: var(--card-background-color); border-radius: 12px; padding: 16px;
     box-shadow: var(--ha-card-box-shadow, none); border: 1px solid var(--divider-color); }
   .empty { padding: 32px 16px; text-align: center; color: var(--secondary-text-color); }
+  svg.map { width: 100%; height: auto; background: var(--secondary-background-color); border-radius: 8px; }
+  svg .zone { fill: var(--primary-color); fill-opacity: .25; stroke: var(--primary-color); stroke-width: 1.5; cursor: pointer; }
+  svg .zone.selected { fill-opacity: .5; stroke-width: 3; }
+  svg .zone.current { stroke: var(--success-color, #43a047); stroke-width: 3; }
+  svg .zone.hidden { stroke-dasharray: 4 3; fill-opacity: .08; }
+  svg .zone.missing { stroke: var(--error-color, #db4437); fill: none; stroke-dasharray: 2 3; }
+  svg .channel { stroke: var(--secondary-text-color); stroke-width: 2; stroke-dasharray: 6 3; }
+  svg .stripe { stroke: var(--primary-text-color); stroke-opacity: .35; stroke-width: 1; }
+  svg .label { font-size: 11px; text-anchor: middle; fill: var(--primary-text-color); pointer-events: none; }
+  svg .dock { fill: var(--primary-text-color); }
+  svg .dial { fill: none; stroke: var(--divider-color); }
+  svg .wedge { fill: var(--primary-color); fill-opacity: .35; stroke: var(--primary-color); }
+  svg.wedge-map { width: 140px; height: 140px; float: right; }
+  ul.zones { list-style: none; margin: 0; padding: 0; }
+  ul.zones li { display: flex; gap: 8px; align-items: center; padding: 8px; border-radius: 6px; cursor: pointer; }
+  ul.zones li.selected { background: var(--secondary-background-color); }
+  ul.zones .name { flex: 1; }
+  .tag { font-size: 12px; padding: 1px 6px; border-radius: 8px; background: var(--secondary-background-color); }
+  .tag.missing { background: var(--error-color, #db4437); color: #fff; }
+  .warn { color: var(--warning-color, #b26a00); }
+  input[type=number] { width: 5em; font: inherit; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
 `;
 
@@ -232,6 +253,8 @@ class MowingDirectorPanel extends HTMLElement {
     this._entryId = null;
     this._snapshot = null;
     this._tab = 'now';
+    this._zoneView = { zones: [], channels: [] };
+    this._zoneId = null;
     this._unsub = null;
     this._started = false;
   }
@@ -270,9 +293,83 @@ class MowingDirectorPanel extends HTMLElement {
     this._snapshot = null;
     if (!this._entryId) return;
     this._unsub = await this._hass.connection.subscribeMessage(
-      (snapshot) => { this._snapshot = snapshot; this._render(); },
+      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._render(); },
       { type: 'mowing_director/subscribe', entry_id: this._entryId },
     );
+  }
+
+  async _loadZones() {
+    if (!this._entryId || this._tab !== 'zones') return;
+    try {
+      this._zoneView = await this._hass.connection.sendMessagePromise({
+        type: 'mowing_director/get_zones', entry_id: this._entryId });
+      this._render();
+    } catch (err) {
+      this._error = err.message || String(err);
+    }
+  }
+
+  // One zone command; the backend pushes a fresh snapshot, which reloads Zones.
+  async _zoneCmd(type, extra = {}) {
+    try {
+      await this._hass.connection.sendMessagePromise({
+        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+    } catch (err) {
+      this._error = err.message || String(err);
+    }
+    await this._loadZones();
+  }
+
+  _zonesTab() {
+    const { zones, channels } = this._zoneView;
+    const unit = (this._hass.config && this._hass.config.unit_system && this._hass.config.unit_system.length) || 'km';
+    const sel = zones.find((z) => z.id === this._zoneId) || null;
+    const bearing = sel && sel.bearing && sel.bearing.value;
+    const detail = sel
+      ? `<section class="card"><h2>${esc(sel.name)}</h2>
+          ${bearingHtml(sel)}${rangeHtml(sel, unit)}</section>`
+      : '';
+    return `<section class="card"><h2>Zones &amp; Channels</h2>
+        ${renderMap(zones, channels, { selectedZoneId: sel && sel.id, stripeZoneId: sel && sel.id, angle: bearing })}
+        ${zoneListHtml(zones, sel && sel.id)}</section>${detail}`;
+  }
+
+  _wireZones(root) {
+    const num = (id) => {
+      const el = root.querySelector(id);
+      return el && el.value !== '' ? Number(el.value) : null;
+    };
+    root.querySelectorAll('[data-zone]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.dataset.act) return;
+        this._zoneId = el.dataset.zone;
+        this._render();
+      });
+    });
+    root.querySelectorAll('[data-act]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const zone_id = this._zoneId;
+        switch (el.dataset.act) {
+          case 'refresh-zones': this._zoneCmd('refresh_zones'); break;
+          case 'toggle-hidden':
+            this._zoneCmd('set_zone_hidden', { zone_id: el.dataset.zone, hidden: el.checked }); break;
+          case 'set-bearing': {
+            const value = num('#bearing-input');
+            if (value != null) this._zoneCmd('set_zone_bearing', { zone_id, value });
+            break;
+          }
+          case 'reset-bearing': this._zoneCmd('reset_zone_bearing', { zone_id }); break;
+          case 'set-range': {
+            const min = num('#range-min'), max = num('#range-max');
+            if (min != null && max != null) this._zoneCmd('set_zone_range', { zone_id, min, max });
+            break;
+          }
+          case 'set-range-full': this._zoneCmd('set_zone_range', { zone_id, full: true }); break;
+          case 'reset-range': this._zoneCmd('reset_zone_range', { zone_id }); break;
+        }
+      });
+    });
   }
 
   _unsubscribe() {
@@ -294,6 +391,7 @@ class MowingDirectorPanel extends HTMLElement {
     let body;
     if (this._error) body = `<div class="empty">${esc(this._error)}</div>`;
     else if (!this._entryId) body = '<div class="empty">No Mowers configured.</div>';
+    else if (this._tab === 'zones') body = `<main>${this._zonesTab()}</main>`;
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
@@ -303,8 +401,9 @@ class MowingDirectorPanel extends HTMLElement {
       this._subscribe().then(() => this._render());
     };
     this.shadowRoot.querySelectorAll('nav button').forEach((b) => {
-      b.onclick = () => { this._tab = b.dataset.tab; this._render(); };
+      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); };
     });
+    if (this._tab === 'zones') this._wireZones(this.shadowRoot);
   }
 }
 
