@@ -181,7 +181,7 @@ async def test_start_service_starts_idle_schedule(hass, director) -> None:
         ("start", {}),  # nothing to start
         ("cancel", {}),  # nothing to cancel
         ("add_plan", {"zone": "Nope", "start_height_mm": 70, "end_height_mm": 70}),
-        ("add_plan", {"zone": "front lawn", "start_height_mm": 90, "end_height_mm": 60}),
+        ("add_plan", {"zone": "front lawn", "start_height_mm": 60, "end_height_mm": 90}),
         ("add_plan", {"zone": "front lawn", "start_height_mm": 70, "end_height_mm": 70,
                       "config_entry_id": "nope"}),
     ],

@@ -32,11 +32,55 @@ add_plan:
           min: 0
           max: 200
           unit_of_measurement: mm
+    max_cut_pct:
+      required: false
+      selector:
+        number:
+          min: 5
+          max: 33
+          unit_of_measurement: "%"
+    base_angle:
+      required: false
+      selector:
+        number:
+          min: -90
+          max: 90
+          unit_of_measurement: "°"
+    finishing:
+      required: false
+      selector:
+        boolean:
+    settings:
+      required: false
+      example: '{"spacing_cm": 25, "perimeter_laps": 1}'
+      selector:
+        object:
     start:
       required: false
       default: false
       selector:
         boolean:
+    position:
+      required: false
+      default: end
+      selector:
+        select:
+          translation_key: position
+          options:
+            - end
+            - front
+
+remove_plan:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+    plan_id:
+      required: true
+      selector:
+        text:
 
 start:
   fields:

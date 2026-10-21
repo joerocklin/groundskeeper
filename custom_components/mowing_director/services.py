@@ -8,7 +8,6 @@ apply. Registered once in `async_setup`, never per entry.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -20,27 +19,22 @@ from homeassistant.core import (
     SupportsResponse,
 )
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from . import controls
-from .core import ScheduleStatus
-from .heights import HeightError
-from .plans import (
-    AmbiguousZone,
-    NeedsStepDown,
-    UnknownZone,
-    build_plan,
-    derive_single_run_heights,
-    find_zone,
-    mower_run_defaults,
-)
+from .schedule_ops import POSITIONS, ScheduleError, create_plan, remove_plan
 from .runtime import Director, async_get_director
 
 ATTR_ZONE = "zone"
 ATTR_START_HEIGHT = "start_height_mm"
 ATTR_END_HEIGHT = "end_height_mm"
 ATTR_START = "start"
+ATTR_MAX_CUT = "max_cut_pct"
+ATTR_BASE_ANGLE = "base_angle"
+ATTR_FINISHING = "finishing"
+ATTR_SETTINGS = "settings"
+ATTR_POSITION = "position"
+ATTR_PLAN_ID = "plan_id"
 ATTR_PROMPT_ID = "prompt_id"
 ATTR_ACTION = "action"
 
@@ -82,57 +76,28 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def add_plan(call: ServiceCall) -> ServiceResponse:
         director = _director(hass, call)
         data = call.data
-        zones = director.data.get("config", {}).get("zones", [])
         try:
-            zone = find_zone(zones, data[ATTR_ZONE])
-        except UnknownZone:
-            raise _fail("unknown_zone", zone=data[ATTR_ZONE]) from None
-        except AmbiguousZone:
-            raise _fail("ambiguous_zone", zone=data[ATTR_ZONE]) from None
-        try:
-            heights = derive_single_run_heights(
-                data[ATTR_START_HEIGHT], data[ATTR_END_HEIGHT], director.adapter.limits
+            return await create_plan(
+                director,
+                zone=data[ATTR_ZONE],
+                start_height_mm=data[ATTR_START_HEIGHT],
+                end_height_mm=data[ATTR_END_HEIGHT],
+                max_cut_pct=data.get(ATTR_MAX_CUT),
+                base_angle=data.get(ATTR_BASE_ANGLE),
+                finishing=data.get(ATTR_FINISHING),
+                settings=data.get(ATTR_SETTINGS),
+                position=data[ATTR_POSITION],
+                start=data[ATTR_START],
             )
-        except HeightError as err:
-            raise _fail("invalid_height", error=str(err)) from None
-        except NeedsStepDown:
-            raise _fail("step_down_unsupported") from None
+        except ScheduleError as err:
+            raise _fail(err.key, **err.placeholders) from None
 
-        now = dt_util.utcnow()
-        plan, runs = build_plan(
-            zone=zone,
-            heights=heights,
-            defaults=mower_run_defaults(
-                director.adapter.limits, director.data.get("config", {})
-            ),
-            origin="service",
-            now=now,
-        )
-        before = director.state["schedule"]["status"]
-        await director.async_add_plan(plan, runs, data[ATTR_START])
-        after = director.state["schedule"]["status"]
-        started = before == ScheduleStatus.IDLE and after != ScheduleStatus.IDLE
-        response: dict[str, Any] = {
-            "plan_id": plan["id"],
-            "runs": [
-                {
-                    "run_id": r["id"],
-                    "height_mm": r["height_mm"],
-                    "angle_deg": r["angle_deg"],
-                    "n": r["index"],
-                    "m": r["of"],
-                }
-                for r in runs
-            ],
-            "rounded": heights.rounded,
-            "schedule_status": after,
-            "started": started,
-        }
-        if data[ATTR_START] and not started:
-            response["reason"] = (
-                "paused" if before == ScheduleStatus.PAUSED else "already_active"
-            )
-        return response
+    async def remove_plan_service(call: ServiceCall) -> None:
+        director = _director(hass, call)
+        try:
+            await remove_plan(director, call.data[ATTR_PLAN_ID])
+        except ScheduleError as err:
+            raise _fail(err.key, **err.placeholders) from None
 
     def control(action: Callable[[Director], Awaitable[None]]):
         async def handler(call: ServiceCall) -> None:
@@ -168,9 +133,22 @@ def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_START_HEIGHT): vol.Coerce(float),
                 vol.Required(ATTR_END_HEIGHT): vol.Coerce(float),
                 vol.Optional(ATTR_START, default=False): bool,
+                vol.Optional(ATTR_MAX_CUT): vol.Coerce(float),
+                vol.Optional(ATTR_BASE_ANGLE): vol.Coerce(float),
+                vol.Optional(ATTR_FINISHING): bool,
+                vol.Optional(ATTR_SETTINGS): dict,
+                vol.Optional(ATTR_POSITION, default="end"): vol.In(
+                    [p for p in POSITIONS if p != "merge"]
+                ),
             }
         ),
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "remove_plan",
+        remove_plan_service,
+        schema=vol.Schema({**_ENTRY, vol.Required(ATTR_PLAN_ID): str}),
     )
     for name, action in (
         ("start", controls.async_start),
