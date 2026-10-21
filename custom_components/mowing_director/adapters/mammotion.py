@@ -1,8 +1,9 @@
-"""Mammotion adapter: read-only observations (issue #8, spec §3.2, §3.6, §3.8).
+"""Mammotion adapter: observations and commands (issues #8/#10, spec §3).
 
 Turns one Mammotion Mower's HA state into normalised snapshots, signals,
-limits and metadata. Commands land in ticket #10; here they are typed
-stubs that refuse.
+limits and metadata, and issues its commands through the closed result
+union (spec §3.3): one service call per command, mapped errors, never a
+retry (ADR 0002).
 
 Everything is discovered through the device and `unique_id`
 (`{device_name}_{key}`, research/mammotion-ha-surface.md §6), never
