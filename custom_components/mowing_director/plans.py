@@ -104,6 +104,25 @@ def _history_angles(
     return recent, finals
 
 
+def _draw(zone, config, base, count, base_angle, history_runs, now, rng):
+    """One angle draw for a Plan of `count` Runs; `base` is its resolved
+    settings (spec §5.5)."""
+    window = config.get("history_window_days", DEFAULT_HISTORY_DAYS)
+    recent, finals = _history_angles(history_runs, zone["id"], now, window)
+    return draw_angles(
+        (zone.get("angle_range") or {}).get("angle_range", "unset"),
+        count,
+        base_angle_mode=base["base_angle_mode"],
+        base_angle=base["base_angle_deg"] if base_angle is None else base_angle,
+        finish_jitter=base["finish_jitter_deg"],
+        last_finals=finals,
+        crossing_angle=base["crossing_angle_deg"],
+        min_separation=base["min_separation_deg"],
+        history_angles=recent,
+        rng=rng,
+    )
+
+
 def build_plan(
     *,
     zone: Mapping[str, Any],
@@ -143,21 +162,8 @@ def build_plan(
         return s
 
     base = settings_for(0)
-    mode = base["base_angle_mode"]
-    base_deg = base["base_angle_deg"] if base_angle is None else base_angle
-    window = config.get("history_window_days", DEFAULT_HISTORY_DAYS)
-    recent, finals = _history_angles(history_runs, zone["id"], now, window)
-    draw = draw_angles(
-        (zone.get("angle_range") or {}).get("angle_range", "unset"),
-        count,
-        base_angle_mode=mode,
-        base_angle=base_deg,
-        finish_jitter=config.get("finish_jitter", DEFAULT_FINISH_JITTER),
-        last_finals=finals,
-        crossing_angle=base["crossing_angle_deg"],
-        min_separation=base["min_separation_deg"],
-        history_angles=recent,
-        rng=rng,
+    draw = _draw(
+        zone, config, base, count, base_angle, history_runs, now, rng,
     )
     record = draw.to_dict()
 
@@ -203,7 +209,64 @@ def build_plan(
         "created_at": created_at or iso(now),
         "run_ids": [r["id"] for r in runs],
     }
-    return BuiltPlan(plan, runs, heights, list(draw.warnings))
+    warnings = list(draw.warnings)
+    if draw.provisional:
+        warnings.append(
+            "Angles are provisional: the Zone's allowed angle range is not known "
+            "yet, so they were drawn as full"
+        )
+    return BuiltPlan(plan, runs, heights, warnings)
+
+
+def redraw_plan(
+    plan: Mapping[str, Any],
+    runs: Sequence[Mapping[str, Any]],
+    *,
+    zone: Mapping[str, Any],
+    config: Mapping[str, Any],
+    limits: Limits,
+    now: datetime,
+    history_runs: Sequence[Mapping[str, Any]] = (),
+    rng: random.Random | None = None,
+    provisional_only: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]] | None:
+    """Redraw a not-started Plan's angles (spec §5.5); heights, ids and settings stay.
+
+    Re-roll (`provisional_only` False) redraws every Run and clears any angle
+    edit. With `provisional_only`, only unedited Runs whose angles are still
+    provisional are redrawn, and only once the Zone's range is no longer
+    `unset`; the Plan gets a note, and edited Runs outside the new range are
+    warned about. Returns (plan, runs, warnings), or None when nothing changes.
+    """
+    runs = [dict(r) for r in runs]
+    rng_now = (zone.get("angle_range") or {}).get("angle_range", "unset")
+    if provisional_only:
+        targets = [
+            r for r in runs
+            if r.get("angle_draw", {}).get("provisional") and not r.get("angle_edited")
+        ]
+        if not targets or rng_now == "unset":
+            return None
+    base = resolve_run_settings(limits, config, zone, plan_settings=plan.get("settings"))
+    draw = _draw(zone, config, base, len(runs), plan.get("base_angle"), history_runs, now, rng)
+    record = draw.to_dict()
+    warnings = list(draw.warnings)
+    for i, run in enumerate(runs):
+        if provisional_only and run not in targets:
+            if run.get("angle_edited") and isinstance(rng_now, dict) and not (
+                rng_now["min"] <= run["angle_deg"] <= rng_now["max"]
+            ):
+                warnings.append(
+                    f"Run {run['index']}: edited angle is outside the allowed range"
+                )
+            continue
+        run["angle_deg"] = draw.angles[i]
+        run["angle_draw"] = record
+        run.pop("angle_edited", None)
+    new_plan = dict(plan)
+    if provisional_only:
+        new_plan["note"] = "angles_redrawn_for_range"
+    return new_plan, runs, warnings
 
 
 def rederive_plan(
