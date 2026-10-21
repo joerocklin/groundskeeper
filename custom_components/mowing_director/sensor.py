@@ -7,6 +7,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -29,6 +30,7 @@ async def async_setup_entry(
             CurrentRunSensor(director, entry),
             NextRunSensor(director, entry),
             PendingPromptsSensor(director, entry),
+            WaitingOnSensor(director, entry),
         ]
     )
 
@@ -157,3 +159,26 @@ class PendingPromptsSensor(_DirectorSensor):
     @property
     def native_value(self) -> int:
         return len(self._state["prompts"])
+
+
+class WaitingOnSensor(_DirectorSensor):
+    """Diagnostic: how many Checks are failing, and why (spec §9.1, §13.5)."""
+
+    key = "waiting_on"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def native_value(self) -> int:
+        return len({w["check"] for w in self._state["waiting_on"]})
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        names = {c["id"]: c["name"] for c in self._director.checks}
+        return {
+            "reasons": [
+                {"check": w["check"], "name": names.get(w["check"], w["check"]),
+                 "reason": w["reason"]}
+                for w in self._state["waiting_on"]
+            ]
+        }

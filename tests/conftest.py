@@ -64,3 +64,13 @@ async def make_mammotion_mower(
             device_id=rtk.id,
         )
     return mammotion_entry, mower, rtk
+
+
+@pytest.fixture(autouse=True)
+def _work_hours_always_open(request, monkeypatch):
+    """Work hours default to 08:00-00:00 (spec §9.2); other suites must not
+    depend on the wall clock, so their default window is the whole day."""
+    if "test_checks" not in request.module.__name__:
+        monkeypatch.setattr(
+            "custom_components.mowing_director.checks.DEFAULT_WINDOW", ("00:00", "00:00")
+        )

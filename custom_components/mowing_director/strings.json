@@ -265,6 +265,9 @@
       },
       "pending_prompts": {
         "name": "Pending Prompts"
+      },
+      "waiting_on": {
+        "name": "Waiting on"
       }
     },
     "button": {

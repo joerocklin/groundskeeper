@@ -74,6 +74,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     """Register the websocket commands (once, from `async_setup`)."""
     websocket_api.async_register_command(hass, ws_list_mowers)
     websocket_api.async_register_command(hass, ws_get_state)
+    for command in (ws_list_checks, ws_create_check, ws_update_check, ws_delete_check):
+        websocket_api.async_register_command(hass, command)
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_refresh_zones)
     websocket_api.async_register_command(hass, ws_set_zone_hidden)
@@ -686,3 +688,102 @@ async def ws_set_zone_run_settings(hass, connection, msg) -> None:
         return run_settings_view(director)
 
     await _schedule_call(hass, connection, msg, call)
+
+
+# -- Checks (spec §9, §13.5) -------------------------------------------------------
+
+_TIMEOUT = vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=1)))
+_POLICY = vol.In(["notify", "pause"])
+_CHECK_FIELDS = {
+    vol.Optional("name"): str,
+    vol.Optional("enabled"): bool,
+    vol.Optional("config"): dict,
+    vol.Optional("timeout_s"): _TIMEOUT,
+    vol.Optional("policy"): _POLICY,
+}
+
+
+async def _checks_call(hass, connection, msg, call) -> None:
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        result = await call(director)
+    except StopIteration:  # `next()` found no such Check
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Check")
+        return
+    except (ValueError, KeyError) as err:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/list_checks", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_list_checks(hass, connection, msg) -> None:
+    """Every Check of one Mower, built-ins included."""
+
+    async def call(director):
+        return {"checks": director.checks}
+
+    await _checks_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/create_check",
+        vol.Required("entry_id"): str,
+        vol.Required("name"): str,
+        vol.Required("config"): dict,
+        vol.Optional("enabled"): bool,
+        vol.Optional("timeout_s"): _TIMEOUT,
+        vol.Optional("policy"): _POLICY,
+    }
+)
+@websocket_api.async_response
+async def ws_create_check(hass, connection, msg) -> None:
+    """Add a named Custom Check (entity condition or template)."""
+    fields = {k: v for k, v in msg.items() if k not in ("id", "type", "entry_id")}
+    await _checks_call(hass, connection, msg, lambda d: d.async_create_check(fields))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/update_check",
+        vol.Required("entry_id"): str,
+        vol.Required("check_id"): str,
+        vol.Required("changes"): vol.Schema(_CHECK_FIELDS),
+    }
+)
+@websocket_api.async_response
+async def ws_update_check(hass, connection, msg) -> None:
+    """Edit a Check; applies at once while the Schedule is `waiting`."""
+    await _checks_call(
+        hass, connection, msg, lambda d: d.async_update_check(msg["check_id"], msg["changes"])
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/delete_check",
+        vol.Required("entry_id"): str,
+        vol.Required("check_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_delete_check(hass, connection, msg) -> None:
+    """Delete a Custom Check."""
+
+    async def call(director):
+        await director.async_delete_check(msg["check_id"])
+        return {}
+
+    await _checks_call(hass, connection, msg, call)

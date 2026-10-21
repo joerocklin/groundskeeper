@@ -41,6 +41,8 @@ def describe(data: dict[str, Any]) -> str:
             )
         case "prompt_reminder":
             return f"Prompt reminder: {data.get('kind')}"
+        case "check_timeout":
+            return f"Check {data.get('name')} timed out ({data.get('policy')})"
         case "height_unverified":
             return f"Blade height on {zone} could not be verified"
         case _:
