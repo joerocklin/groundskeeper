@@ -24,6 +24,7 @@ from homeassistant.helpers.dispatcher import (
 )
 
 from .const import DOMAIN
+from .zone_sync import async_get_zone_sync
 
 SIGNAL_STATE_CHANGED = f"{DOMAIN}_state_changed_{{}}"
 
@@ -60,6 +61,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_mowers)
     websocket_api.async_register_command(hass, ws_get_state)
     websocket_api.async_register_command(hass, ws_subscribe)
+    websocket_api.async_register_command(hass, ws_refresh_zones)
+    websocket_api.async_register_command(hass, ws_set_zone_hidden)
 
 
 @websocket_api.require_admin
@@ -119,3 +122,48 @@ def ws_subscribe(
     )
     connection.send_result(msg["id"])
     _push()
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/refresh_zones", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_refresh_zones(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Panel "Refresh Zones" (spec §4.4)."""
+    sync = async_get_zone_sync(hass, msg["entry_id"])
+    if sync is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    await sync.async_sync()
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_zone_hidden",
+        vol.Required("entry_id"): str,
+        vol.Required("zone_id"): str,
+        vol.Required("hidden"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_zone_hidden(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
+    """Hide or unhide a Zone (spec §4.4)."""
+    sync = async_get_zone_sync(hass, msg["entry_id"])
+    if sync is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        await sync.async_set_hidden(msg["zone_id"], msg["hidden"])
+    except KeyError:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Zone")
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"])
