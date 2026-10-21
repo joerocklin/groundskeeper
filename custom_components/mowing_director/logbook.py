@@ -31,6 +31,8 @@ def describe(data: dict[str, Any]) -> str:
             return f"Prompt {data.get('kind')} answered: {data.get('action')}"
         case "prompt_ignored":
             return f"Ignored a stale Prompt answer: {data.get('action')}"
+        case "height_unverified":
+            return f"Blade height on {zone} could not be verified"
         case _:
             return str(kind)
 
