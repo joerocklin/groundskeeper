@@ -1,0 +1,31 @@
+"""Adapter registry keyed by source integration domain (spec §3.1).
+
+A factory takes the HomeAssistant instance and the Mowing Director
+config entry and returns a live (unstarted) adapter for that Mower.
+Phase 1 registers only `mammotion`; the real Mammotion adapter lands in
+tickets #8-#10, so the registry ships empty here. `const.ADAPTER_DOMAINS`
+remains the eligibility list for the config flow.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+from homeassistant.core import HomeAssistant
+
+from ..adapter import MowerAdapter
+
+if TYPE_CHECKING:
+    # Imported for typing only: `__init__.py` will look adapters up at entry
+    # setup, so a runtime import here would be circular.
+    from .. import MowingDirectorConfigEntry
+
+type AdapterFactory = Callable[[HomeAssistant, MowingDirectorConfigEntry], MowerAdapter]
+
+ADAPTER_REGISTRY: dict[str, AdapterFactory] = {}
+
+
+def get_adapter_factory(source_domain: str) -> AdapterFactory | None:
+    """Return the adapter factory for a source domain, or None if unsupported."""
+    return ADAPTER_REGISTRY.get(source_domain)
