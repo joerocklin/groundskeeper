@@ -14,7 +14,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.mowing_director import adapters
-from custom_components.mowing_director.adapter import Accepted, ZoneTaskComplete
+from custom_components.mowing_director.adapter import Accepted, Refused, ZoneTaskComplete
 from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
 from custom_components.mowing_director.logbook import describe
 from tests.conftest import make_mammotion_mower
@@ -235,3 +235,56 @@ async def test_snapshot_only_changes_use_60s_throttled_save(
 
     await advance(hass, freezer, 61)
     assert battery() == 55
+
+
+async def test_refused_start_pauses_then_retry_and_second_attempt_starts(
+    hass, director, freezer
+) -> None:
+    _, mower, _ = director
+    mower.script_result("start_run", Refused("no"))
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    assert state_of(hass, "sensor.example_mower_schedule").state == "paused"
+    assert [c[0] for c in mower.commands] == ["start_run"]  # no abort, no re-issue
+    await advance(hass, freezer, 3600)  # no clock decides
+    assert state_of(hass, "sensor.example_mower_schedule").state == "paused"
+    assert [c[0] for c in mower.commands] == ["start_run"]
+
+    await hass.services.async_call(DOMAIN, "retry_run", {}, blocking=True)
+    assert state_of(hass, "sensor.example_mower_schedule").state == "waiting"
+    await advance(hass, freezer, 61)
+    assert [c[0] for c in mower.commands] == ["start_run", "start_run"]
+    mower.emit_snapshot(MOWING)
+    await hass.async_block_till_done()
+    assert state_of(hass, "sensor.example_mower_current_run").state == "mowing"
+
+
+async def test_start_window_expiry_aborts_then_skip_plan_goes_idle(
+    hass, director, freezer
+) -> None:
+    _, mower, _ = director
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    await advance(hass, freezer, 301)  # accepted, but no job ever appears
+    assert [c[0] for c in mower.commands] == ["start_run", "abort_run"]
+    assert state_of(hass, "sensor.example_mower_schedule").state == "paused"
+
+    await hass.services.async_call(DOMAIN, "skip_plan", {}, blocking=True)
+    assert state_of(hass, "sensor.example_mower_schedule").state == "idle"
+    assert [c[0] for c in mower.commands] == ["start_run", "abort_run"]
+
+
+async def test_cancel_from_paused_failure_cancels_everything(hass, director, freezer) -> None:
+    _, mower, _ = director
+    mower.script_result("start_run", Refused("no"))
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    await hass.services.async_call(DOMAIN, "cancel", {}, blocking=True)
+    assert state_of(hass, "sensor.example_mower_schedule").state == "idle"
+    assert [c[0] for c in mower.commands] == ["start_run"]
+
+
+@pytest.mark.parametrize("service", ["retry_run", "skip_plan"])
+async def test_answer_services_need_a_failure_to_answer(hass, director, service) -> None:
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(DOMAIN, service, {}, blocking=True)
