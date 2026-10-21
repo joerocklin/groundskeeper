@@ -169,15 +169,15 @@ def test_history_relaxed_first_without_touching_separation():
 
 
 def test_separation_relaxed_before_crossing_and_records_value():
-    # Range 0..40 only, 2 runs, crossing 30 (needs 0 and >=30), sep 35 impossible.
+    # Range 0..30: crossing 20 fits, separation 40 cannot.
     d = draw_angles(
-        {"min": 0, "max": 40}, 2, base_angle_mode="random",
-        crossing_angle=30.0, min_separation=35.0, rng=random.Random(1), draws=500,
+        {"min": 0, "max": 30}, 2, base_angle_mode="random",
+        crossing_angle=20.0, min_separation=40.0, rng=random.Random(1), draws=500,
     )
     kinds = [r.kind for r in d.relaxations]
     assert "separation" in kinds and "crossing" not in kinds
     rel = d.relaxations_of("separation")[0]
-    assert rel.applied == 40.0 or rel.applied == pytest.approx(rel.applied)
+    assert rel.applied == 30.0
     assert rel.message == f"separation relaxed to {rel.applied:g}°"
     assert dist(d.angles[0], d.angles[1]) >= rel.applied - 1e-9
 

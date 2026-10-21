@@ -23,6 +23,7 @@ DEFAULT_SEPARATION = 15.0
 DEFAULT_FINISH_JITTER = 5.0
 FINISH_MIN_DIFF = 2.0  # from each of the last 3 final angles
 GRID_STEP = 0.5  # degrees; candidate resolution
+REPAIR_PASSES = 6
 DEFAULT_DRAWS = 8  # random valid draws compared for "farthest from history"
 
 _EPS = 1e-9
@@ -102,6 +103,19 @@ def _grid(lo: float, hi: float) -> list:
 
 def _min_dist(a: float, others: Sequence[float]) -> float:
     return min((angular_distance(a, o) for o in others), default=math.inf)
+
+
+def _widest(grid, sep_of, cross_of, sep, cross) -> list:
+    """Grid points that keep as much crossing, then separation, as possible.
+
+    Separation yields first (crossing is held at its request if any point can
+    meet it), then crossing drops to the widest that fits."""
+    ok = [c for c in grid if cross_of(c) >= cross - _EPS]
+    if not ok:
+        best = max(cross_of(c) for c in grid)
+        ok = [c for c in grid if cross_of(c) >= best - _EPS]
+    best_sep = min(sep, max(sep_of(c) for c in ok))
+    return [c for c in ok if sep_of(c) >= best_sep - _EPS]
 
 
 def _fmt(x: float) -> str:
@@ -198,6 +212,7 @@ def draw_angles(
                 f"finish angle differs only {_fmt(best)} from recent finals",
             )
 
+    needs_repair = False
     order = list(range(run_count - 1 if fixed_final else run_count))
     for i in order:
         others = [a for j in range(run_count) if j != i for a in placed(j)]
@@ -221,27 +236,50 @@ def draw_angles(
             if pts and hist:
                 relax(i, "history", min_separation, None, "history avoidance relaxed")
         if not pts:
-            ok_cross = [c for c in range_grid if cross_of(c) >= cross - _EPS]
-            if ok_cross:
-                sep = max(sep_of(c) for c in ok_cross)
-                pts = [c for c in ok_cross if sep_of(c) >= sep - _EPS]
-            else:
-                cross = max(cross_of(c) for c in range_grid)
-                ok_cross = [c for c in range_grid if cross_of(c) >= cross - _EPS]
-                sep = min(min_separation, max(sep_of(c) for c in ok_cross))
-                pts = [c for c in ok_cross if sep_of(c) >= sep - _EPS]
+            # Separation, then crossing, must give: take the widest that fits.
+            needs_repair = True
             if hist:
                 relax(i, "history", min_separation, None, "history avoidance relaxed")
-            if sep < min_separation - _EPS:
-                relax(i, "separation", min_separation, sep,
-                      f"separation relaxed to {_fmt(sep)}")
-            if cross < crossing_angle - _EPS:
-                relax(i, "crossing", crossing_angle, cross,
-                      f"crossing relaxed to {_fmt(cross)}")
+            pts = _widest(range_grid, sep_of, cross_of, sep, cross)
 
         sample = [rng.choice(pts) for _ in range(max(1, draws))]
         # Farthest from recent history wins; ties go to the earliest draw.
         angles[i] = max(sample, key=hist_of)
+
+    if needs_repair:
+        # Greedy order can strand an earlier Run mid-range. Redraw each Run
+        # against all the others, aiming for the widest crossing/separation.
+        for _ in range(REPAIR_PASSES):
+            before = list(angles)
+            for i in order:
+                others = [a for j in range(run_count) if j != i for a in placed(j)]
+                adj = [a for j in (i - 1, i + 1) if 0 <= j < run_count for a in placed(j)]
+                pts = _widest(
+                    range_grid,
+                    lambda c: _min_dist(c, others),
+                    lambda c: _min_dist(c, adj),
+                    min_separation, crossing_angle,
+                )
+                if angles[i] in pts:
+                    continue  # already as wide as it gets
+                angles[i] = rng.choice(pts)
+            if angles == before:
+                break
+
+    # Record what the final angles actually achieved (pairs are charged to the
+    # later Run, so each shortfall is reported once).
+    for i in range(run_count):
+        mine = [a for a in (angles[i], seconds[i]) if a is not None]
+        earlier = [a for j in range(i) for a in placed(j)]
+        prev = placed(i - 1) if i > 0 else []
+        sep_got = min((_min_dist(a, earlier) for a in mine), default=math.inf)
+        cross_got = min((_min_dist(a, prev) for a in mine), default=math.inf)
+        if sep_got < min_separation - _EPS:
+            relax(i, "separation", min_separation, sep_got,
+                  f"separation relaxed to {_fmt(sep_got)}")
+        if cross_got < crossing_angle - _EPS:
+            relax(i, "crossing", crossing_angle, cross_got,
+                  f"crossing relaxed to {_fmt(cross_got)}")
 
     return AngleDraw(
         angles=angles,
