@@ -669,7 +669,8 @@ class Director:
                 behind.setdefault(gate_id, []).append(zone_id)
         return {
             "gates": [
-                {**g, "open": self.gate_believed_open(g),
+                {**g, "state_entity_id": self._entity_id_of(g.get("state_entity")),
+                 "open": self.gate_believed_open(g),
                  "crossing_expected": self.gate_crossing_expected(g["id"]),
                  "zone_ids": behind.get(g["id"], [])}
                 for g in self.gates
@@ -682,6 +683,12 @@ class Director:
                 {"id": z, "name": zones[z]["name"]} for z in gating.unrouted
             ],
         }
+
+    def _entity_id_of(self, ref: str | None) -> str | None:
+        """The current entity_id of a stored entity reference (registry id or entity_id)."""
+        if not ref:
+            return None
+        return er.async_resolve_entity_id(er.async_get(self.hass), ref) or ref
 
     def _validate_gate(self, rec: dict[str, Any]) -> None:
         channels = self._data.get("config", {}).get("channels", [])
