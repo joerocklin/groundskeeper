@@ -10,6 +10,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
+from .gate_entities import GateEntity, async_track_gate_entities
 from .runtime import Director, async_get_director
 
 
@@ -50,6 +51,13 @@ async def async_setup_entry(
 
     _sync()
     entry.async_on_unload(director.async_add_listener(_sync))
+    async_track_gate_entities(
+        hass, entry, director, "binary_sensor", async_add_entities,
+        {
+            "open": (lambda gate: True, GateOpenSensor),
+            "crossing_expected": (lambda gate: True, GateCrossingSensor),
+        },
+    )
 
 
 class CheckSensor(BinarySensorEntity):
@@ -88,3 +96,26 @@ class CheckSensor(BinarySensorEntity):
         if rec is None or not rec["enabled"]:
             return None
         return all(w["check"] != self.check_id for w in self._director.state["waiting_on"])
+
+
+class GateOpenSensor(GateEntity, BinarySensorEntity):
+    """The believed state: linked entity, else the manual flag, else closed."""
+
+    key = "open"
+    _attr_name = "Open"
+
+    @property
+    def is_on(self) -> bool:
+        gate = self._gate()
+        return bool(gate and self._director.gate_believed_open(gate))
+
+
+class GateCrossingSensor(GateEntity, BinarySensorEntity):
+    """On from the warning until the crossing ends."""
+
+    key = "crossing_expected"
+    _attr_name = "Crossing expected"
+
+    @property
+    def is_on(self) -> bool:
+        return self._director.gate_crossing_expected(self.gate_id)

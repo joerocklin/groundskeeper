@@ -100,3 +100,11 @@ def test_validation() -> None:
         validate_gate(normalise_gate({**FENCE, "channels": ["nope"]}), ids)
     with pytest.raises(ValueError, match="action"):
         validate_gate(normalise_gate({**FENCE, "open_action": "not a list"}), ids)
+
+
+def test_logbook_describes_the_gate_events() -> None:
+    from custom_components.mowing_director.logbook import describe
+
+    for kind in ("gate_crossing_expected", "gate_crossing_ended", "gate_open_action_failed"):
+        text = describe({"type": kind, "gate_name": "Fence gate", "zone_name": "Front Lawn"})
+        assert "Fence gate" in text

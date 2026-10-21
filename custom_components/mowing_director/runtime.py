@@ -23,6 +23,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import TemplateError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import sun as sun_helper
@@ -33,8 +34,11 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_template_result,
 )
+from homeassistant.helpers.script import Script
 from homeassistant.helpers.template import Template, result_as_boolean
 from homeassistant.helpers.start import async_at_started
+import voluptuous as vol
+from homeassistant.core import Context
 from homeassistant.util import dt as dt_util
 from homeassistant.util import ulid as ulid_util
 
@@ -78,6 +82,8 @@ from .core import (
     StopNow,
     CommandOutcome,
     EndRun,
+    GateActionEffect,
+    GatesEdited,
     ResumeRun,
     ResumeRunEffect,
     RetryRun,
@@ -86,6 +92,7 @@ from .core import (
     EmitEvent,
     Reconcile,
     Env,
+    SetGateFlag,
     SignalReceived,
     SnapshotReceived,
     StartRunEffect,
@@ -99,6 +106,7 @@ from .core import (
     reduce,
     active_run,
 )
+from .gates import believed_open, derive_gating, normalise_gate, validate_gate
 from .housekeeping import async_set_run_active_provider
 from .store import MowerStore
 
@@ -235,6 +243,9 @@ class Director:
             zones=zones,
             checks=tuple(checks),
             custom_results=self._custom_results(checks),
+            gates=tuple(self.gates),
+            gated_zones=self.gating().gated,
+            gate_entities=self._gate_entity_states(),
             wet=self._wet_inputs(checks),
             tz=dt_util.get_default_time_zone(),
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
@@ -487,9 +498,17 @@ class Director:
             else:
                 templates.append(TrackTemplate(Template(cfg["template"], self.hass), None))
 
+        for gate in self.gates:
+            if gate.get("state_entity") and (
+                eid := er.async_resolve_entity_id(registry, gate["state_entity"])
+            ) is not None:
+                entities.append(eid)
+
         @callback
         def _changed(*_args: Any) -> None:
             self.submit(TimerFired)
+            for listener in list(self._listeners):  # a linked Gate entity moved
+                listener()
 
         if entities:
             self._check_unsubs.append(
@@ -582,6 +601,147 @@ class Director:
     def entry_new_id(self) -> str:
         return ulid_util.ulid()
 
+    # -- Gates (spec §4.7, §10) ---------------------------------------------------------
+
+    @property
+    def gates(self) -> list[dict[str, Any]]:
+        """Gate records with defaults filled in (stored in `config.gates`)."""
+        return [normalise_gate(g) for g in self._data.get("config", {}).get("gates", [])]
+
+    def gating(self):
+        """Gated Zones derived from Zones, Channels and Gates (recomputed on read)."""
+        cfg = self._data.get("config", {})
+        return derive_gating(cfg.get("zones", []), cfg.get("channels", []), self.gates)
+
+    def gate_entity_state(self, gate: dict[str, Any]) -> str | None:
+        """State of a Gate's linked entity; a missing entity reads `unavailable`."""
+        ref = gate.get("state_entity")
+        if not ref:
+            return None
+        return self._picked_states([ref])[0]
+
+    def _gate_entity_states(self) -> dict[str, str | None]:
+        return {
+            g["id"]: self.gate_entity_state(g) for g in self.gates if g.get("state_entity")
+        }
+
+    def gate_believed_open(self, gate: dict[str, Any]) -> bool:
+        return believed_open(
+            entity_state=self.gate_entity_state(gate),
+            has_entity=bool(gate.get("state_entity")),
+            flag=self.state.get("gate_flags", {}).get(gate["id"], False),
+        )
+
+    def gate_crossing_expected(self, gate_id: str) -> bool:
+        return gate_id in self.state.get("gate_crossings", {})
+
+    def gate_views(self) -> dict[str, Any]:
+        """Gates with believed state, plus the derived Zone lists (panel, websocket)."""
+        gating = self.gating()
+        zones = {z["id"]: z for z in self._data.get("config", {}).get("zones", [])}
+        behind: dict[str, list[str]] = {}
+        for zone_id, gate_ids in gating.gated.items():
+            for gate_id in gate_ids:
+                behind.setdefault(gate_id, []).append(zone_id)
+        return {
+            "gates": [
+                {**g, "open": self.gate_believed_open(g),
+                 "crossing_expected": self.gate_crossing_expected(g["id"]),
+                 "zone_ids": behind.get(g["id"], [])}
+                for g in self.gates
+            ],
+            "gated_zones": [
+                {"id": z, "name": zones[z]["name"], "gates": list(g)}
+                for z, g in gating.gated.items()
+            ],
+            "unrouted_zones": [
+                {"id": z, "name": zones[z]["name"]} for z in gating.unrouted
+            ],
+        }
+
+    def _validate_gate(self, rec: dict[str, Any]) -> None:
+        channels = self._data.get("config", {}).get("channels", [])
+        validate_gate(rec, [c["id"] for c in channels])
+        for key in ("open_action", "close_action"):
+            if rec.get(key):
+                try:
+                    cv.SCRIPT_SCHEMA(rec[key])
+                except vol.Invalid as err:
+                    raise ValueError(f"The {key.replace('_', ' ')} is not valid: {err}") from err
+
+    def _entity_ref(self, ref: str | None) -> str | None:
+        """Picked entities are stored as registry ids, entity_id as fallback."""
+        if not ref:
+            return None
+        entry = er.async_get(self.hass).async_get(ref)
+        return entry.id if entry is not None else ref
+
+    async def _gates_saved(self, raw: list[dict[str, Any]]) -> None:
+        self._data.setdefault("config", {})["gates"] = raw
+        await self._store.async_save(self._data)
+        self._resubscribe_checks()
+        await self.dispatch(GatesEdited)
+        for listener in list(self._listeners):
+            listener()
+
+    async def async_create_gate(self, fields: dict[str, Any]) -> dict[str, Any]:
+        """Add a Gate; raises `ValueError` when it cannot be saved."""
+        raw = {
+            "id": self.entry_new_id(),
+            "name": fields["name"].strip(),
+            "channels": list(fields.get("channels", [])),
+            "state_entity": self._entity_ref(fields.get("state_entity")),
+            "open_action": fields.get("open_action"),
+            "close_action": fields.get("close_action"),
+            "notify": fields.get("notify"),
+        }
+        self._validate_gate(normalise_gate(raw))
+        await self._gates_saved([*self._data.get("config", {}).get("gates", []), raw])
+        return normalise_gate(raw)
+
+    async def async_update_gate(self, gate_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        """Edit a Gate; `KeyError` if unknown, `ValueError` if it cannot be saved."""
+        stored = list(self._data.get("config", {}).get("gates", []))
+        index = next(i for i, g in enumerate(stored) if g["id"] == gate_id)
+        raw = {**stored[index], **changes}
+        if "state_entity" in changes:
+            raw["state_entity"] = self._entity_ref(changes["state_entity"])
+        if "name" in changes:
+            raw["name"] = str(changes["name"]).strip()
+        self._validate_gate(normalise_gate(raw))
+        stored[index] = raw
+        await self._gates_saved(stored)
+        return normalise_gate(raw)
+
+    async def async_delete_gate(self, gate_id: str) -> None:
+        stored = list(self._data.get("config", {}).get("gates", []))
+        if not any(g["id"] == gate_id for g in stored):
+            raise KeyError(gate_id)
+        await self._gates_saved([g for g in stored if g["id"] != gate_id])
+
+    async def async_set_gate_flag(self, gate_id: str, is_open: bool) -> None:
+        """The Gate's manual Open flag (the `switch`); only without a state entity."""
+        await self.dispatch(lambda now: SetGateFlag(now, gate_id, is_open))
+
+    def _run_gate_action(self, effect: GateActionEffect) -> None:
+        """Run a Gate's stored action as a script; never blocks the reducer."""
+        gate = next((g for g in self.gates if g["id"] == effect.gate_id), None)
+        actions = gate.get(f"{effect.which}_action") if gate else None
+        if not actions:
+            return
+        script = Script(
+            self.hass, cv.SCRIPT_SCHEMA(actions),
+            f"{gate['name']} {effect.which}", DOMAIN,
+        )
+
+        async def _run() -> None:
+            try:
+                await script.async_run(context=Context())
+            except Exception:  # noqa: BLE001 - a broken action must never break the Run logic
+                _LOGGER.exception("Gate %s %s action failed", gate["name"], effect.which)
+
+        self.entry.async_create_task(self.hass, _run(), "mowing_director gate action")
+
     # -- inputs ------------------------------------------------------------------
 
     @callback
@@ -640,6 +800,8 @@ class Director:
                             now, i, "start_run", r
                         )
                     )
+                case GateActionEffect():
+                    self._run_gate_action(effect)
                 case AbortRunEffect():
                     await self._command(self.adapter.abort_run())
                 case ResumeRunEffect():

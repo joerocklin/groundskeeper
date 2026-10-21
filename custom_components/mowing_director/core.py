@@ -929,6 +929,9 @@ class _Machine:
             case ChecksEdited():
                 self._checks_edited(event)
             case GatesEdited():
+                known = self._gate_records()
+                for gate_id in [g for g in self.s["gate_flags"] if g not in known]:
+                    del self.s["gate_flags"][gate_id]
                 self._evaluate()
             case SetGateFlag():
                 self.s["gate_flags"][event.gate_id] = event.open
