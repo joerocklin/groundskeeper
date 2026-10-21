@@ -154,6 +154,7 @@ class Director:
             zones=zones,
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
             start_window=window,
+            stall_window=timedelta(seconds=cfg.get("stall_window_s", 3600)),
         )
 
     @callback
