@@ -141,9 +141,18 @@ class MowerStore(storage.Store[dict]):
 
     async def async_start_fresh(self) -> None:
         """Leave safe idle by replacing everything with an empty Store."""
+        await self.async_restore(None, None)
+
+    async def async_restore(self, config: dict | None, history: dict | None) -> None:
+        """Leave safe idle with `config` (and `history`) from an export (spec §14.7)."""
         self.safe_idle = None
         self.state_discarded = False
-        self._shared = empty_store_data()
+        data = empty_store_data()
+        if config is not None:
+            data["config"] = config
+        if history is not None:
+            data["history"] = history
+        self._shared = data
         await super().async_save(copy.deepcopy(self._shared))
         registry = ir.async_get(self.hass)
         for domain, issue_id in list(registry.issues):
