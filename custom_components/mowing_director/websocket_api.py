@@ -12,6 +12,7 @@ Pattern every later panel ticket follows (see docs/panel-websocket-pattern.md):
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import voluptuous as vol
@@ -24,6 +25,7 @@ from homeassistant.helpers.dispatcher import (
 )
 
 from .const import DOMAIN
+from .runtime import async_get_director
 from .zone_sync import async_get_zone_sync
 
 SIGNAL_STATE_CHANGED = f"{DOMAIN}_state_changed_{{}}"
@@ -64,6 +66,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_refresh_zones)
     websocket_api.async_register_command(hass, ws_set_zone_hidden)
     websocket_api.async_register_command(hass, ws_get_zones)
+    websocket_api.async_register_command(hass, ws_list_prompts)
+    websocket_api.async_register_command(hass, ws_subscribe_prompts)
     for cmd in (
         ws_get_zone_angles,
         ws_set_zone_bearing,
@@ -324,3 +328,52 @@ async def ws_set_zone_range_tolerance(hass, connection, msg) -> None:
         hass, connection, msg,
         lambda s: s.async_set_range_tolerance(msg["zone_id"], msg["tolerance"]),
     )
+
+
+# -- Pending Prompts (spec §12.12) -----------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/list_prompts", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_list_prompts(hass, connection, msg) -> None:
+    """Pending Prompts for the panel's cards, with title and body."""
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    connection.send_result(msg["id"], {"prompts": await director.async_prompt_views()})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/subscribe_prompts", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_subscribe_prompts(hass, connection, msg) -> None:
+    """Pending Prompts now, then whenever the list changes."""
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    last: list[Any] = [None]  # the raw list last pushed
+
+    async def _push() -> None:
+        raw = copy.deepcopy(director.state["prompts"])
+        views = await director.async_prompt_views()
+        last[0] = raw
+        connection.send_message(
+            websocket_api.event_message(msg["id"], {"prompts": views})
+        )
+
+    @callback
+    def _changed() -> None:
+        # Only a changed Prompt list is worth a push, not every snapshot.
+        if director.state["prompts"] != last[0]:
+            hass.async_create_task(_push())
+
+    connection.subscriptions[msg["id"]] = director.async_add_listener(_changed)
+    connection.send_result(msg["id"])
+    await _push()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -28,6 +28,7 @@ async def async_setup_entry(
             ScheduleSensor(director, entry),
             CurrentRunSensor(director, entry),
             NextRunSensor(director, entry),
+            PendingPromptsSensor(director, entry),
         ]
     )
 
@@ -145,3 +146,14 @@ class NextRunSensor(_DirectorSensor):
             "angle_deg": run["angle_deg"],
             "plan_id": run["plan_id"],
         }
+
+
+class PendingPromptsSensor(_DirectorSensor):
+    """How many Prompts are waiting for an answer."""
+
+    key = "pending_prompts"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    @property
+    def native_value(self) -> int:
+        return len(self._state["prompts"])

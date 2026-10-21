@@ -69,3 +69,20 @@ skip_plan:
       selector:
         config_entry:
           integration: mowing_director
+
+answer_prompt:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: mowing_director
+    prompt_id:
+      required: true
+      selector:
+        text:
+    action:
+      required: true
+      example: retry
+      selector:
+        text:

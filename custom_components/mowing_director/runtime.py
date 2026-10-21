@@ -25,6 +25,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.util import dt as dt_util
 
+from .prompts import async_prompt_strings, render_content
 from .adapter import (
     AdapterSignal,
     CommandResult,
@@ -37,6 +38,7 @@ from .core import (
     DEADLINE_STABILITY,
     AbortRunEffect,
     AddPlan,
+    AnswerPrompt,
     ArmTimer,
     CancelSchedule,
     CancelTimer,
@@ -155,6 +157,7 @@ class Director:
             min_start_battery_pct=self.adapter.limits.min_start_battery_pct,
             start_window=window,
             stall_window=timedelta(seconds=cfg.get("stall_window_s", 3600)),
+            entry_id=self.entry.entry_id,
         )
 
     @callback
@@ -304,6 +307,37 @@ class Director:
 
     async def async_skip_plan(self) -> None:
         await self.dispatch(SkipPlan)
+
+    # -- Prompts (spec §12) -----------------------------------------------------
+
+    def find_prompt(self, prompt_id: str) -> dict[str, Any] | None:
+        """The pending Prompt with this id, or None (answered or stale)."""
+        return next(
+            (p for p in self.state["prompts"] if p["prompt_id"] == prompt_id), None
+        )
+
+    async def async_answer_prompt(self, prompt_id: str, action: str) -> None:
+        await self.dispatch(lambda now: AnswerPrompt(now, prompt_id, action))
+
+    async def async_prompt_tap(self, prompt_id: str, action: str) -> bool:
+        """A notification action tap: answers if still pending, else the quiet
+        `prompt_ignored` path (spec §12.5). Returns whether it answered."""
+        prompt = self.find_prompt(prompt_id)
+        if prompt is None or action not in prompt["actions"]:
+            self._fire(
+                EmitEvent("prompt_ignored", {"prompt_id": prompt_id, "action": action})
+            )
+            return False
+        await self.async_answer_prompt(prompt_id, action)
+        return True
+
+    async def async_prompt_views(self) -> list[dict[str, Any]]:
+        """Pending Prompts with their channel-independent title and body."""
+        strings = await async_prompt_strings(self.hass)
+        return [
+            {**prompt, **render_content(prompt, self.entry.title, strings)}
+            for prompt in self.state["prompts"]
+        ]
 
 
 @callback

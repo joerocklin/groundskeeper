@@ -26,13 +26,14 @@ later tickets.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
+from homeassistant.util import ulid as ulid_util
 
 from .adapter import (
     AdapterSignal,
@@ -60,6 +61,12 @@ DEADLINE_DONE_STABLE = "done_stable"
 DEADLINE_STOPPED_STABLE = "stopped_stable"
 DEADLINE_STALL = "stall"
 DEFAULT_STALL_WINDOW = timedelta(minutes=60)  # spec §7.3, §19
+PROMPT_REMINDER_AFTER = timedelta(hours=1)  # spec §12.4: first reminder at +1 h
+
+PROMPT_RUN_FAILED = "run_failed"  # spec §12.1: Retry / Skip Plan / Abort
+ACTION_RETRY = "retry"
+ACTION_SKIP_PLAN = "skip_plan"
+ACTION_ABORT = "abort"
 
 
 class ScheduleStatus(StrEnum):
@@ -140,6 +147,30 @@ class SkipPlan:
 
 
 @dataclass(frozen=True)
+class AnswerPrompt:
+    """Answer a pending Prompt by id from any path (spec §12.5, §12.12)."""
+
+    now: datetime
+    prompt_id: str
+    action: str
+
+
+@dataclass(frozen=True)
+class RaisePrompt:
+    """Raise a Prompt of any kind through the shared model (spec §12.6).
+
+    Later tickets raise their own kinds from inside the reducer; this input
+    is the same path for callers outside it.
+    """
+
+    now: datetime
+    kind: str
+    subject: str | None
+    actions: list[str]
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class SnapshotReceived:
     """An adapter snapshot."""
 
@@ -178,6 +209,8 @@ type CoreInput = (
     | CancelSchedule
     | RetryRun
     | SkipPlan
+    | AnswerPrompt
+    | RaisePrompt
     | SnapshotReceived
     | SignalReceived
     | CommandOutcome
@@ -263,6 +296,8 @@ class Env:
     min_start_battery_pct: int
     start_window: timedelta = DEFAULT_START_WINDOW
     stall_window: timedelta = DEFAULT_STALL_WINDOW
+    entry_id: str = ""  # for Prompt tags (spec §12.6)
+    new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +327,7 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("blocking_error", None)
     state.setdefault("waiting_on", [])
     state.setdefault("stall_movement", None)
+    state.setdefault("prompts", [])
     history = dict(data.get("history") or {})
     history.setdefault("runs", [])
     history.setdefault("plans", {})
@@ -484,6 +520,12 @@ class _Machine:
                 self._retry()
             case SkipPlan():
                 self._skip_plan()
+            case AnswerPrompt():
+                self._answer_prompt(event)
+            case RaisePrompt():
+                self._raise_prompt(
+                    event.kind, event.subject, list(event.actions), dict(event.context)
+                )
             case SnapshotReceived():
                 self.s["snapshot"] = snapshot_to_dict(event.snapshot)
                 self._evaluate()
@@ -822,6 +864,100 @@ class _Machine:
         if abort:
             self.effects.append(AbortRunEffect(reason))
         self._set_schedule(ScheduleStatus.PAUSED, reason)
+        plan = self.s["plans"].get(run["plan_id"]) or {}
+        self._raise_prompt(
+            PROMPT_RUN_FAILED,
+            None,
+            [ACTION_RETRY, ACTION_SKIP_PLAN, ACTION_ABORT],
+            {
+                "zone_name": run["zone_name"],
+                "plan_id": run["plan_id"],
+                "run_id": run["id"],
+                "n": run["index"],
+                "m": run["of"],
+                "height_mm": run["height_mm"],
+                "plan_start_height_mm": plan.get("start_height_mm", run["height_mm"]),
+                "plan_end_height_mm": plan.get("end_height_mm", run["height_mm"]),
+                "reason": reason,
+            },
+            remind=True,
+        )
+
+    # -- Prompts (spec §12.5, §12.6) ------------------------------------------
+
+    def _raise_prompt(
+        self,
+        kind: str,
+        subject: str | None,
+        actions: list[str],
+        context: dict[str, Any],
+        *,
+        remind: bool = False,
+    ) -> None:
+        """A new Prompt of the same kind and subject supersedes the old one."""
+        self.s["prompts"] = [
+            p
+            for p in self.s["prompts"]
+            if not (p["kind"] == kind and p["subject"] == subject)
+        ]
+        tag = f"mowdir_{self.env.entry_id}_{kind}" + (f"_{subject}" if subject else "")
+        prompt = {
+            "prompt_id": self.env.new_id(),
+            "kind": kind,
+            "subject": subject,
+            "tag": tag,
+            "actions": actions,
+            "context": context,
+            "sent_at": iso(self.now),
+            "next_reminder_at": iso(self.now + PROMPT_REMINDER_AFTER) if remind else None,
+            "status": "pending",
+        }
+        self.s["prompts"].append(prompt)
+        self._emit(
+            "prompt_sent",
+            prompt_id=prompt["prompt_id"],
+            kind=kind,
+            subject=subject,
+            tag=tag,
+            actions=list(actions),
+            plan_id=context.get("plan_id"),
+            run_id=context.get("run_id"),
+        )
+
+    def _answer_kind(self, kind: str, action: str) -> None:
+        """A dedicated service answers every pending Prompt of `kind` (§12.12)."""
+        for prompt in [p for p in self.s["prompts"] if p["kind"] == kind]:
+            self._settle_prompt(prompt, action)
+
+    def _settle_prompt(self, prompt: dict[str, Any], action: str) -> None:
+        self.s["prompts"].remove(prompt)
+        self._emit(
+            "prompt_answered",
+            prompt_id=prompt["prompt_id"],
+            kind=prompt["kind"],
+            subject=prompt["subject"],
+            tag=prompt["tag"],
+            action=action,
+            plan_id=prompt["context"].get("plan_id"),
+            run_id=prompt["context"].get("run_id"),
+        )
+
+    def _answer_prompt(self, event: AnswerPrompt) -> None:
+        prompt = next(
+            (p for p in self.s["prompts"] if p["prompt_id"] == event.prompt_id), None
+        )
+        if prompt is None or event.action not in prompt["actions"]:
+            return  # already answered, stale or not offered: nothing happens
+        if prompt["kind"] == PROMPT_RUN_FAILED:
+            # The dedicated input does the work and answers the Prompt.
+            if event.action == ACTION_RETRY:
+                self._retry()
+            elif event.action == ACTION_SKIP_PLAN:
+                self._skip_plan()
+            else:
+                self._cancel()
+        if prompt in self.s["prompts"]:  # no dedicated side effect applied
+            self._settle_prompt(prompt, event.action)
 
     # -- Answering a failure (spec §6.3, §6.4) ---------------------------------
 
@@ -849,6 +985,7 @@ class _Machine:
         run = self._failed_run()
         if run is None:
             return
+        self._answer_kind(PROMPT_RUN_FAILED, ACTION_RETRY)
         self.s["runs"].remove(run)
         self.s["runs"].insert(0, run)
         run.pop("finished_at", None)
@@ -860,6 +997,7 @@ class _Machine:
         failed = self._failed_run()
         if failed is None:
             return
+        self._answer_kind(PROMPT_RUN_FAILED, ACTION_SKIP_PLAN)
         plan_id = failed["plan_id"]
         for run in [r for r in self.s["runs"] if r["plan_id"] == plan_id]:
             if run["status"] == RunStatus.PENDING:
@@ -873,6 +1011,7 @@ class _Machine:
     def _cancel(self) -> None:
         """Abort: every Run leaves `state`, the Schedule is `idle` and empty."""
         active = active_run(self.s)
+        self._answer_kind(PROMPT_RUN_FAILED, ACTION_ABORT)
         self._clear_run_deadlines()
         self._cancel_deadline(DEADLINE_STABILITY)
         for run in list(self.s["runs"]):
