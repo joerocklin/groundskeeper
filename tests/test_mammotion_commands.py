@@ -18,6 +18,7 @@ from homeassistant.exceptions import (
     ServiceNotSupported,
     ServiceValidationError,
 )
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_mock_service
 
 from custom_components.mowing_director.adapter import (
@@ -45,6 +46,14 @@ async def make_command_adapter(hass: HomeAssistant) -> MammotionAdapter:
     install_baseline(hass, entry, mower, NAME)
     install_zone_switches(hass, entry, mower, NAME)
     return make_adapter(hass, entry)
+
+
+def set_mode(hass: HomeAssistant, mode: str) -> None:
+    """Drive the raw `activity_mode` sensor state."""
+    reg = er.async_get(hass)
+    entity_id = reg.async_get_entity_id("sensor", "mammotion", f"{NAME}_activity_mode")
+    assert entity_id is not None
+    hass.states.async_set(entity_id, mode, {})
 
 
 def settings(bearing_deg: float = 135.0) -> RunSettings:
@@ -239,4 +248,167 @@ async def test_dock_accepted(hass: HomeAssistant) -> None:
     adapter = await make_command_adapter(hass)
     calls = async_mock_service(hass, "lawn_mower", "dock")
     assert await adapter.dock() == Accepted()
+    assert len(calls) == 1
+
+
+# -- start_run payload and pre-checks (spec §3.4/§3.7, research §4) ----------
+
+
+async def test_start_run_sends_one_start_mow_with_every_route_field(
+    hass: HomeAssistant,
+) -> None:
+    """Exact payload pin: one `mammotion.start_mow`, exactly one Zone in
+    `areas`, every route field explicit (omitted fields would fall back
+    to HA-side select/number defaults), and never `modify` (issue #10
+    AC, spec §3.4)."""
+    adapter = await make_command_adapter(hass)
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    result = await adapter.start_run(SIDE_YARD, settings(bearing_deg=135.0))
+    assert result == Accepted()
+    assert len(calls) == 1
+    call = calls[0]
+    assert (call.domain, call.service) == ("mammotion", "start_mow")
+    assert call.data == {
+        "entity_id": ["lawn_mower.luba_serial1"],
+        "areas": ["switch.side_yard"],
+        "blade_height": 70,
+        "toward_mode": 1,
+        "toward": -45,
+        "channel_width": 22,
+        "speed": 0.6,
+        "mowing_laps": 1,
+        # Explicit 0: a stale number entity must not resume mid-Zone.
+        "start_progress": 0,
+        "border_mode": 0,
+        "obstacle_laps": 0,
+        "channel_mode": 0,
+        # Always sent: pymammotion zeroes it unless channel_mode == 1.
+        "toward_included_angle": 90,
+        # The extras default is the string "1"; the schema wants an int.
+        "ultra_wave": 1,
+        "auto_change_direction": 0,
+        "ride_boundary_distance": 0.0,
+    }
+    assert "modify" not in call.data
+
+
+@pytest.mark.parametrize(
+    ("bearing_deg", "toward"),
+    [
+        (0.0, 90),
+        (5.0, 85),
+        (60.0, 30),
+        (90.0, 0),
+        (100.0, -10),
+        (135.0, -45),
+        (175.0, -85),
+        # 180 folds to +90: a stripe has no direction, +/-90 is one line.
+        (180.0, 90),
+        (190.0, 80),
+    ],
+)
+async def test_start_run_folds_bearing_into_minus_90_to_90(
+    hass: HomeAssistant, bearing_deg: float, toward: int
+) -> None:
+    """`toward = 90 - bearing` folded into -90..90 (spec §3.7)."""
+    adapter = await make_command_adapter(hass)
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    assert await adapter.start_run(SIDE_YARD, settings(bearing_deg)) == Accepted()
+    assert len(calls) == 1
+    assert calls[0].data["toward"] == toward
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "MODE_LOCK",
+        "MODE_CHARGING",
+        "MODE_CHARGING_PAUSE",
+        "MODE_SYSTEM_ERROR",
+        "MODE_UPDATING",
+        "MODE_MANUAL_MOWING",
+        "MODE_SLEEPING",
+        "MODE_NOT_A_MODE_AT_ALL",
+    ],
+)
+async def test_start_run_pre_checks_modes_where_start_mow_silently_no_ops(
+    hass: HomeAssistant, mode: str
+) -> None:
+    """LOCK, CHARGING and other non-route modes return HTTP 200 and do
+    nothing upstream, so the adapter refuses them with ZERO service
+    calls (issue #10 AC, research §2)."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, mode)
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    result = await adapter.start_run(SIDE_YARD, settings())
+    assert isinstance(result, Refused)
+    assert mode in result.reason
+    assert calls == []
+
+
+async def test_start_run_without_activity_mode_is_refused(hass: HomeAssistant) -> None:
+    """No `activity_mode` state (device not reporting): refused, no call -
+    upstream raises device_not_ready, but the pre-check keeps it local."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, "unavailable")
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    result = await adapter.start_run(SIDE_YARD, settings())
+    assert isinstance(result, Refused)
+    assert calls == []
+
+
+@pytest.mark.parametrize("mode", ["MODE_READY", "MODE_WORKING", "MODE_PAUSE"])
+async def test_start_run_allows_route_modes(
+    hass: HomeAssistant, mode: str
+) -> None:
+    """The modes upstream handles (READY/WORKING/PAUSE, plus
+    INITIALIZATION/RETURNING) pass the pre-check and send one call."""
+    adapter = await make_command_adapter(hass)
+    set_mode(hass, mode)
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    assert await adapter.start_run(SIDE_YARD, settings()) == Accepted()
+    assert len(calls) == 1
+
+
+async def test_start_run_unknown_zone_is_refused_without_a_call(
+    hass: HomeAssistant,
+) -> None:
+    """A zone the device does not carry is a definite no: refused, zero
+    calls (a wrong `areas` entry would be dropped upstream and fall back
+    to the ON switches)."""
+    adapter = await make_command_adapter(hass)
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    result = await adapter.start_run("zone-1", settings())
+    assert isinstance(result, Refused)
+    assert "zone-1" in result.reason
+    assert calls == []
+
+
+async def test_start_run_zone_switch_without_hash_is_refused(hass: HomeAssistant) -> None:
+    """An unavailable Zone switch loses its `hash` attribute; upstream
+    silently drops such entity_ids and falls back to the ON switches
+    (wrong-zone hazard), so the adapter refuses before calling (research
+    §2, mammotion-ha-surface §5)."""
+    adapter = await make_command_adapter(hass)
+    reg = er.async_get(hass)
+    entity_id = reg.async_get_entity_id("switch", "mammotion", f"{NAME}_{SIDE_YARD}")
+    assert entity_id is not None
+    hass.states.async_set(entity_id, "unavailable", {})
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    result = await adapter.start_run(SIDE_YARD, settings())
+    assert isinstance(result, Refused)
+    assert SIDE_YARD in result.reason
+    assert calls == []
+
+
+async def test_start_run_validation_error_is_refused(hass: HomeAssistant) -> None:
+    """A 400 from start_mow is a definite no: refused with the message,
+    exactly one call (ADR 0002)."""
+    adapter = await make_command_adapter(hass)
+    calls = async_mock_service(
+        hass, "mammotion", "start_mow",
+        raise_exception=ServiceValidationError("blade height out of range"),
+    )
+    result = await adapter.start_run(SIDE_YARD, settings())
+    assert result == Refused("blade height out of range")
     assert len(calls) == 1

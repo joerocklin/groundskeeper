@@ -201,6 +201,33 @@ def _int(value: str | None) -> int | None:
     return None if number is None else int(number)
 
 
+def _fold_toward(bearing_deg: float) -> int:
+    """Absolute stripe bearing -> Mammotion `toward` in -90..90 (spec §3.7).
+
+    Mode 1 counts counter-clockwise from map east, so `toward = 90 -
+    bearing`; a stripe has no direction, so the value is folded into
+    -90..90 (mod 180, then the upper half mirrors negative).
+    """
+    folded = (90.0 - bearing_deg) % 180.0
+    if folded > 90.0:
+        folded -= 180.0
+    return round(folded)
+
+
+# `sys_status` modes where `start_mow` plans and starts (upstream
+# `async_start_mowing` branch list, research §2). Every other mode -
+# LOCK, CHARGING, CHARGING_PAUSE, SYSTEM_ERROR, UPDATING, MANUAL_MOWING,
+# SLEEPING, unknown - is a silent no-op returning HTTP 200, so the
+# adapter pre-checks and refuses instead.
+_ROUTE_MODES = frozenset(
+    {"MODE_INITIALIZATION", "MODE_READY", "MODE_WORKING", "MODE_RETURNING", "MODE_PAUSE"}
+)
+
+# Extras fallbacks, from the declared schema (the core validates extras
+# against it, so a missing key only happens on a bare dict).
+_EXTRAS_DEFAULTS: dict[str, Any] = {field.key: field.default for field in _EXTRAS_SCHEMA}
+
+
 class MammotionAdapter:
     """One Mower's read-only observations, from fake-or-real HA state."""
 
@@ -608,9 +635,73 @@ class MammotionAdapter:
         return Accepted()
 
     async def start_run(self, zone: str, settings: RunSettings) -> CommandResult:
-        """Not implemented until ticket #10 lands in slices."""
-        del zone, settings
-        return Refused("not_implemented")
+        """One Zone via `mammotion.start_mow`, every route field explicit.
+
+        Omitted fields inherit the HA-side number/select entity values,
+        so none are omitted (spec §3.4); `modify` is never sent. Upstream
+        silently no-ops (HTTP 200) outside the route modes, so the mode
+        is pre-checked and refused locally (issue #10 AC).
+        """
+        mode = self._state("sensor", "activity_mode")
+        if mode not in _ROUTE_MODES:
+            return Refused(f"start_mow silently no-ops in mode {mode!r}")
+
+        switches = self._zone_switches()
+        entry = switches.get(zone)
+        if entry is None:
+            return Refused(f"unknown zone {zone}")
+        state = self._hass.states.get(entry.entity_id)
+        if state is None or "hash" not in state.attributes:
+            # Upstream drops area entities without a `hash` attribute and
+            # falls back to the ON switches: a wrong-zone hazard
+            # (mammotion-ha-surface §5). Refuse instead.
+            return Refused(f"zone {zone} switch carries no hash attribute")
+
+        entity_id = self._entity_id("lawn_mower", "mower")
+        if entity_id is None:
+            return Refused("mammotion_not_ready")
+
+        extras = settings.extras
+        return await self._call(
+            MAMMOTION,
+            "start_mow",
+            {
+                "entity_id": [entity_id],
+                "areas": [entry.entity_id],
+                "blade_height": int(settings.blade_height_mm),
+                "toward_mode": 1,
+                "toward": _fold_toward(settings.bearing_deg),
+                "channel_width": int(settings.spacing_cm),
+                "speed": float(settings.speed_m_s),
+                "mowing_laps": int(settings.perimeter_laps),
+                # Explicit 0: a stale number entity must not resume
+                # mid-Zone.
+                "start_progress": 0,
+                # Always sent: pymammotion zeroes toward_included_angle
+                # unless channel_mode == 1, so a stale value is harmless.
+                "toward_included_angle": int(
+                    extras.get("toward_included_angle", _EXTRAS_DEFAULTS["toward_included_angle"])
+                ),
+                # The select's value is a string ("1"); the schema wants
+                # an int.
+                "ultra_wave": int(extras.get("ultra_wave", _EXTRAS_DEFAULTS["ultra_wave"])),
+                "border_mode": int(extras.get("border_mode", _EXTRAS_DEFAULTS["border_mode"])),
+                "obstacle_laps": int(
+                    extras.get("obstacle_laps", _EXTRAS_DEFAULTS["obstacle_laps"])
+                ),
+                "channel_mode": int(
+                    extras.get("channel_mode", _EXTRAS_DEFAULTS["channel_mode"])
+                ),
+                "auto_change_direction": int(
+                    extras.get("auto_change_direction", _EXTRAS_DEFAULTS["auto_change_direction"])
+                ),
+                "ride_boundary_distance": float(
+                    extras.get(
+                        "ride_boundary_distance", _EXTRAS_DEFAULTS["ride_boundary_distance"]
+                    )
+                ),
+            },
+        )
 
     async def abort_run(self) -> CommandResult:
         """Not implemented until ticket #10 lands in slices."""
