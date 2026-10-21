@@ -18,7 +18,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
@@ -36,6 +36,7 @@ from .notifier import (
     LOCKED_CATEGORIES,
     notify_settings,
 )
+from .now_view import CONTROLS as RUN_CONTROLS, now_view
 from .runtime import Director, async_get_director
 from .schedule_ops import (
     ScheduleError,
@@ -94,6 +95,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_zones)
     websocket_api.async_register_command(hass, ws_list_prompts)
     websocket_api.async_register_command(hass, ws_subscribe_prompts)
+    for cmd in (ws_get_now, ws_subscribe_now, ws_run_control, ws_answer_prompt):
+        websocket_api.async_register_command(hass, cmd)
     for cmd in (
         ws_get_schedule,
         ws_add_plan,
@@ -430,6 +433,84 @@ async def ws_subscribe_prompts(hass, connection, msg) -> None:
     connection.subscriptions[msg["id"]] = director.async_add_listener(_changed)
     connection.send_result(msg["id"])
     await _push()
+
+
+# -- Now tab (spec §16.2) ----------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/get_now", vol.Required("entry_id"): str}
+)
+@callback
+def ws_get_now(hass, connection, msg) -> None:
+    """Status card, Up next and Check pills for the Now tab."""
+    director = _director_or_error(hass, connection, msg)
+    if director is not None:
+        connection.send_result(msg["id"], now_view(director))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/subscribe_now", vol.Required("entry_id"): str}
+)
+@callback
+def ws_subscribe_now(hass, connection, msg) -> None:
+    """The Now view now, then on every Director change (live updates)."""
+    director = _director_or_error(hass, connection, msg)
+    if director is None:
+        return
+
+    @callback
+    def _push() -> None:
+        connection.send_message(websocket_api.event_message(msg["id"], now_view(director)))
+
+    connection.subscriptions[msg["id"]] = director.async_add_listener(_push)
+    connection.send_result(msg["id"])
+    _push()
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/run_control", vol.Required("entry_id"): str,
+     vol.Required("action"): vol.In(sorted(RUN_CONTROLS))}
+)
+@websocket_api.async_response
+async def ws_run_control(hass, connection, msg) -> None:
+    """A status-card button: the same control the matching service runs."""
+    director = _director_or_error(hass, connection, msg)
+    if director is None:
+        return
+    try:
+        await RUN_CONTROLS[msg["action"]](director)
+    except ServiceValidationError as err:
+        connection.send_error(msg["id"], err.translation_key or "invalid", str(err))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], {})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/answer_prompt", vol.Required("entry_id"): str,
+     vol.Required("prompt_id"): str, vol.Required("action"): str}
+)
+@websocket_api.async_response
+async def ws_answer_prompt(hass, connection, msg) -> None:
+    """Answer a pending Prompt from its panel card (same as the `answer_prompt` service)."""
+    director = _director_or_error(hass, connection, msg)
+    if director is None:
+        return
+    prompt = director.find_prompt(msg["prompt_id"])
+    if prompt is None:
+        connection.send_error(msg["id"], "prompt_not_pending", "That Prompt is no longer pending")
+        return
+    if msg["action"] not in prompt["actions"]:
+        connection.send_error(msg["id"], "prompt_action_invalid", f"Not an action: {msg['action']}")
+        return
+    await director.async_answer_prompt(prompt["prompt_id"], msg["action"])
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], {})
 
 
 # -- Schedule: add / edit / reorder / remove (spec §5.7, §5.8, §13.2) --------------
