@@ -97,3 +97,38 @@ def test_manual_bearing_drives_range_without_polygon_bearing() -> None:
     r1 = refresh_zone_angles(z, DEFAULT_SETTINGS)["angle_range"]["derived"]
     r0 = z["angle_range"]["derived"]
     assert r1 != r0
+
+
+# -- estimated times for the panel (issue #28) ---------------------------------
+
+from custom_components.mowing_director.zone_angles import angle_estimates  # noqa: E402
+
+
+def test_estimates_at_base_and_both_edges() -> None:
+    z = refresh_zone_angles(_zone(LONG), DEFAULT_SETTINGS)
+    est = angle_estimates(z)
+    assert set(est) == {"base", "min_edge", "max_edge"}
+    # The derived range is "within tolerance of the best angle" (spec 5.4).
+    assert est["base"]["time_s"] > 0
+    assert est["max_edge"]["time_s"] <= est["base"]["time_s"] * 1.25 * 1.05 + 1
+    assert est["base"]["stripe_length"] > 0
+
+
+def test_estimates_follow_a_manual_range() -> None:
+    z = refresh_zone_angles(_zone(LONG), DEFAULT_SETTINGS)
+    z["angle_range"].update(source="manual", angle_range={"min": -5, "max": 5})
+    est = angle_estimates(z)
+    wide = angle_estimates(refresh_zone_angles(_zone(LONG), DEFAULT_SETTINGS))
+    assert est["max_edge"]["time_s"] != wide["max_edge"]["time_s"]
+
+
+def test_full_range_has_base_but_no_edges() -> None:
+    z = refresh_zone_angles(_zone(LONG), DEFAULT_SETTINGS)
+    z["angle_range"].update(source="manual", angle_range="full")
+    est = angle_estimates(z)
+    assert est["base"] is not None
+    assert est["min_edge"] is None and est["max_edge"] is None
+
+
+def test_no_estimates_while_unset_or_pending() -> None:
+    assert angle_estimates(refresh_zone_angles(_zone(None), DEFAULT_SETTINGS)) is None
