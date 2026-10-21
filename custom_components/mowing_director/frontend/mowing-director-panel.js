@@ -63,7 +63,6 @@ const STYLE = `
   .tag.missing { background: var(--error-color, #db4437); color: #fff; }
   .warn { color: var(--warning-color, #b26a00); }
   input[type=number] { width: 5em; font: inherit; }
-<<<<<<< HEAD
   /* -- Now tab (spec §16.2) -- */
   svg .zone.highlight { fill-opacity: .55; stroke-width: 4; stroke: var(--accent-color, #ff9800); }
   .now-status { display: flex; flex-direction: column; gap: 8px; }
@@ -93,13 +92,11 @@ const STYLE = `
     background: var(--card-background-color); border-radius: 16px 16px 0 0; padding: 16px;
     box-shadow: 0 -4px 24px rgba(0,0,0,.35); }
   .sheet label { display: block; margin: 8px 0; }
-=======
   table.schedule, table.preview { width: 100%; border-collapse: collapse; }
   table.schedule td, table.schedule th, table.preview td, table.preview th { padding: 4px 6px; text-align: left; }
   ul.plan-runs { list-style: none; margin: 0; padding: 0; }
   ul.plan-runs li { padding: 6px 0; }
   .hint { color: var(--secondary-text-color); }
->>>>>>> origin/integration/phase1-spec
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
 `;
 
@@ -405,12 +402,9 @@ function gateListHtml(view, selectedId) {
     <p><button data-act="new-gate">Add Gate</button></p>`;
 }
 
-<<<<<<< HEAD
 // -- Now tab helpers (spec §16.2) ----------------------------------------------
 // Pure string builders over the `get_now` / `subscribe_now` view.
 
-const fmtHeight = (mm, lengthUnit) =>
-  (lengthUnit === 'mi' ? `${Math.round((mm / 25.4) * 100) / 100} in` : `${num(mm)} mm`);
 
 const REASONS = {
   battery_low: 'Battery too low to start',
@@ -564,7 +558,6 @@ function promptCardsHtml(prompts) {
 }
 
 
-=======
 // -- Schedule & Plans helpers (spec §16.3, §5.5, §5.7) ------------------------
 // Heights are stored in mm; shown and typed in HA units (inches when imperial).
 
@@ -677,7 +670,6 @@ function newPlanFormHtml(d, zones, preview, lengthUnit) {
     ${preview ? previewHtml(preview, lengthUnit) : ''}</section>`;
 }
 
->>>>>>> origin/integration/phase1-spec
 class MowingDirectorPanel extends HTMLElement {
   constructor() {
     super();
@@ -746,11 +738,7 @@ class MowingDirectorPanel extends HTMLElement {
   }
 
   async _loadZones() {
-<<<<<<< HEAD
-    if (!this._entryId || (this._tab !== 'zones' && this._tab !== 'now')) return;
-=======
-    if (!this._entryId || (this._tab !== 'zones' && this._tab !== 'schedule')) return;
->>>>>>> origin/integration/phase1-spec
+    if (!this._entryId || (this._tab !== 'zones' && this._tab !== 'now' && this._tab !== 'schedule')) return;
     try {
       this._zoneView = await this._hass.connection.sendMessagePromise({
         type: 'mowing_director/get_zones', entry_id: this._entryId });
@@ -1127,14 +1115,11 @@ class MowingDirectorPanel extends HTMLElement {
 
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
-<<<<<<< HEAD
     const rh = this.shadowRoot.querySelector('#run-height');
     if (this._sheet && rh) {
       this._sheet.draft = { height: rh.value, angle: this.shadowRoot.querySelector('#run-angle').value };
     }
-=======
     if (this._tab === 'schedule') this._readPlanDraft(this.shadowRoot);
->>>>>>> origin/integration/phase1-spec
     const mowerOptions = this._mowers
       .map((m) => `<option value="${esc(m.entry_id)}"${m.entry_id === this._entryId ? ' selected' : ''}>${esc(m.title)}</option>`)
       .join('');
@@ -1150,11 +1135,8 @@ class MowingDirectorPanel extends HTMLElement {
     if (this._error) body = `<div class="empty">${esc(this._error)}</div>`;
     else if (!this._entryId) body = '<div class="empty">No Mowers configured.</div>';
     else if (this._tab === 'zones') body = `<main>${this._zonesTab()}</main>`;
-<<<<<<< HEAD
     else if (this._tab === 'now') body = `<main>${this._nowTab()}</main>`;
-=======
     else if (this._tab === 'schedule') body = `<main>${this._scheduleTab()}</main>`;
->>>>>>> origin/integration/phase1-spec
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
@@ -1167,11 +1149,8 @@ class MowingDirectorPanel extends HTMLElement {
       b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); };
     });
     if (this._tab === 'zones') this._wireZones(this.shadowRoot);
-<<<<<<< HEAD
     if (this._tab === 'now' && this._now) this._wireNow(this.shadowRoot);
-=======
     if (this._tab === 'schedule') this._wireSchedule(this.shadowRoot);
->>>>>>> origin/integration/phase1-spec
   }
 }
 
