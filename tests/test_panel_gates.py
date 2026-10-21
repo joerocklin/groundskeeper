@@ -150,3 +150,13 @@ def test_payload_accepts_a_single_action_object_and_rejects_bad_json() -> None:
 def test_toggle_channel_picks_and_unpicks() -> None:
     assert call("toggleChannel", ["c1"], "c2") == ["c1", "c2"]
     assert call("toggleChannel", ["c1", "c2"], "c1") == ["c2"]
+
+
+def test_gate_list_shows_the_learned_return_and_resume_levels() -> None:
+    view = {"zones": ZONES, "channels": CHANNELS, "gates": [gate()], "gated_zones": [],
+            "unrouted_zones": [],
+            "thresholds": {"return": {"level": 26, "source": "learned", "samples": 5},
+                           "resume": {"level": 95, "source": "default", "samples": 1}}}
+    html = call("gateListHtml", view, None)
+    assert "Return level" in html and "26 %" in html and "learned from 5 samples" in html
+    assert "Resume level" in html and "95 %" in html and "default" in html

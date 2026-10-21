@@ -47,6 +47,10 @@ def render_content(
     if "gate_name" in ctx:
         headline = headline.replace("{gate}", str(ctx["gate_name"]))
         lines.append(strings["prompt_gate"].format(gate=ctx["gate_name"]))
+        if ctx.get("crossing") and f"prompt_crossing_{ctx['crossing']}" in strings:
+            lines.append(strings[f"prompt_crossing_{ctx['crossing']}"])
+        if ctx.get("urgent") and "prompt_urgent" in strings:
+            lines.append(strings["prompt_urgent"])
     if "plan_start_height_mm" in ctx:
         start, end = ctx["plan_start_height_mm"], ctx["plan_end_height_mm"]
         if start == end:

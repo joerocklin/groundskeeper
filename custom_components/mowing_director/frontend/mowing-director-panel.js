@@ -359,7 +359,12 @@ function gateListHtml(view, selectedId) {
   const unrouted = (view.unrouted_zones || []).length
     ? `<p class="warn">No Channel route to the dock, treated as not gated: ${names(view.unrouted_zones.map((z) => z.id))}.
         Zones with no route to the dock cannot be reached through any Gate.</p>` : '';
-  return `<ul class="zones gates">${rows || '<li class="empty">No Gates declared.</li>'}</ul>${unrouted}
+  const th = view.thresholds;
+  const thLine = (label, t) => `<li>${label}: ${esc(t.level)} % (${t.source === 'learned' ? `learned from ${esc(t.samples)} samples`
+    : `${esc(t.source)}, ${esc(t.samples)} of 3 samples so far`})</li>`;
+  const thresholds = th ? `<ul class="thresholds"><li class="hint">When the Mower recharges, Gate warnings come 10 minutes ahead.</li>
+    ${thLine('Return level', th.return)}${thLine('Resume level', th.resume)}</ul>` : '';
+  return `<ul class="zones gates">${rows || '<li class="empty">No Gates declared.</li>'}</ul>${unrouted}${thresholds}
     <p><button data-act="new-gate">Add Gate</button></p>`;
 }
 

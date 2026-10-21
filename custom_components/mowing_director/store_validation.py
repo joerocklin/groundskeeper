@@ -104,11 +104,30 @@ def _sample_ok(sample: Any) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool)
 
 
+def _clean_levels(levels: Any, dropped: list[str]) -> dict[str, list[Any]]:
+    """Return/resume battery-level samples (spec §14.3): a bad one is dropped."""
+    out: dict[str, list[Any]] = {"return": [], "resume": []}
+    if levels is None:
+        return out
+    if not isinstance(levels, dict):
+        dropped.append("learned.battery_levels: not a mapping")
+        return out
+    for kind in out:
+        for sample in levels.get(kind) or []:
+            if isinstance(sample, Real) and not isinstance(sample, bool):
+                out[kind].append(sample)
+            else:
+                dropped.append(f"learned {kind} level dropped: {sample!r}")
+    return out
+
+
 def _clean_learned(learned: Any, dropped: list[str]) -> dict[str, Any]:
     if not isinstance(learned, dict):
         dropped.append("learned: section is not a mapping")
         return {}
     out = dict(learned)
+    if "battery_levels" in learned:
+        out["battery_levels"] = _clean_levels(learned["battery_levels"], dropped)
     durations = learned.get("durations")
     if durations is None:
         return out

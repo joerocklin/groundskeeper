@@ -110,9 +110,11 @@ from .core import (
     reduce,
     active_run,
 )
+from .crossings import effective_level
 from .gates import believed_open, derive_gating, normalise_gate, validate_gate
 from .housekeeping import async_set_run_active_provider
 from .history import (
+    KEY_BATTERY,
     KEY_DURATIONS,
     KEY_RUNS,
     capability_warnings,
@@ -122,6 +124,7 @@ from .history import (
     retention_limits,
     sample_preview,
     trim_durations,
+    trim_levels,
     validate_limits,
 )
 from .plans import DEFAULT_HISTORY_DAYS
@@ -149,7 +152,8 @@ def _only_soft_changes(old: dict[str, Any], new: dict[str, Any]) -> bool:
         return False
     # The battery-last-rising tracker moves with every snapshot (spec §11.8).
     def strip(state: dict[str, Any]) -> dict[str, Any]:
-        out = {k: v for k, v in state.items() if k != "snapshot"}
+        # crossing_watch: the battery trace for crossing warnings (spec §10)
+        out = {k: v for k, v in state.items() if k not in ("snapshot", "crossing_watch")}
         if "anomalies" in out:
             out["anomalies"] = {k: v for k, v in out["anomalies"].items() if k != "battery"}
         return out
@@ -271,6 +275,12 @@ class Director:
             zones=zones,
             history_runs_max=limits[KEY_RUNS],
             duration_samples_max=limits[KEY_DURATIONS],
+            battery_samples_max=limits[KEY_BATTERY],
+            crossing_lead=timedelta(
+                minutes=cfg.get("settings", {}).get("crossing_warning_lead_min", 10)
+            ),
+            recharge_level=self.adapter.limits.recharge_battery_pct,
+            resume_level=self.adapter.limits.resume_battery_pct,
             checks=tuple(checks),
             custom_results=self._custom_results(checks),
             gates=tuple(self.gates),
@@ -698,6 +708,18 @@ class Director:
     def gate_crossing_expected(self, gate_id: str) -> bool:
         return gate_id in self.state.get("gate_crossings", {})
 
+    def crossing_thresholds(self) -> dict[str, dict[str, Any]]:
+        """Return/resume battery levels in force, for the Zones & Gates tab."""
+        samples = self._data.get("learned", {}).get("battery_levels", {})
+        limits = self.adapter.limits
+        configured = {"return": limits.recharge_battery_pct, "resume": limits.resume_battery_pct}
+        out = {}
+        for kind in ("return", "resume"):
+            kept = list(samples.get(kind) or [])
+            level, source = effective_level(kind, kept, configured[kind])
+            out[kind] = {"level": level, "source": source, "samples": len(kept)}
+        return out
+
     def gate_views(self) -> dict[str, Any]:
         """Gates with believed state, plus the derived Zone lists (panel, websocket)."""
         gating = self.gating()
@@ -707,6 +729,7 @@ class Director:
             for gate_id in gate_ids:
                 behind.setdefault(gate_id, []).append(zone_id)
         return {
+            "thresholds": self.crossing_thresholds(),
             "gates": [
                 {**g, "state_entity_id": self._entity_id_of(g.get("state_entity")),
                  "open": self.gate_believed_open(g),
@@ -1005,6 +1028,10 @@ class Director:
             cfg.setdefault("settings", {}).update(changes)
             prune_runs(history, new[KEY_RUNS])
             trim_durations(durations, new[KEY_DURATIONS])
+            trim_levels(
+                self._data.setdefault("learned", {}).setdefault("battery_levels", {}),
+                new[KEY_BATTERY],
+            )
             await self._store.async_save(self._data)
             for listener in list(self._listeners):
                 listener()
