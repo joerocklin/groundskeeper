@@ -49,6 +49,7 @@ from .checks import (
     work_hours_open,
     work_window_start,
 )
+from .history import prune_runs, trim_samples
 from .adapter import (
     AdapterSignal,
     CommandKind,
@@ -68,7 +69,6 @@ from .adapter import (
 STABILITY_WINDOW = timedelta(seconds=60)  # spec §7.7, §19
 DEFAULT_START_WINDOW = timedelta(minutes=5)  # spec §7.1, §19
 COMMAND_LOG_MAX = 20  # spec §14.6
-DURATION_SAMPLES_MAX = 20  # spec §14.6
 
 DEADLINE_STABILITY = "stability"
 DEADLINE_CHECK_TICK = "check_tick"  # spec §9.1: Checks re-evaluate every 60 s
@@ -558,6 +558,8 @@ class Env:
     entry_id: str = ""  # for Prompt tags (spec §12.6)
     new_id: Callable[[], str] = ulid_util.ulid  # for Prompt ids (spec §12.5)
     anomaly_actions: Mapping[str, str] = field(default_factory=dict)  # detector -> action
+    history_runs_max: int = 500  # spec §14.6 retention limits
+    duration_samples_max: int = 20
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +992,7 @@ class _Machine:
             plan = self.s["plans"].pop(plan_id, None)
             if plan is not None:
                 self.h["plans"][plan_id] = plan
+        prune_runs(self.h, self.env.history_runs_max)  # after the Plan moved (§14.6)
 
     # -- AddPlan / Start --------------------------------------------------
 
@@ -2054,8 +2057,23 @@ class _Machine:
         for prompt in [p for p in self.s["prompts"] if p["kind"] == kind]:
             self._settle_prompt(prompt, action)
 
+    def _record_prompt_outcome(self, prompt: Mapping[str, Any], action: str) -> None:
+        """Keep the answer on its Run, in `state` or already archived (§14.3)."""
+        run_id = prompt["context"].get("run_id")
+        run = next((r for r in [*self.s["runs"], *self.h["runs"]] if r["id"] == run_id), None)
+        if run is not None:
+            run.setdefault("prompt_outcomes", []).append(
+                {
+                    "prompt_id": prompt["prompt_id"],
+                    "kind": prompt["kind"],
+                    "action": action,
+                    "at": iso(self.now),
+                }
+            )
+
     def _settle_prompt(self, prompt: dict[str, Any], action: str) -> None:
         self.s["prompts"].remove(prompt)
+        self._record_prompt_outcome(prompt, action)
         self._emit(
             "prompt_answered",
             prompt_id=prompt["prompt_id"],
@@ -2282,7 +2300,9 @@ class _Machine:
                 "angle_deg": run["angle_deg"],
             }
         )
-        self.learned["durations"][run["zone_id"]] = samples[-DURATION_SAMPLES_MAX:]
+        self.learned["durations"][run["zone_id"]] = trim_samples(
+            samples, self.env.duration_samples_max
+        )
 
     def _evaluate_charge(self) -> None:
         """Docked below 95 % outside a Run with the battery flat for 2 h."""
