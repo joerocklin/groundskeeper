@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -62,6 +62,7 @@ from .checks import (
     validate_record,
 )
 from .core import (
+    COMMAND_LOG_MAX,
     AbortRunEffect,
     ChecksEdited,
     AddPlan,
@@ -110,6 +111,19 @@ from .core import (
 )
 from .gates import believed_open, derive_gating, normalise_gate, validate_gate
 from .housekeeping import async_set_run_active_provider
+from .history import (
+    KEY_DURATIONS,
+    KEY_RUNS,
+    capability_warnings,
+    page as history_page,
+    prune_preview,
+    prune_runs,
+    retention_limits,
+    sample_preview,
+    trim_durations,
+    validate_limits,
+)
+from .plans import DEFAULT_HISTORY_DAYS
 from .store import MowerStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -233,8 +247,11 @@ class Director:
 
         window = timedelta(seconds=cfg.get("start_window_s", 300))
         checks = normalise_checks(cfg.get("checks"))
+        limits = retention_limits(cfg.get("settings"))
         return Env(
             zones=zones,
+            history_runs_max=limits[KEY_RUNS],
+            duration_samples_max=limits[KEY_DURATIONS],
             checks=tuple(checks),
             custom_results=self._custom_results(checks),
             gates=tuple(self.gates),
@@ -921,6 +938,53 @@ class Director:
             await self._store.async_save(self._data)
             for listener in list(self._listeners):
                 listener()
+
+    # -- run history and retention limits (spec §14.3, §14.6) ------------------
+
+    def history_page(self, offset: int, limit: int) -> dict[str, Any]:
+        """Finished Runs, newest first, with their Plans' inputs."""
+        return history_page(self._data.get("history", {}), offset, limit)
+
+    def retention(self) -> dict[str, Any]:
+        """Effective limits and what they cost (warnings never block)."""
+        cfg = self._data.get("config", {})
+        limits = retention_limits(cfg.get("settings"))
+        days = cfg.get("history_window_days", DEFAULT_HISTORY_DAYS)
+        cutoff = (dt_util.utcnow() - timedelta(days=days)).isoformat()
+        in_window = sum(
+            1
+            for r in self._data.get("history", {}).get("runs", [])
+            if (r.get("finished_at") or "") >= cutoff
+        )
+        return {
+            "limits": limits,
+            "fixed": {"command_log": COMMAND_LOG_MAX},
+            "warnings": capability_warnings(limits, in_window, days),
+        }
+
+    async def async_set_retention_limits(
+        self, changes: dict[str, int], *, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Change limits. Lowering one that would delete history only previews
+        (`applied` False) until `confirm`; raising restores nothing."""
+        validate_limits(changes)
+        self._refuse_in_safe_idle()
+        async with self._lock:
+            cfg = self._data.setdefault("config", {})
+            new = {**retention_limits(cfg.get("settings")), **changes}
+            history = self._data.setdefault("history", {})
+            durations = self._data.setdefault("learned", {}).setdefault("durations", {})
+            preview = prune_preview(history, new[KEY_RUNS])
+            preview["samples"] = sample_preview(durations, new[KEY_DURATIONS])
+            if (preview["count"] or preview["samples"]) and not confirm:
+                return {"applied": False, "preview": preview, **self.retention()}
+            cfg.setdefault("settings", {}).update(changes)
+            prune_runs(history, new[KEY_RUNS])
+            trim_durations(durations, new[KEY_DURATIONS])
+            await self._store.async_save(self._data)
+            for listener in list(self._listeners):
+                listener()
+        return {"applied": True, "preview": preview, **self.retention()}
 
     async def async_start(self) -> None:
         await self.dispatch(StartSchedule)

@@ -113,6 +113,10 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_set_notify_settings,
         ws_dismiss_anomaly,
         ws_set_anomaly_action,
+        ws_history,
+        ws_get_retention,
+        ws_set_retention_limits,
+        ws_delete_zone,
     ):
         websocket_api.async_register_command(hass, cmd)
 
@@ -999,3 +1003,101 @@ async def ws_set_anomaly_action(hass, connection, msg) -> None:
     await director.async_set_anomaly_action(msg["detector"], msg["action"])
     async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"], {})
+
+
+# -- Run history and retention limits (spec §14.3, §14.6) ----------------------
+
+
+async def _director_call(hass, connection, msg, call) -> None:
+    director = async_get_director(hass, msg["entry_id"])
+    if director is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        result = await call(director)
+    except ValueError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/history",
+        vol.Required("entry_id"): str,
+        vol.Optional("offset", default=0): vol.All(int, vol.Range(min=0)),
+        vol.Optional("limit", default=50): vol.All(int, vol.Range(min=1, max=200)),
+    }
+)
+@websocket_api.async_response
+async def ws_history(hass, connection, msg) -> None:
+    """One page of finished Runs, newest first (History tab)."""
+
+    async def call(director: Director) -> dict:
+        return director.history_page(msg["offset"], msg["limit"])
+
+    await _director_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/get_retention", vol.Required("entry_id"): str}
+)
+@websocket_api.async_response
+async def ws_get_retention(hass, connection, msg) -> None:
+    """Retention limits and their capability warnings (Settings -> Storage)."""
+
+    async def call(director: Director) -> dict:
+        return director.retention()
+
+    await _director_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_retention_limits",
+        vol.Required("entry_id"): str,
+        vol.Required("limits"): dict,
+        vol.Optional("confirm", default=False): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_retention_limits(hass, connection, msg) -> None:
+    """Set limits. A change that would delete only previews until `confirm`."""
+
+    async def call(director: Director) -> dict:
+        return await director.async_set_retention_limits(
+            msg["limits"], confirm=msg["confirm"]
+        )
+
+    await _director_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/delete_zone",
+        vol.Required("entry_id"): str,
+        vol.Required("zone_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_delete_zone(hass, connection, msg) -> None:
+    """Delete a `missing` Zone, its samples and overrides (spec §14.6)."""
+    sync = async_get_zone_sync(hass, msg["entry_id"])
+    if sync is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
+        return
+    try:
+        await sync.async_delete_zone(msg["zone_id"])
+    except KeyError:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Zone")
+        return
+    except ValueError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_ALLOWED, str(err))
+        return
+    async_notify_state_changed(hass, msg["entry_id"])
+    connection.send_result(msg["id"])
