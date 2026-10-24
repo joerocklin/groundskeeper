@@ -12,8 +12,11 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
 from custom_components.groundskeeper import adapters
 from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.websocket_api import SIGNAL_STATE_CHANGED
 from tests.conftest import make_mammotion_mower
 from tests.fake_mower import DEFAULT_SNAPSHOT, FakeMower
 
@@ -72,6 +75,29 @@ async def test_list_checks_returns_the_built_ins(hass, hass_ws_client, setup) ->
     by_id = {c["id"]: c for c in msg["result"]["checks"]}
     assert set(by_id) == {"mower_ready", "zone_ready", "battery", "work_hours", "wet_grass", "gate_open"}
     assert by_id["battery"]["enabled"] is False
+
+
+async def test_list_checks_does_not_push_a_snapshot(hass, hass_ws_client, setup) -> None:
+    """A read must not notify: the panel refetches on every push (issue #60)."""
+    entry, _ = setup
+    pushes = []
+    async_dispatcher_connect(
+        hass, SIGNAL_STATE_CHANGED.format(entry.entry_id), lambda: pushes.append(1))
+    msg = await ws(hass, hass_ws_client, entry, "list_checks")
+    await hass.async_block_till_done()
+    assert msg["success"]
+    assert pushes == []
+
+
+async def test_a_check_change_still_pushes_a_snapshot(hass, hass_ws_client, setup) -> None:
+    entry, _ = setup
+    pushes = []
+    async_dispatcher_connect(
+        hass, SIGNAL_STATE_CHANGED.format(entry.entry_id), lambda: pushes.append(1))
+    msg = await ws(hass, hass_ws_client, entry, "create_check", **ENTITY_CHECK)
+    await hass.async_block_till_done()
+    assert msg["success"]
+    assert pushes == [1]
 
 
 async def test_every_check_has_a_binary_sensor_and_waiting_on_sensor_explains(
