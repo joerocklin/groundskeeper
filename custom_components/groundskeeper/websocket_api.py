@@ -847,7 +847,7 @@ _CHECK_FIELDS = {
 }
 
 
-async def _checks_call(hass, connection, msg, call) -> None:
+async def _checks_call(hass, connection, msg, call, *, notify: bool = True) -> None:
     director = async_get_director(hass, msg["entry_id"])
     if director is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
@@ -860,7 +860,8 @@ async def _checks_call(hass, connection, msg, call) -> None:
     except (ValueError, KeyError) as err:
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
         return
-    async_notify_state_changed(hass, msg["entry_id"])
+    if notify:  # a read must not push: the panel refetches on every push (#60)
+        async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"], result)
 
 
@@ -879,7 +880,7 @@ async def ws_list_checks(hass, connection, msg) -> None:
             "mower_rain_detection": director.mower_rain_detection,
         }
 
-    await _checks_call(hass, connection, msg, call)
+    await _checks_call(hass, connection, msg, call, notify=False)
 
 
 @websocket_api.require_admin
