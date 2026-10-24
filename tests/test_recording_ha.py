@@ -29,6 +29,10 @@ from tests.test_tracer_bullet import (  # noqa: F401
     director,
 )
 
+MANIFEST_VERSION = json.loads(
+    (Path(__file__).parents[1] / "custom_components" / DOMAIN / "manifest.json").read_text()
+)["version"]
+
 
 def db_path(hass, entry) -> Path:
     return Path(hass.config.path("groundskeeper", f"recording_{entry.entry_id}.db"))
@@ -67,7 +71,7 @@ async def test_config_flow_stores_flag_and_creates_file_with_meta(hass, director
     assert meta["adapter_domain"] == "fake_mower"
     assert meta["model"] == "Fake 9000"
     assert meta["firmware_version"] == "1.2.3"
-    assert meta["integration_version"] == "0.1.0"
+    assert meta["integration_version"] == MANIFEST_VERSION
     assert "SN-FAKE-1" not in json.dumps(meta)
 
 
