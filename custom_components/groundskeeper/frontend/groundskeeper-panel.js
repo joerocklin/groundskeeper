@@ -437,6 +437,13 @@ const NOTES = {
 };
 const errorText = (code, message) => NOTES[code] || message;
 
+// A rejected websocket call is a plain `{code, message}` object, and `message` may be empty.
+const errMessage = (err) => {
+  if (typeof err === 'string' && err) return err;
+  if (err && typeof err === 'object') return err.message || err.code || 'Request failed';
+  return 'Request failed';
+};
+
 const STATUS_LABEL = { idle: 'Idle', waiting: 'Waiting', running: 'Running', paused: 'Paused' };
 const CTL_LABEL = {
   pause: 'Pause after Run', stop_now: 'Stop now', done_today: 'Done for today',
@@ -917,7 +924,7 @@ class GroundskeeperPanel extends HTMLElement {
         this._entryId = this._mowers.length ? this._mowers[0].entry_id : null;
       }
     } catch (err) {
-      this._error = err.message || String(err);
+      this._error = errMessage(err);
     }
     await this._subscribe();
     this._render();
@@ -942,7 +949,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: 'groundskeeper/get_zones', entry_id: this._entryId });
       this._render();
     } catch (err) {
-      this._error = err.message || String(err);
+      this._error = errMessage(err);
     }
   }
 
@@ -952,7 +959,7 @@ class GroundskeeperPanel extends HTMLElement {
       await this._hass.connection.sendMessagePromise({
         type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
     } catch (err) {
-      this._error = err.message || String(err);
+      this._error = errMessage(err);
     }
     await this._loadZones();
   }
@@ -964,7 +971,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: 'groundskeeper/get_schedule', entry_id: this._entryId });
       this._render();
     } catch (err) {
-      this._error = err.message || String(err);
+      this._error = errMessage(err);
     }
   }
 
@@ -975,7 +982,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: 'groundskeeper/list_checks', entry_id: this._entryId });
       this._render();
     } catch (err) {
-      this._error = err.message || String(err);
+      this._error = errMessage(err);
     }
   }
 
@@ -986,7 +993,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
       return true;
     } catch (err) {
-      this._checksNotice = err.message || String(err);
+      this._checksNotice = errMessage(err);
       return false;
     } finally {
       await this._loadChecks();
@@ -1066,7 +1073,7 @@ class GroundskeeperPanel extends HTMLElement {
       const warnings = editWarningsText(result && result.warnings);
       if (warnings.length) this._notice = warnings.join(' ');
     } catch (err) {
-      this._notice = err.message || String(err);
+      this._notice = errMessage(err);
     }
     await this._loadSchedule();
     return result;
@@ -1097,7 +1104,7 @@ class GroundskeeperPanel extends HTMLElement {
         this._planPreview = null;
       }
     } catch (err) {
-      d.error = err.message || String(err);
+      d.error = errMessage(err);
     }
     await this._loadSchedule();
     this._render();
@@ -1198,7 +1205,7 @@ class GroundskeeperPanel extends HTMLElement {
         ? { type: 'groundskeeper/update_gate', entry_id: this._entryId, gate_id: d.id, changes: payload }
         : { type: 'groundskeeper/create_gate', entry_id: this._entryId, ...payload });
     } catch (err) {
-      d.error = err.message || String(err);
+      d.error = errMessage(err);
       this._render();
       return;
     }
@@ -1304,7 +1311,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
       return null;
     } catch (err) {
-      const message = errorText(err.code, err.message || String(err));
+      const message = errorText(err.code, errMessage(err));
       this._notice = message;
       this._render();
       return message;
@@ -1383,7 +1390,7 @@ class GroundskeeperPanel extends HTMLElement {
               const warnings = (res && res.warnings) || [];
               this._sheet = warnings.length ? { run_id, warnings } : null; // warnings show; edit already saved
             } catch (err) {
-              this._sheet.error = errorText(err.code, err.message || String(err));
+              this._sheet.error = errorText(err.code, errMessage(err));
               this._sheet.warnings = [];
             }
             this._render();
@@ -1402,7 +1409,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: 'groundskeeper/get_notify_settings', entry_id: this._entryId });
       this._render();
     } catch (err) {
-      this._error = err.message || String(err);
+      this._error = errMessage(err);
     }
   }
 
@@ -1411,7 +1418,7 @@ class GroundskeeperPanel extends HTMLElement {
       this._notify = await this._hass.connection.sendMessagePromise({
         type: 'groundskeeper/set_notify_settings', entry_id: this._entryId, ...extra });
     } catch (err) {
-      this._notifyError = err.message || String(err);
+      this._notifyError = errMessage(err);
     }
     this._render();
   }
