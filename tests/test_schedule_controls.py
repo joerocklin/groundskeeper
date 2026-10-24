@@ -4,8 +4,8 @@ import pytest
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN, SERVICE_PRESS
 from homeassistant.exceptions import ServiceValidationError
 
-from custom_components.mowing_director.adapter import Refused, ZoneTaskComplete
-from custom_components.mowing_director.const import DOMAIN
+from custom_components.groundskeeper.adapter import Refused, ZoneTaskComplete
+from custom_components.groundskeeper.const import DOMAIN
 from tests.fake_mower import DEFAULT_SNAPSHOT
 from tests.test_tracer_bullet import (  # noqa: F401 - `director` is a fixture
     MOWING,

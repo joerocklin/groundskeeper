@@ -21,7 +21,7 @@ from pytest_homeassistant_custom_component.common import (
     mock_integration,
 )
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     JobStarted,
     NewError,
     RainStop,
@@ -29,9 +29,9 @@ from custom_components.mowing_director.adapter import (
     ZoneTaskComplete,
     ZonesChanged,
 )
-from custom_components.mowing_director.adapter import Movement, Snapshot
-from custom_components.mowing_director.adapters import ADAPTER_REGISTRY
-from custom_components.mowing_director.const import DOMAIN
+from custom_components.groundskeeper.adapter import Movement, Snapshot
+from custom_components.groundskeeper.adapters import ADAPTER_REGISTRY
+from custom_components.groundskeeper.const import DOMAIN
 from tests.conftest import make_mammotion_mower
 from tests.mammotion_states import install_baseline, set_entity
 
@@ -39,7 +39,7 @@ NAME = "Luba-SERIAL1"
 
 
 async def make_director_entry(hass: HomeAssistant) -> tuple[ConfigEntry, object]:
-    """A Mowing Director entry pointing at a fake Mammotion Mower device."""
+    """A Groundskeeper entry pointing at a fake Mammotion Mower device."""
     mammotion_entry, mower, _ = await make_mammotion_mower(hass)
     entry = MockConfigEntry(
         domain=DOMAIN, title="Example Mower", unique_id=mower.id, data={CONF_DEVICE: mower.id}
@@ -156,7 +156,7 @@ async def test_restored_unavailable_is_not_ready(hass: HomeAssistant) -> None:
 
 
 async def test_no_states_at_all_survives(hass: HomeAssistant) -> None:
-    """Mammotion may load after Mowing Director: registry rows exist with
+    """Mammotion may load after Groundskeeper: registry rows exist with
     no states yet. Building and snapshotting must not crash."""
     entry, mower = await make_director_entry(hass)  # registry only, no states
     adapter = make_adapter(hass, entry)

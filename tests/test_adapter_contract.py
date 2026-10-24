@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     AdapterSignal,
     CommandResult,
     MowerAdapter,

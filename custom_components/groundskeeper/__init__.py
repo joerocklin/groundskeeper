@@ -1,4 +1,4 @@
-"""Mowing Director integration (spec §2.4).
+"""Groundskeeper integration (spec §2.4).
 
 One config entry per Mower (ADR 0003). The entry owns a per-Mower Store;
 `entry.data` holds only the Mower's device_id (ADR 0001). Unload, reload
@@ -40,7 +40,7 @@ from .zone_sync import (
 
 _LOGGER = logging.getLogger(__name__)
 
-type MowingDirectorConfigEntry = ConfigEntry[MowerStore]
+type GroundskeeperConfigEntry = ConfigEntry[MowerStore]
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR, Platform.SWITCH]
 
@@ -48,7 +48,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up Mowing Director. Services are registered here, never per entry."""
+    """Set up Groundskeeper. Services are registered here, never per entry."""
     async_register_commands(hass)
     async_register_services(hass)
 
@@ -89,7 +89,7 @@ def _adapter_for(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: MowingDirectorConfigEntry
+    hass: HomeAssistant, entry: GroundskeeperConfigEntry
 ) -> bool:
     """Load a Mower's Store, start its adapter and Director, add entities."""
     store = MowerStore(hass, entry.entry_id)
@@ -108,7 +108,7 @@ async def async_setup_entry(
         def _range_changed(zone_id: str, _angle_range: Any) -> None:
             """A Zone's range arrived or changed: redraw provisional angles."""
             entry.async_create_background_task(
-                hass, redraw_provisional(director, zone_id), "mowing_director_redraw"
+                hass, redraw_provisional(director, zone_id), "groundskeeper_redraw"
             )
 
         entry.async_on_unload(sync.subscribe_range_changes(_range_changed))
@@ -117,7 +117,7 @@ async def async_setup_entry(
 
 
 async def async_unload_entry(
-    hass: HomeAssistant, entry: MowingDirectorConfigEntry
+    hass: HomeAssistant, entry: GroundskeeperConfigEntry
 ) -> bool:
     """Unload a Mower. Never commands the Mower; state is already persisted."""
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
@@ -139,7 +139,7 @@ async def async_unload_entry(
 
 
 async def async_remove_entry(
-    hass: HomeAssistant, entry: MowingDirectorConfigEntry
+    hass: HomeAssistant, entry: GroundskeeperConfigEntry
 ) -> None:
     """Delete the Mower's Store and the `.bak` files our migrations create.
 
@@ -160,7 +160,7 @@ async def async_remove_entry(
 
     def _remove_backups() -> None:
         storage_dir = Path(hass.config.path(".storage"))
-        for path in storage_dir.glob(f"mowing_director.{entry.entry_id}*.bak"):
+        for path in storage_dir.glob(f"groundskeeper.{entry.entry_id}*.bak"):
             path.unlink(missing_ok=True)
 
     await hass.async_add_executor_job(_remove_backups)

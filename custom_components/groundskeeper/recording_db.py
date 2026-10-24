@@ -197,7 +197,7 @@ class RecordingWriter:
     def start(self) -> None:
         """Start the writer thread."""
         self._thread = threading.Thread(
-            target=self._run, name="mowing_director_recording", daemon=True
+            target=self._run, name="groundskeeper_recording", daemon=True
         )
         self._thread.start()
 

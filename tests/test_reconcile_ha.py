@@ -7,7 +7,7 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from tests.fake_mower import DEFAULT_SNAPSHOT
 from tests.test_tracer_bullet import (  # noqa: F401
     MOWING,
@@ -125,7 +125,7 @@ async def test_unusable_store_raises_repairs_and_leaves_schedule_idle_and_empty(
     entry, mower, _ = director
     await mowing_run(hass, mower, freezer)
     assert await hass.config_entries.async_unload(entry.entry_id)
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
     hass_storage[key]["data"]["state"]["runs"] = "garbage"
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()

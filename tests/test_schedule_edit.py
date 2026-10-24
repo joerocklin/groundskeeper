@@ -3,7 +3,7 @@
 
 import pytest
 
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AbortRunEffect,
     AddPlan,
     DeleteRun,

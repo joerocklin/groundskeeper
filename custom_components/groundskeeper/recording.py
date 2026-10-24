@@ -29,13 +29,13 @@ OPT_ENABLED = "debug_recording"
 OPT_SIZE_WARN = "recording_size_warn_bytes"
 DEFAULT_SIZE_WARN_BYTES = 1 << 30  # spec §15.3
 LOW_DISK_FRACTION = 0.10
-RECORDING_DIR = "mowing_director"
+RECORDING_DIR = "groundskeeper"
 
 _KEY = "recordings"
 
 
 def recording_path(hass: HomeAssistant, entry_id: str) -> Path:
-    """`/config/mowing_director/recording_<entry_id>.db`."""
+    """`/config/groundskeeper/recording_<entry_id>.db`."""
     return Path(hass.config.path(RECORDING_DIR, f"recording_{entry_id}.db"))
 
 
@@ -265,7 +265,7 @@ def async_notify_files_kept(hass: HomeAssistant, entry: ConfigEntry) -> None:
         hass,
         f"The debug recording for {entry.title} was kept at `{path}`. "
         "Delete it yourself when you no longer need it.",
-        title="Mowing Director recording kept",
+        title="Groundskeeper recording kept",
         notification_id=f"{DOMAIN}_recording_kept_{entry.entry_id}",
     )
 

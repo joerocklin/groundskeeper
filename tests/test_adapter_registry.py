@@ -7,8 +7,8 @@ ticket #8), and the lookup helper is the contract.
 
 from __future__ import annotations
 
-from custom_components.mowing_director.adapter import MowerAdapter
-from custom_components.mowing_director.adapters import (
+from custom_components.groundskeeper.adapter import MowerAdapter
+from custom_components.groundskeeper.adapters import (
     ADAPTER_REGISTRY,
     get_adapter_factory,
 )

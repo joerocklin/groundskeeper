@@ -1,4 +1,4 @@
-"""Tests for the Mowing Director config flow."""
+"""Tests for the Groundskeeper config flow."""
 
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryDisabler
 from homeassistant.const import CONF_DEVICE
@@ -6,7 +6,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mowing_director.const import DOMAIN
+from custom_components.groundskeeper.const import DOMAIN
 from tests.conftest import make_mammotion_mower
 
 
@@ -146,7 +146,7 @@ async def test_flow_lists_mower_and_creates_entry(hass, hass_storage) -> None:
     assert entry.options == {"debug_recording": True}
 
     # One Store per Mower, created with the right key and sections.
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
     assert key in hass_storage
     stored = hass_storage[key]
     assert stored["version"] == 1

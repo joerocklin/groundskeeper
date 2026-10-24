@@ -13,10 +13,10 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.mowing_director import adapters
-from custom_components.mowing_director.adapter import Accepted, Refused, ZoneTaskComplete
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
-from custom_components.mowing_director.logbook import describe
+from custom_components.groundskeeper import adapters
+from custom_components.groundskeeper.adapter import Accepted, Refused, ZoneTaskComplete
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.logbook import describe
 from tests.conftest import make_mammotion_mower
 from tests.fake_mower import DEFAULT_SNAPSHOT, FakeMower
 
@@ -41,7 +41,7 @@ class RecordingMower(FakeMower):
 
 @pytest.fixture
 async def director(hass, hass_storage, monkeypatch):
-    """A loaded Mowing Director entry driven by a RecordingMower."""
+    """A loaded Groundskeeper entry driven by a RecordingMower."""
     holder = {}
     mower = RecordingMower(hass_storage, lambda: holder["key"])
     monkeypatch.setitem(adapters.ADAPTER_REGISTRY, "mammotion", lambda h, e: mower)
@@ -50,7 +50,7 @@ async def director(hass, hass_storage, monkeypatch):
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_DEVICE: device.id})
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     entry = result["result"]
-    holder["key"] = f"mowing_director.{entry.entry_id}"
+    holder["key"] = f"groundskeeper.{entry.entry_id}"
     await hass.async_block_till_done()
     return entry, mower, device
 
@@ -116,7 +116,7 @@ async def test_add_plan_to_done_end_to_end(hass, hass_storage, director, freezer
     assert state_of(hass, "sensor.example_mower_schedule").state == "idle"
     assert state_of(hass, "sensor.example_mower_current_run").state == "none"
 
-    stored = hass_storage[f"mowing_director.{entry.entry_id}"]["data"]
+    stored = hass_storage[f"groundskeeper.{entry.entry_id}"]["data"]
     assert stored["state"]["runs"] == []
     assert [r["status"] for r in stored["history"]["runs"]] == ["done"]
     assert stored["history"]["plans"][plan_id]["origin"] == "service"
@@ -215,7 +215,7 @@ async def test_deadlines_persist_as_absolute_utc(hass, hass_storage, director) -
 
     entry, _, _ = director
     await add_plan(hass, start=True)
-    stored = hass_storage[f"mowing_director.{entry.entry_id}"]["data"]["state"]
+    stored = hass_storage[f"groundskeeper.{entry.entry_id}"]["data"]["state"]
     deadline = datetime.fromisoformat(stored["deadlines"]["stability"])
     assert deadline.utcoffset() == timedelta(0)
 
@@ -225,7 +225,7 @@ async def test_snapshot_only_changes_use_60s_throttled_save(
 ) -> None:
     entry, mower, _ = director
     await add_plan(hass)  # idle; saved write-ahead with snapshot battery 80
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
     battery = lambda: hass_storage[key]["data"]["state"]["snapshot"]["battery"]  # noqa: E731
     assert battery() == 80
 

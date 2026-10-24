@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from custom_components.mowing_director.heights import HeightError
-from custom_components.mowing_director.plans import build_plan, rederive_plan
-from custom_components.mowing_director.run_settings import SettingsError
+from custom_components.groundskeeper.heights import HeightError
+from custom_components.groundskeeper.plans import build_plan, rederive_plan
+from custom_components.groundskeeper.run_settings import SettingsError
 from tests.fake_mower import FakeMower
 
 LIMITS = FakeMower().limits

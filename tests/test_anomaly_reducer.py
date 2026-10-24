@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AddPlan,
     AnswerPrompt,
     DismissAnomaly,
@@ -18,7 +18,7 @@ from custom_components.mowing_director.core import (
     TimerFired,
     initial_core_state,
 )
-from custom_components.mowing_director.adapter import ZoneTaskComplete
+from custom_components.groundskeeper.adapter import ZoneTaskComplete
 from tests.test_core_reducer import (
     DOCKED,
     ENV,
@@ -319,7 +319,7 @@ def test_a_changed_native_ref_resets_the_history() -> None:
 
 
 def test_a_run_that_goes_back_to_pending_adds_nothing_and_restarts_its_clock() -> None:
-    from custom_components.mowing_director.adapter import RainStop
+    from custom_components.groundskeeper.adapter import RainStop
 
     state = mowing_state()
     state, _ = step(state, SnapshotReceived(at(500), MOWING))

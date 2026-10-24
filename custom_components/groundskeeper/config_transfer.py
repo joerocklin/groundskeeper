@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-EXPORT_FORMAT = "mowing_director_export"
+EXPORT_FORMAT = "groundskeeper_export"
 EXPORT_VERSION = 1
 
 _WET_GRASS = "wet_grass"

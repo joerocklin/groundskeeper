@@ -1,6 +1,6 @@
 """Mower adapter seam (spec §3).
 
-The brand-neutral protocol the Mowing Director core is written against.
+The brand-neutral protocol the Groundskeeper core is written against.
 One adapter instance per Mower config entry; adapters come from the
 registry in `adapters/` keyed by source integration domain (spec §3.1).
 The adapter only normalises observations - the core owns every outcome

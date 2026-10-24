@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from custom_components.mowing_director.heights import (
+from custom_components.groundskeeper.heights import (
     DEFAULT_MAX_CUT,
     HeightError,
     HeightLimits,

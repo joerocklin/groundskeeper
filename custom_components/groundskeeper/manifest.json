@@ -1,6 +1,6 @@
 {
-  "domain": "mowing_director",
-  "name": "Mowing Director",
+  "domain": "groundskeeper",
+  "name": "Groundskeeper",
   "after_dependencies": ["logbook", "mammotion"],
   "codeowners": ["@joerocklin"],
   "config_flow": true,

@@ -5,12 +5,12 @@ from datetime import timezone
 
 import pytest
 
-from custom_components.mowing_director.adapter import NewError
-from custom_components.mowing_director.checks import (
+from custom_components.groundskeeper.adapter import NewError
+from custom_components.groundskeeper.checks import (
     default_check_records,
     work_hours_open,
 )
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     ChecksEdited,
     PauseSchedule,
     ResumeSchedule,
@@ -52,7 +52,7 @@ def env_with(*extra, results=None, battery=None, work_hours=None):
 
 
 def start(env, snapshot=DOCKED):
-    from custom_components.mowing_director.core import AddPlan, initial_core_state
+    from custom_components.groundskeeper.core import AddPlan, initial_core_state
     state, _ = step(initial_core_state(), AddPlan(at(0), *make_plan(), start=True), env)
     state, fx = step(state, SnapshotReceived(at(0), snapshot), env)
     return state, fx
@@ -276,7 +276,7 @@ def test_mower_ready_pause_policy_in_record_is_ignored():
 
 
 def test_zone_ready_pauses_after_30_minutes():
-    from custom_components.mowing_director.core import AddPlan, initial_core_state
+    from custom_components.groundskeeper.core import AddPlan, initial_core_state
 
     env = env_with()
     state, _ = step(initial_core_state(), AddPlan(at(0), *make_plan(zone="z2"), start=True), env)

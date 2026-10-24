@@ -1,6 +1,6 @@
 """Zone bearing and Allowed angle range records (spec §4.5, §5.4, §14.3)."""
 
-from custom_components.mowing_director.zone_angles import (
+from custom_components.groundskeeper.zone_angles import (
     DEFAULT_SETTINGS,
     refresh_zone_angles,
 )
@@ -101,7 +101,7 @@ def test_manual_bearing_drives_range_without_polygon_bearing() -> None:
 
 # -- estimated times for the panel (issue #28) ---------------------------------
 
-from custom_components.mowing_director.zone_angles import angle_estimates  # noqa: E402
+from custom_components.groundskeeper.zone_angles import angle_estimates  # noqa: E402
 
 
 def test_estimates_at_base_and_both_edges() -> None:

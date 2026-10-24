@@ -4,7 +4,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 
-from custom_components.mowing_director.const import DOMAIN
+from custom_components.groundskeeper.const import DOMAIN
 from tests.test_reconcile_ha import (  # noqa: F401
     CURRENT,
     SCHEDULE,
@@ -20,7 +20,7 @@ def safe_idle_issue(hass, entry):
 
 async def restart_with(hass, hass_storage, entry, mutate):
     assert await hass.config_entries.async_unload(entry.entry_id)
-    mutate(hass_storage[f"mowing_director.{entry.entry_id}"])
+    mutate(hass_storage[f"groundskeeper.{entry.entry_id}"])
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
@@ -30,7 +30,7 @@ async def test_invalid_config_is_safe_idle_never_commands_and_never_writes(
 ) -> None:
     entry, mower, _ = director
     await mowing_run(hass, mower, freezer)
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
 
     def corrupt(stored):
         stored["data"]["config"]["zones"] = "garbage"
@@ -53,13 +53,13 @@ async def test_newer_store_version_is_safe_idle(hass, hass_storage, director) ->
     await restart_with(hass, hass_storage, entry, lambda s: s.update(version=2))
     assert safe_idle_issue(hass, entry) is not None
     assert state_of(hass, SCHEDULE).state == "idle"
-    assert hass_storage[f"mowing_director.{entry.entry_id}"]["version"] == 2
+    assert hass_storage[f"groundskeeper.{entry.entry_id}"]["version"] == 2
 
 
 async def test_start_fresh_repair_flow_unlocks_and_clears_the_issue(
     hass, hass_storage, director
 ) -> None:
-    from custom_components.mowing_director.repairs import async_create_fix_flow
+    from custom_components.groundskeeper.repairs import async_create_fix_flow
 
     entry, mower, _ = director
     await restart_with(
@@ -74,7 +74,7 @@ async def test_start_fresh_repair_flow_unlocks_and_clears_the_issue(
     assert result["type"] == "create_entry"
     await hass.async_block_till_done()
     assert safe_idle_issue(hass, entry) is None
-    assert hass_storage[f"mowing_director.{entry.entry_id}"]["data"]["config"]["recurrences"] == []
+    assert hass_storage[f"groundskeeper.{entry.entry_id}"]["data"]["config"]["recurrences"] == []
     assert state_of(hass, SCHEDULE).state == "idle"
     await add_plan(hass)  # works again
 
@@ -99,7 +99,7 @@ async def test_corrupt_file_none_is_never_treated_as_nothing_in_flight(
     hass, hass_storage, director, freezer
 ) -> None:
     entry, mower, _ = director
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
     assert await hass.config_entries.async_unload(entry.entry_id)
     hass_storage.pop(key)  # HA renamed the corrupt file away and returned None
     ir.async_create_issue(

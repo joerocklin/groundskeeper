@@ -92,7 +92,7 @@ class StoreSafeIdleFlow(RepairsFlow):
 async def async_create_fix_flow(
     hass: HomeAssistant, issue_id: str, data: dict | None
 ) -> RepairsFlow:
-    """Create the fix flow for a Mowing Director issue."""
+    """Create the fix flow for a Groundskeeper issue."""
     if issue_id.startswith("missing_zones_") and data:
         return MissingZonesFlow(data["entry_id"])
     if issue_id.startswith("native_schedule_") and data:

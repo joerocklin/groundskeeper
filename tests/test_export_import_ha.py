@@ -7,8 +7,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
-from custom_components.mowing_director.runtime import async_get_director
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_checks_ha import add_plan, setup, ws  # noqa: F401
 from tests.test_gates_ha import make_gate
 
@@ -191,7 +191,7 @@ async def test_restore_from_export_in_safe_idle(hass, hass_storage, hass_ws_clie
     entry, _ = setup
     reg, gate = await gate_with_entity(hass, hass_ws_client, entry)
     out = await export(hass, entry)
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
     assert await hass.config_entries.async_unload(entry.entry_id)
     hass_storage[key]["data"]["config"]["zones"] = "garbage"
     assert await hass.config_entries.async_setup(entry.entry_id)

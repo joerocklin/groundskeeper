@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from custom_components.mowing_director.angle_draw import (
+from custom_components.groundskeeper.angle_draw import (
     AngleDraw,
     angular_distance,
     draw_angles,

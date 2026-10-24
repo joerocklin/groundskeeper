@@ -11,7 +11,7 @@ from datetime import timedelta
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.core import Env, SnapshotReceived, TimerFired
+from custom_components.groundskeeper.core import Env, SnapshotReceived, TimerFired
 from tests.test_core_reducer import (
     DOCKED,
     ENV,
@@ -189,7 +189,7 @@ def test_reverify_when_run_reenters_mowing_resets_check_and_window():
     assert run_of(state)["height_check"] == "verified"
     # hold -> mowing re-entry is not reachable yet through the reducer inputs
     # of this slice; exercise the segment entry point directly.
-    from custom_components.mowing_director import core
+    from custom_components.groundskeeper import core
 
     machine = core._Machine(state, HENV, at(2000))
     machine._begin_height_verify(machine.s["runs"][0], reading(80))

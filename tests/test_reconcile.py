@@ -11,13 +11,13 @@ from datetime import timedelta
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     JobStarted,
     Movement,
     NewError,
     Position,
 )
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AbortRunEffect,
     Reconcile,
     SnapshotReceived,

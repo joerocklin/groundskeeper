@@ -10,7 +10,7 @@
         }
       },
       "confirm": {
-        "description": "Add {mower} to Mowing Director. Debug recording is on by default and stores Mower telemetry locally; review it in the Mowing Director panel."
+        "description": "Add {mower} to Groundskeeper. Debug recording is on by default and stores Mower telemetry locally; review it in the Groundskeeper panel."
       },
       "reconfigure": {
         "data": {
@@ -32,7 +32,7 @@
       "no_supported_mower": "That device no longer has a usable Mower entity."
     },
     "create_entry": {
-      "mower_added": "Configure {mower} in the [Mowing Director panel]({panel_url})."
+      "mower_added": "Configure {mower} in the [Groundskeeper panel]({panel_url})."
     }
   },
   "issues": {
@@ -80,19 +80,19 @@
     },
     "conflicting_automations": {
       "title": "Automations also use the Mower",
-      "description": "{count} automation(s) reference the Mower's device or entities and may act on it. Mowing Director never edits automations. Dismiss this if that is intended; it returns only if the set changes."
+      "description": "{count} automation(s) reference the Mower's device or entities and may act on it. Groundskeeper never edits automations. Dismiss this if that is intended; it returns only if the set changes."
     },
     "device_not_found": {
       "title": "The Mower's device was not found",
-      "description": "The device for {mower} is gone, for example after the Mammotion entry was re-added. Open Mowing Director in Settings and choose Reconfigure to rebind it. Your Zones, Plans and settings are kept."
+      "description": "The device for {mower} is gone, for example after the Mammotion entry was re-added. Open Groundskeeper in Settings and choose Reconfigure to rebind it. Your Zones, Plans and settings are kept."
     },
     "source_too_old": {
       "title": "Mammotion integration is too old",
-      "description": "Mammotion {version} is older than the supported {minimum}. Mowing Director may misbehave; update the Mammotion integration."
+      "description": "Mammotion {version} is older than the supported {minimum}. Groundskeeper may misbehave; update the Mammotion integration."
     },
     "store_unusable": {
       "title": "Saved state could not be read",
-      "description": "The saved Schedule and Run state for {mower} could not be read, so the Schedule was reset to idle and empty. Mowing Director did not command the Mower or adopt any job it is running. Zones and settings are kept; add your Plans again."
+      "description": "The saved Schedule and Run state for {mower} could not be read, so the Schedule was reset to idle and empty. Groundskeeper did not command the Mower or adopt any job it is running. Zones and settings are kept; add your Plans again."
     },
     "store_safe_idle": {
       "title": "Saved data could not be used",
@@ -100,14 +100,14 @@
         "step": {
           "init": {
             "title": "Start fresh?",
-            "description": "The saved data for {mower} is unusable ({reason}), so Mowing Director is idle: it will not command the Mower or change the saved file. Starting fresh erases the saved Zones, Plans and settings for this Mower and begins again. Restore an export instead if you have one."
+            "description": "The saved data for {mower} is unusable ({reason}), so Groundskeeper is idle: it will not command the Mower or change the saved file. Starting fresh erases the saved Zones, Plans and settings for this Mower and begins again. Restore an export instead if you have one."
           }
         }
       }
     },
     "broken_references": {
       "title": "Broken references",
-      "description": "{mower} refers to things that no longer resolve. Until they do, each reads as unavailable (a Custom Check fails, a Wet grass source is skipped, a Gate is believed closed, a notify target gets nothing). Fix them in the Mowing Director panel; this clears when they resolve or are edited away.\n\n{references}"
+      "description": "{mower} refers to things that no longer resolve. Until they do, each reads as unavailable (a Custom Check fails, a Wet grass source is skipped, a Gate is believed closed, a notify target gets nothing). Fix them in the Groundskeeper panel; this clears when they resolve or are edited away.\n\n{references}"
     },
     "recording_failed": {
       "title": "Debug recording stopped",
@@ -220,7 +220,7 @@
       "message": "The Mower reported an error."
     },
     "prompt_reason_externally_aborted": {
-      "message": "The Run was stopped from outside Mowing Director."
+      "message": "The Run was stopped from outside Groundskeeper."
     },
     "prompt_reason_superseded": {
       "message": "Another job started on the Mower."
@@ -250,7 +250,7 @@
       "message": "Run on hold"
     },
     "prompt_reason_external_pause": {
-      "message": "The Mower was paused from outside Mowing Director."
+      "message": "The Mower was paused from outside Groundskeeper."
     },
     "prompt_reason_recharge_stall": {
       "message": "The Mower's battery has not risen for an hour of recharging."
@@ -295,31 +295,31 @@
       "message": "Dismiss"
     },
     "prompt_channel_run_failed": {
-      "message": "Mowing Director: Run failed"
+      "message": "Groundskeeper: Run failed"
     },
     "prompt_channel_run_on_hold": {
-      "message": "Mowing Director: Run on hold"
+      "message": "Groundskeeper: Run on hold"
     },
     "prompt_channel_check_waits": {
-      "message": "Mowing Director: Check waits"
+      "message": "Groundskeeper: Check waits"
     },
     "prompt_channel_is_raining": {
-      "message": "Mowing Director: Is it raining?"
+      "message": "Groundskeeper: Is it raining?"
     },
     "prompt_channel_gate": {
-      "message": "Mowing Director: Gates"
+      "message": "Groundskeeper: Gates"
     },
     "prompt_channel_anomaly": {
-      "message": "Mowing Director: Anomalies"
+      "message": "Groundskeeper: Anomalies"
     },
     "prompt_channel_run_started": {
-      "message": "Mowing Director: Run started"
+      "message": "Groundskeeper: Run started"
     },
     "prompt_channel_run_done": {
-      "message": "Mowing Director: Run done"
+      "message": "Groundskeeper: Run done"
     },
     "prompt_channel_schedule_completed": {
-      "message": "Mowing Director: Schedule completed"
+      "message": "Groundskeeper: Schedule completed"
     },
     "prompt_headline_run_started": {
       "message": "Run started"
@@ -343,7 +343,7 @@
       "message": "Anomalies: {count}"
     },
     "prompt_open_panel": {
-      "message": "Open Mowing Director"
+      "message": "Open Groundskeeper"
     },
     "prompt_headline_check_timeout": {
       "message": "Check timed out"
@@ -385,13 +385,13 @@
       "message": "The Run has been mowing for {elapsed_minutes} min; this Zone usually takes about {expected_minutes} min."
     },
     "store_safe_idle": {
-      "message": "The saved data for this Mower is unusable, so Mowing Director is idle. Open Repairs to start fresh or restore an export."
+      "message": "The saved data for this Mower is unusable, so Groundskeeper is idle. Open Repairs to start fresh or restore an export."
     },
     "import_not_idle": {
       "message": "The Schedule must be idle: finish or cancel the current Plans and Runs first."
     },
     "import_invalid": {
-      "message": "That file is not a usable Mowing Director export."
+      "message": "That file is not a usable Groundskeeper export."
     },
     "nothing_to_undo": {
       "message": "There is no import to undo."

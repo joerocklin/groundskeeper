@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.mowing_director.angle_range import (
+from custom_components.groundskeeper.angle_range import (
     AngleRange,
     Basis,
     double_grid_estimate,
@@ -207,7 +207,7 @@ def test_result_exposes_base_and_edge_estimates():
 
 @pytest.fixture(scope="module")
 def real_bearing():
-    from custom_components.mowing_director.zone_bearing import zone_bearing
+    from custom_components.groundskeeper.zone_bearing import zone_bearing
 
     return lambda t: zone_bearing(real(t)).bearing
 

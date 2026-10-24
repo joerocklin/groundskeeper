@@ -8,10 +8,10 @@ import pytest
 
 from homeassistant.helpers import issue_registry as ir
 
-from custom_components.mowing_director import store as store_mod
-from custom_components.mowing_director.store import MowerStore, empty_store_data
+from custom_components.groundskeeper import store as store_mod
+from custom_components.groundskeeper.store import MowerStore, empty_store_data
 
-KEY = "mowing_director.e1"
+KEY = "groundskeeper.e1"
 
 
 @pytest.fixture(autouse=True)

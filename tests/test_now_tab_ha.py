@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.adapter import Refused
+from custom_components.groundskeeper.adapter import Refused
 from tests.test_step_down_plans import director_of, plan, ws  # noqa: F401
 from tests.test_tracer_bullet import MOWING, add_plan, advance, director, state_of  # noqa: F401
 
@@ -152,7 +152,7 @@ async def test_subscribe_now_pushes_the_view_whenever_the_director_changes(
 ) -> None:
     entry, mower, _ = director
     client = await hass_ws_client(hass)
-    await client.send_json({"id": 7, "type": "mowing_director/subscribe_now",
+    await client.send_json({"id": 7, "type": "groundskeeper/subscribe_now",
                             "entry_id": entry.entry_id})
     assert (await client.receive_json())["success"]
     first = await client.receive_json()
@@ -161,7 +161,7 @@ async def test_subscribe_now_pushes_the_view_whenever_the_director_changes(
     mower.emit_snapshot(replace(mower.snapshot, battery=1))
     await hass.async_block_till_done()
     # events queued before this request's result are the pushes
-    await client.send_json({"id": 99, "type": "mowing_director/get_now",
+    await client.send_json({"id": 99, "type": "groundskeeper/get_now",
                             "entry_id": entry.entry_id})
     seen = []
     while (msg := await client.receive_json())["id"] != 99:

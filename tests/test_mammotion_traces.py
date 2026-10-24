@@ -17,12 +17,12 @@ from typing import Any
 from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.core import HomeAssistant
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     NewError,
     SelfCheckReason,
     Snapshot,
 )
-from custom_components.mowing_director.adapters.mammotion import MammotionAdapter
+from custom_components.groundskeeper.adapters.mammotion import MammotionAdapter
 from tests.mammotion_states import install_baseline, set_entity
 
 from .test_mammotion_adapter import NAME, make_adapter, make_director_entry

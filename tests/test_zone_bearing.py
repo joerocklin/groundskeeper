@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.mowing_director.zone_bearing import zone_bearing
+from custom_components.groundskeeper.zone_bearing import zone_bearing
 
 ZONE_JSON = (
     Path(__file__).parent.parent

@@ -7,8 +7,8 @@ from homeassistant.core import SupportsResponse
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.runtime import async_get_director
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.runtime import async_get_director
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from tests.fake_mower import DEFAULT_SNAPSHOT
 from tests.test_checks_ha import add_plan, advance, setup, ws  # noqa: F401
 from tests.test_prompts import list_prompts

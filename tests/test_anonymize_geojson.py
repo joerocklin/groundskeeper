@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.mowing_director.zone_bearing import zone_bearing
+from custom_components.groundskeeper.zone_bearing import zone_bearing
 
 _PATH = Path(__file__).parents[1] / "devtools" / "anonymize_geojson.py"
 _spec = importlib.util.spec_from_file_location("anonymize_geojson", _PATH)

@@ -1,6 +1,6 @@
 """Run history and retention limits through the panel API (spec §14.3, §14.6)."""
 
-from custom_components.mowing_director.runtime import async_get_director
+from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_checks_ha import setup, ws  # noqa: F401
 
 

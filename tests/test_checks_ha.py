@@ -12,8 +12,8 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.mowing_director import adapters
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper import adapters
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from tests.conftest import make_mammotion_mower
 from tests.fake_mower import DEFAULT_SNAPSHOT, FakeMower
 
@@ -216,12 +216,12 @@ async def test_built_in_checks_cannot_be_deleted_or_always_on_disabled(
 async def test_checks_persist_in_the_store(hass, hass_ws_client, setup, hass_storage) -> None:
     entry, _ = setup
     await ws(hass, hass_ws_client, entry, "create_check", **ENTITY_CHECK)
-    stored = hass_storage[f"mowing_director.{entry.entry_id}"]["data"]["config"]["checks"]
+    stored = hass_storage[f"groundskeeper.{entry.entry_id}"]["data"]["config"]["checks"]
     assert [c["name"] for c in stored if c["type"] == "custom"] == ["Gate shut"]
 
 
 def test_logbook_describes_check_timeout() -> None:
-    from custom_components.mowing_director.logbook import describe
+    from custom_components.groundskeeper.logbook import describe
 
     text = describe({"type": "check_timeout", "name": "Gate shut", "policy": "pause"})
     assert text == "Check Gate shut timed out (pause)"

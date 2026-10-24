@@ -76,7 +76,7 @@ async def _async_register_panel_locked(hass: HomeAssistant) -> None:
         hass,
         frontend_url_path=PANEL_URL_PATH,
         webcomponent_name=PANEL_ELEMENT,
-        sidebar_title="Mowing Director",
+        sidebar_title="Groundskeeper",
         sidebar_icon="mdi:robot-mower",
         module_url=f"{PANEL_STATIC_URL}/{PANEL_JS}?v={version}",
         embed_iframe=False,

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from custom_components.mowing_director.crossings import (
+from custom_components.groundskeeper.crossings import (
     battery_slope,
     effective_level,
     should_warn,

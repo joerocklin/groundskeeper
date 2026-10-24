@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     Accepted,
     Channel,
     NativeTask,
@@ -24,7 +24,7 @@ from custom_components.mowing_director.adapter import (
     Zone,
     ZonesChanged,
 )
-from custom_components.mowing_director.adapters.mammotion_catalogue import (
+from custom_components.groundskeeper.adapters.mammotion_catalogue import (
     MammotionCatalogue,
 )
 

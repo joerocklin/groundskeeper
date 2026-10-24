@@ -4,7 +4,7 @@ refresh_zones:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 add_plan:
   fields:
@@ -12,7 +12,7 @@ add_plan:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
     zone:
       required: true
       example: "Front lawn"
@@ -76,7 +76,7 @@ remove_plan:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
     plan_id:
       required: true
       selector:
@@ -88,7 +88,7 @@ start:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 cancel:
   fields:
@@ -96,7 +96,7 @@ cancel:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 retry_run:
   fields:
@@ -104,7 +104,7 @@ retry_run:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 skip_plan:
   fields:
@@ -112,7 +112,7 @@ skip_plan:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 answer_prompt:
   fields:
@@ -120,7 +120,7 @@ answer_prompt:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
     prompt_id:
       required: true
       selector:
@@ -137,7 +137,7 @@ pause:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 stop_now:
   fields:
@@ -145,7 +145,7 @@ stop_now:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 resume:
   fields:
@@ -153,7 +153,7 @@ resume:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 resume_run:
   fields:
@@ -161,7 +161,7 @@ resume_run:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 end_run:
   fields:
@@ -169,7 +169,7 @@ end_run:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 wet_grass_done_today:
   fields:
@@ -177,7 +177,7 @@ wet_grass_done_today:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
 
 dismiss_anomaly:
   fields:
@@ -185,7 +185,7 @@ dismiss_anomaly:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
     detector:
       required: true
       example: charge_not_rising
@@ -202,7 +202,7 @@ export_config:
       required: false
       selector:
         config_entry:
-          integration: mowing_director
+          integration: groundskeeper
     include_history:
       required: false
       default: false

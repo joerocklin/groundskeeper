@@ -5,7 +5,7 @@ import copy
 import random
 from datetime import datetime, timedelta, timezone
 
-from custom_components.mowing_director.plans import build_plan, redraw_plan
+from custom_components.groundskeeper.plans import build_plan, redraw_plan
 from tests.fake_mower import FakeMower
 
 LIMITS = FakeMower().limits

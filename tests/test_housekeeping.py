@@ -7,9 +7,9 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er, 
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mowing_director.adapter import NativeTask
-from custom_components.mowing_director.const import DOMAIN
-from custom_components.mowing_director.housekeeping import (
+from custom_components.groundskeeper.adapter import NativeTask
+from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.housekeeping import (
     ISSUE_CONFLICTING_AUTOMATIONS,
     ISSUE_DEVICE_NOT_FOUND,
     ISSUE_SOURCE_TOO_OLD,
@@ -54,7 +54,7 @@ async def test_native_schedule_issue_clears_when_no_task_enabled(hass) -> None:
 
 
 async def _flow(hass, entry):
-    from custom_components.mowing_director.repairs import async_create_fix_flow
+    from custom_components.groundskeeper.repairs import async_create_fix_flow
 
     issue_id = ISSUE_NATIVE_SCHEDULE.format(entry.entry_id)
     flow = await async_create_fix_flow(hass, issue_id, {"entry_id": entry.entry_id})

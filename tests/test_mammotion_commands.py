@@ -24,14 +24,14 @@ from pytest_homeassistant_custom_component.common import (
     mock_integration,
 )
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     Accepted,
     JobStarted,
     Refused,
     RunSettings,
     Unconfirmed,
 )
-from custom_components.mowing_director.adapters.mammotion import MammotionAdapter
+from custom_components.groundskeeper.adapters.mammotion import MammotionAdapter
 from tests.mammotion_states import install_baseline, install_zone_switches, set_entity
 
 from .test_mammotion_adapter import NAME, make_adapter, make_director_entry

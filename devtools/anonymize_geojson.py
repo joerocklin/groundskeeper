@@ -34,7 +34,7 @@ import secrets
 import sys
 from typing import Any
 
-# Same projection constants as custom_components/mowing_director/zone_bearing.py,
+# Same projection constants as custom_components/groundskeeper/zone_bearing.py,
 # so the translated copy gives identical local-metre geometry.
 _M_PER_DEG_LAT = 110540.0
 _M_PER_DEG_LON_EQ = 111320.0

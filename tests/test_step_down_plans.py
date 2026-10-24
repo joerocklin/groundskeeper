@@ -5,7 +5,7 @@ import pytest
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from tests.test_tracer_bullet import (  # noqa: F401 - `director` is a fixture
     MOWING,
     advance,
@@ -26,7 +26,7 @@ async def plan(hass, start_h=79, end_h=61, zone="front lawn", **extra):
 
 async def ws(hass, hass_ws_client, entry, type_, **data):
     client = await hass_ws_client(hass)
-    await client.send_json({"id": 1, "type": f"mowing_director/{type_}",
+    await client.send_json({"id": 1, "type": f"groundskeeper/{type_}",
                             "entry_id": entry.entry_id, **data})
     return await client.receive_json()
 

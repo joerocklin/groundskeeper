@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.mowing_director.config_transfer import (
+from custom_components.groundskeeper.config_transfer import (
     EXPORT_FORMAT,
     ImportError_,
     broken_references,

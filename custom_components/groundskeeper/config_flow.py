@@ -1,4 +1,4 @@
-"""Config flow for Mowing Director (spec §4.1).
+"""Config flow for Groundskeeper (spec §4.1).
 
 One step: a device picker listing only devices that have a `lawn_mower`
 entity from an integration in the adapter registry. Already-configured
@@ -21,8 +21,8 @@ from .const import ADAPTER_DOMAINS, DOMAIN
 from .housekeeping import async_run_active
 
 
-class MowingDirectorConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Mowing Director."""
+class GroundskeeperConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Groundskeeper."""
 
     VERSION = 1
     MINOR_VERSION = 1
@@ -124,7 +124,7 @@ class MowingDirectorConfigFlow(ConfigFlow, domain=DOMAIN):
                 description="mower_added",
                 description_placeholders={
                     "mower": self._mower_name,
-                    "panel_url": "/mowing_director",
+                    "panel_url": "/groundskeeper",
                 },
             )
 

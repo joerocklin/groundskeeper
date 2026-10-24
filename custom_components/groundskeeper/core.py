@@ -515,7 +515,7 @@ class GateActionEffect:
 
 @dataclass(frozen=True)
 class EmitEvent:
-    """A `mowing_director_event` (the runner adds the entry and device ids)."""
+    """A `groundskeeper_event` (the runner adds the entry and device ids)."""
 
     type: str
     payload: dict[str, Any] = field(default_factory=dict)

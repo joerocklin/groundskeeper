@@ -10,18 +10,18 @@ from homeassistant.components import persistent_notification
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mowing_director import async_remove_entry
-from custom_components.mowing_director.adapter import ZoneTaskComplete
-from custom_components.mowing_director.const import DOMAIN
-from custom_components.mowing_director.diagnostics import (
+from custom_components.groundskeeper import async_remove_entry
+from custom_components.groundskeeper.adapter import ZoneTaskComplete
+from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.diagnostics import (
     async_get_config_entry_diagnostics,
 )
-from custom_components.mowing_director.recording import (
+from custom_components.groundskeeper.recording import (
     async_get_recording,
     async_post_backup,
     async_pre_backup,
 )
-from custom_components.mowing_director.runtime import async_get_director
+from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_tracer_bullet import (  # noqa: F401
     MOWING,
     add_plan,
@@ -31,7 +31,7 @@ from tests.test_tracer_bullet import (  # noqa: F401
 
 
 def db_path(hass, entry) -> Path:
-    return Path(hass.config.path("mowing_director", f"recording_{entry.entry_id}.db"))
+    return Path(hass.config.path("groundskeeper", f"recording_{entry.entry_id}.db"))
 
 
 async def flush(hass, entry) -> None:
@@ -219,7 +219,7 @@ async def test_size_threshold_is_adjustable(hass, director) -> None:
 
 
 async def test_flag_off_means_no_file_and_no_thread(hass, monkeypatch) -> None:
-    from custom_components.mowing_director import adapters
+    from custom_components.groundskeeper import adapters
     from tests.conftest import make_mammotion_mower
     from tests.fake_mower import FakeMower
     from homeassistant.const import CONF_DEVICE

@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.mowing_director.panel import FRONTEND_DIR
+from custom_components.groundskeeper.panel import FRONTEND_DIR
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node missing")
 
 HARNESS = Path(__file__).with_name("panel_harness.js")
-SRC = FRONTEND_DIR / "mowing-director-panel.js"
+SRC = FRONTEND_DIR / "groundskeeper-panel.js"
 
 SQUARE = {
     "type": "Polygon",

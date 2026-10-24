@@ -404,7 +404,7 @@ class Director:
         """First usable snapshot ends the wait, if it has begun."""
         if self._wait_cancel is not None and snapshot_usable(snapshot):
             self.entry.async_create_task(
-                self.hass, self._reconcile(snapshot), "mowing_director reconcile"
+                self.hass, self._reconcile(snapshot), "groundskeeper reconcile"
             )
 
     def on_frozen_signal(self, signal: AdapterSignal) -> None:
@@ -426,7 +426,7 @@ class Director:
             self.entry.async_create_task(
                 self.hass,
                 self._reconcile(latest if snapshot_usable(latest) else None),
-                "mowing_director reconcile",
+                "groundskeeper reconcile",
             )
 
         self._wait_cancel = async_call_later(self.hass, WAIT_FOR_MOWER_S, _gave_up)
@@ -870,7 +870,7 @@ class Director:
             except Exception:  # noqa: BLE001 - a broken action must never break the Run logic
                 _LOGGER.exception("Gate %s %s action failed", gate["name"], effect.which)
 
-        self.entry.async_create_task(self.hass, _run(), "mowing_director gate action")
+        self.entry.async_create_task(self.hass, _run(), "groundskeeper gate action")
 
     # -- inputs ------------------------------------------------------------------
 
@@ -879,7 +879,7 @@ class Director:
         """Queue an input from a sync callback (adapter push, timer)."""
         if not self._closed and not self._store.safe_idle:
             self.entry.async_create_task(
-                self.hass, self.dispatch(make_input), "mowing_director input"
+                self.hass, self.dispatch(make_input), "groundskeeper input"
             )
 
     async def dispatch(self, make_input: Callable[[datetime], CoreInput]) -> None:
@@ -1150,7 +1150,7 @@ class Director:
                 )
 
     def fire_event(self, type_: str, **payload: Any) -> None:
-        """Fire a `mowing_director_event` from outside the reducer."""
+        """Fire a `groundskeeper_event` from outside the reducer."""
         self._fire(EmitEvent(type_, payload))
 
     def _fire(self, effect: EmitEvent) -> None:

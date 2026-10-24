@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     Accepted,
     JobStarted,
     NewError,
@@ -20,7 +20,7 @@ from custom_components.mowing_director.adapter import (
     ZoneTaskAborted,
     ZoneTaskComplete,
 )
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AbortRunEffect,
     AddPlan,
     CancelSchedule,
@@ -348,7 +348,7 @@ def test_reduce_never_mutates_its_input():
 # Schedule controls (spec §6.3, §6.4): Pause, Stop now, Resume, Retry, Skip Plan
 # ---------------------------------------------------------------------------
 
-from custom_components.mowing_director.core import (  # noqa: E402
+from custom_components.groundskeeper.core import (  # noqa: E402
     PauseSchedule,
     ResumeSchedule,
     RetryRun,
@@ -761,7 +761,7 @@ def test_idle_with_job_active_is_not_stopped_off_dock():
 
 
 def moving(progress=None, area=None, lat=None, activity=LawnMowerActivity.MOWING):
-    from custom_components.mowing_director.adapter import Movement, Position
+    from custom_components.groundskeeper.adapter import Movement, Position
 
     pos = Position(lat, 0.0) if lat is not None else None
     return replace(MOWING, activity=activity, movement=Movement(progress, area, pos))
@@ -857,7 +857,7 @@ def test_stall_deadline_due_but_fresh_movement_wins_over_the_clock():
 
 # -- Prompts (spec §12, ticket #17) ---------------------------------------------
 
-from custom_components.mowing_director.core import AnswerPrompt, RaisePrompt  # noqa: E402
+from custom_components.groundskeeper.core import AnswerPrompt, RaisePrompt  # noqa: E402
 
 
 def prompt_env(entry_id="entry1"):

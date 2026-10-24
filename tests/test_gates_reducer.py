@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AddPlan,
     AnswerPrompt,
     GateActionEffect,
@@ -12,7 +12,7 @@ from custom_components.mowing_director.core import (
     TimerFired,
     initial_core_state,
 )
-from custom_components.mowing_director.gates import normalise_gate
+from custom_components.groundskeeper.gates import normalise_gate
 from tests.test_core_reducer import DOCKED, ENV, MOWING, at, events, make_plan, step
 
 OPEN_ACTION = [{"action": "cover.open_cover", "target": {"entity_id": "cover.fence"}}]
@@ -252,7 +252,7 @@ def test_set_gate_flag_input_toggles_the_flag_and_reevaluates() -> None:
 
 
 def test_default_gate_check_has_no_timeout_but_one_can_be_set() -> None:
-    from custom_components.mowing_director.checks import default_check_records
+    from custom_components.groundskeeper.checks import default_check_records
 
     rec = {r["type"]: r for r in default_check_records()}["gate_open"]
     assert (rec["enabled"], rec["timeout_s"], rec["policy"]) == (True, None, "notify")

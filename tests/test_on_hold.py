@@ -8,11 +8,11 @@ from dataclasses import replace
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     Movement,
     SelfCheckReason,
 )
-from custom_components.mowing_director.core import SnapshotReceived, TimerFired
+from custom_components.groundskeeper.core import SnapshotReceived, TimerFired
 from tests.test_core_reducer import (
     MOWING,
     at,
@@ -263,8 +263,8 @@ def test_device_work_hours_hold_stays_while_still_non_work_hours():
 
 # -- user actions ---------------------------------------------------------------
 
-from custom_components.mowing_director.adapter import RainStop  # noqa: E402
-from custom_components.mowing_director.core import (  # noqa: E402
+from custom_components.groundskeeper.adapter import RainStop  # noqa: E402
+from custom_components.groundskeeper.core import (  # noqa: E402
     AbortRunEffect,
     AnswerPrompt,
     CancelSchedule,
@@ -390,8 +390,8 @@ def test_rain_stop_with_no_active_run_changes_nothing():
 
 
 def test_resume_command_result_is_recorded_on_its_own_log_entry():
-    from custom_components.mowing_director.adapter import Accepted
-    from custom_components.mowing_director.core import CommandOutcome
+    from custom_components.groundskeeper.adapter import Accepted
+    from custom_components.groundskeeper.core import CommandOutcome
 
     state = mowing_state()
     state["state"]["command_log"].append(  # an unanswered start_run entry
@@ -417,7 +417,7 @@ def on_hold_by_external_pause_from(state):
 
 
 def test_stop_now_while_on_hold_returns_pending_and_clears_hold_and_prompt():
-    from custom_components.mowing_director.core import StopNow
+    from custom_components.groundskeeper.core import StopNow
 
     state = on_hold_by_external_pause()
     state, fx = step(state, StopNow(at(200)))

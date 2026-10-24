@@ -8,7 +8,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from tests.fake_mower import DEFAULT_SNAPSHOT
 from tests.test_checks_ha import advance, setup  # noqa: F401
 

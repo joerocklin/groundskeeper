@@ -1,4 +1,4 @@
-"""Shared fixtures for Mowing Director tests."""
+"""Shared fixtures for Groundskeeper tests."""
 
 import pytest
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -72,10 +72,10 @@ def _work_hours_always_open(request, monkeypatch):
     depend on the wall clock, so their default window is the whole day."""
     if "test_checks" not in request.module.__name__:
         monkeypatch.setattr(
-            "custom_components.mowing_director.checks.DEFAULT_WINDOW", ("00:00", "00:00")
+            "custom_components.groundskeeper.checks.DEFAULT_WINDOW", ("00:00", "00:00")
         )
     if "test_wet_grass" not in request.module.__name__:
         # Likewise the morning dry-out (spec §9.3) depends on sunrise.
         monkeypatch.setattr(
-            "custom_components.mowing_director.checks.DEFAULT_MORNING_DRY_OUT", False
+            "custom_components.groundskeeper.checks.DEFAULT_MORNING_DRY_OUT", False
         )

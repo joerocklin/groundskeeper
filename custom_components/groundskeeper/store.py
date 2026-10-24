@@ -1,6 +1,6 @@
 """Per-Mower JSON Store (spec §14.3, ADR 0001).
 
-One HA Store per config entry, key `mowing_director.<entry_id>`, holding
+One HA Store per config entry, key `groundskeeper.<entry_id>`, holding
 everything the panel edits plus all runtime state. `entry.data` holds only
 the Mower's device_id; `entry.options` is unused.
 """
@@ -56,7 +56,7 @@ class MowerStore(storage.Store[dict]):
         super().__init__(
             hass,
             STORAGE_VERSION,
-            f"mowing_director.{entry_id}",
+            f"groundskeeper.{entry_id}",
             atomic_writes=True,
             minor_version=STORAGE_VERSION_MINOR,
         )

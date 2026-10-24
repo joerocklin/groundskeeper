@@ -6,9 +6,9 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mowing_director.adapter import Channel, Zone, ZonesChanged
-from custom_components.mowing_director.const import DOMAIN
-from custom_components.mowing_director.zone_sync import (
+from custom_components.groundskeeper.adapter import Channel, Zone, ZonesChanged
+from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.zone_sync import (
     async_attach_zone_sync,
     reconcile_channels,
     reconcile_zones,
@@ -172,7 +172,7 @@ async def test_missing_zones_raise_one_repairs_issue_and_clear_on_return(hass) -
 
 
 async def test_fix_flow_delete_removes_zone_and_its_plans(hass, hass_client) -> None:
-    from custom_components.mowing_director.repairs import async_create_fix_flow
+    from custom_components.groundskeeper.repairs import async_create_fix_flow
 
     mower = FakeMower()
     entry, sync = await _attached(hass, mower)
@@ -198,7 +198,7 @@ async def test_fix_flow_delete_removes_zone_and_its_plans(hass, hass_client) -> 
 
 
 async def test_fix_flow_wait_changes_nothing(hass) -> None:
-    from custom_components.mowing_director.repairs import async_create_fix_flow
+    from custom_components.groundskeeper.repairs import async_create_fix_flow
 
     mower = FakeMower()
     entry, sync = await _attached(hass, mower)
@@ -237,10 +237,10 @@ async def test_ws_refresh_and_hide(hass, hass_ws_client) -> None:
     entry, sync = await _attached(hass, mower)
     zid = (await sync.async_zones())[0]["id"]
     ws = await hass_ws_client(hass)
-    await ws.send_json({"id": 1, "type": "mowing_director/set_zone_hidden",
+    await ws.send_json({"id": 1, "type": "groundskeeper/set_zone_hidden",
                         "entry_id": entry.entry_id, "zone_id": zid, "hidden": True})
     assert (await ws.receive_json())["success"]
-    await ws.send_json({"id": 2, "type": "mowing_director/refresh_zones",
+    await ws.send_json({"id": 2, "type": "groundskeeper/refresh_zones",
                         "entry_id": entry.entry_id})
     assert (await ws.receive_json())["success"]
     assert (await sync.async_zones())[0]["hidden"] is True
@@ -348,7 +348,7 @@ async def test_ws_get_zones_gives_the_zones_tab_everything(hass, hass_ws_client)
     mower, sync, zones = await _with_polygon(hass)
     entry_id = hass.config_entries.async_entries(DOMAIN)[0].entry_id
     ws = await hass_ws_client(hass)
-    await ws.send_json({"id": 1, "type": "mowing_director/get_zones", "entry_id": entry_id})
+    await ws.send_json({"id": 1, "type": "groundskeeper/get_zones", "entry_id": entry_id})
     msg = await ws.receive_json()
     assert msg["success"]
     front, back = msg["result"]["zones"]
@@ -364,5 +364,5 @@ async def test_ws_get_zones_gives_the_zones_tab_everything(hass, hass_ws_client)
 async def test_ws_get_zones_unknown_mower(hass, hass_ws_client) -> None:
     await _with_polygon(hass)
     ws = await hass_ws_client(hass)
-    await ws.send_json({"id": 1, "type": "mowing_director/get_zones", "entry_id": "nope"})
+    await ws.send_json({"id": 1, "type": "groundskeeper/get_zones", "entry_id": "nope"})
     assert (await ws.receive_json())["error"]["code"] == "not_found"

@@ -7,8 +7,8 @@ pruned first, Plan leaves history with its last Run, limits never touch
 
 from dataclasses import replace
 
-from custom_components.mowing_director.adapter import ZoneTaskComplete
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.adapter import ZoneTaskComplete
+from custom_components.groundskeeper.core import (
     AnswerPrompt,
     SignalReceived,
     SkipPlan,

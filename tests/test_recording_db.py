@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from custom_components.mowing_director.recording_db import (
+from custom_components.groundskeeper.recording_db import (
     BATCH_RECORDS,
     FLUSH_INTERVAL_S,
     QUEUE_MAX,

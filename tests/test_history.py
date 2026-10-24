@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.mowing_director.history import (
+from custom_components.groundskeeper.history import (
     capability_warnings,
     retention_limits,
     validate_limits,

@@ -3,7 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AnswerPrompt,
     ArmTimer,
     CancelTimer,
@@ -33,7 +33,7 @@ def step(state, event):
 
 def failing_state(raised_at):
     """A state with one failure Prompt raised at `raised_at` (with reminder)."""
-    from custom_components.mowing_director.core import RaisePrompt
+    from custom_components.groundskeeper.core import RaisePrompt
 
     state, _ = step(
         initial_core_state(),
@@ -107,8 +107,8 @@ def test_catch_up_overnight_waits_for_the_morning():
 
 
 def test_schedule_completed_carries_a_summary_of_the_schedule():
-    from custom_components.mowing_director.adapter import ZoneTaskComplete
-    from custom_components.mowing_director.core import SignalReceived
+    from custom_components.groundskeeper.adapter import ZoneTaskComplete
+    from custom_components.groundskeeper.core import SignalReceived
     from tests.test_core_reducer import mowing_state, at
 
     state = mowing_state(n=1)  # started at T0, Run mowing since at(70)

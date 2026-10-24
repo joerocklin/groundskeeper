@@ -1,11 +1,11 @@
-"""Tests for the Mowing Director panel shell (spec §16.1, §2.3)."""
+"""Tests for the Groundskeeper panel shell (spec §16.1, §2.3)."""
 
 from __future__ import annotations
 
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mowing_director.const import DOMAIN, PANEL_URL_PATH
+from custom_components.groundskeeper.const import DOMAIN, PANEL_URL_PATH
 
 
 def _add_entry(hass: HomeAssistant, title: str = "Luba") -> MockConfigEntry:
@@ -25,10 +25,10 @@ async def test_first_entry_registers_one_sidebar_panel(hass: HomeAssistant) -> N
     await hass.async_block_till_done()
 
     panel = _panels(hass)[PANEL_URL_PATH]
-    assert panel.sidebar_title == "Mowing Director"
+    assert panel.sidebar_title == "Groundskeeper"
     assert panel.require_admin is True
     module_url = panel.config["_panel_custom"]["module_url"]
-    assert module_url.startswith("/mowing_director/panel/mowing-director-panel.js?v=")
+    assert module_url.startswith("/groundskeeper/panel/groundskeeper-panel.js?v=")
 
 
 async def test_panel_removed_only_when_last_entry_unloads(hass: HomeAssistant) -> None:
@@ -57,15 +57,15 @@ async def test_panel_js_served_with_cache_headers(
     await hass.async_block_till_done()
 
     client = await hass_client()
-    resp = await client.get("/mowing_director/panel/mowing-director-panel.js")
+    resp = await client.get("/groundskeeper/panel/groundskeeper-panel.js")
     assert resp.status == 200
     assert "max-age" in resp.headers["Cache-Control"]
-    assert "mowing-director-panel" in await resp.text()
+    assert "groundskeeper-panel" in await resp.text()
 
 
 def test_cache_buster_tracks_content(tmp_path) -> None:
     """Different bytes give a different `?v=` value; same bytes the same."""
-    from custom_components.mowing_director.panel import _cache_buster
+    from custom_components.groundskeeper.panel import _cache_buster
 
     a, b = tmp_path / "a.js", tmp_path / "b.js"
     a.write_text("one")
@@ -78,27 +78,27 @@ def test_minified_served_only_when_current(tmp_path, monkeypatch) -> None:
     """A stale minified build is ignored in favour of the readable source."""
     import hashlib
 
-    from custom_components.mowing_director import panel
+    from custom_components.groundskeeper import panel
 
     monkeypatch.setattr(panel, "FRONTEND_DIR", tmp_path)
-    src = tmp_path / "mowing-director-panel.js"
+    src = tmp_path / "groundskeeper-panel.js"
     src.write_text("readable")
-    (tmp_path / "mowing-director-panel.min.js").write_text("min")
-    stamp = tmp_path / "mowing-director-panel.min.js.sha1"
+    (tmp_path / "groundskeeper-panel.min.js").write_text("min")
+    stamp = tmp_path / "groundskeeper-panel.min.js.sha1"
 
     assert panel._asset_to_serve() == src  # no stamp yet
     stamp.write_text("deadbeef")
     assert panel._asset_to_serve() == src  # stale stamp
     stamp.write_text(hashlib.sha1(b"readable").hexdigest())
-    assert panel._asset_to_serve().name == "mowing-director-panel.min.js"
+    assert panel._asset_to_serve().name == "groundskeeper-panel.min.js"
 
 
 def test_frontend_smoke() -> None:
     """Load/render smoke (spec §18.2 layer 5): element, tabs, WS wiring."""
-    from custom_components.mowing_director.panel import FRONTEND_DIR
+    from custom_components.groundskeeper.panel import FRONTEND_DIR
 
-    src = (FRONTEND_DIR / "mowing-director-panel.js").read_text()
-    assert "customElements.define('mowing-director-panel'" in src
+    src = (FRONTEND_DIR / "groundskeeper-panel.js").read_text()
+    assert "customElements.define('groundskeeper-panel'" in src
     assert "attachShadow" in src
     for tab in (
         "Now",
@@ -109,8 +109,8 @@ def test_frontend_smoke() -> None:
         "Settings",
     ):
         assert f"'{tab}'" in src
-    assert "mowing_director/subscribe" in src
-    assert "mowing_director/list_mowers" in src
+    assert "groundskeeper/subscribe" in src
+    assert "groundskeeper/list_mowers" in src
     for cmd in (
         "get_zones", "refresh_zones", "set_zone_hidden", "set_zone_bearing",
         "reset_zone_bearing", "set_zone_range", "reset_zone_range",
@@ -121,6 +121,6 @@ def test_frontend_smoke() -> None:
 
 def test_committed_minified_build_is_current() -> None:
     """Fails if the source changed without re-running devtools/build_panel.mjs."""
-    from custom_components.mowing_director.panel import FRONTEND_DIR, _asset_to_serve
+    from custom_components.groundskeeper.panel import FRONTEND_DIR, _asset_to_serve
 
-    assert _asset_to_serve() == FRONTEND_DIR / "mowing-director-panel.min.js"
+    assert _asset_to_serve() == FRONTEND_DIR / "groundskeeper-panel.min.js"

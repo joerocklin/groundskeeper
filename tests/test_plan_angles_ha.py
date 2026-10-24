@@ -38,7 +38,7 @@ async def test_reroll_redraws_a_not_started_plan_and_is_refused_once_started(
     runs = director_of(hass, entry).state["runs"]
     assert all(r["angle_draw"]["angles"] == after for r in runs)
 
-    await hass.services.async_call("mowing_director", "start", {}, blocking=True)
+    await hass.services.async_call("groundskeeper", "start", {}, blocking=True)
     await advance(hass, freezer, 61)
     msg = await ws(hass, hass_ws_client, entry, "reroll_angles", plan_id=response["plan_id"])
     assert not msg["success"] and msg["error"]["code"] == "plan_started"

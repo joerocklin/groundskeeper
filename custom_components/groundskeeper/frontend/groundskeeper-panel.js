@@ -1,5 +1,5 @@
 /*
- * Mowing Director panel shell (spec §16).
+ * Groundskeeper panel shell (spec §16).
  *
  * Plain HTMLElement + shadow DOM, matching WashData; no framework, no bundler.
  * Lit was considered and not chosen: the panel is a handful of tabs over
@@ -864,7 +864,7 @@ function settingsTabHtml(notifyHtml) {
     <section class="card" id="settings-storage"></section>`;
 }
 
-class MowingDirectorPanel extends HTMLElement {
+class GroundskeeperPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
@@ -911,7 +911,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (this._started) return;
     this._started = true;
     try {
-      const res = await this._hass.connection.sendMessagePromise({ type: 'mowing_director/list_mowers' });
+      const res = await this._hass.connection.sendMessagePromise({ type: 'groundskeeper/list_mowers' });
       this._mowers = res.mowers;
       if (!this._mowers.some((m) => m.entry_id === this._entryId)) {
         this._entryId = this._mowers.length ? this._mowers[0].entry_id : null;
@@ -930,7 +930,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (!this._entryId) return;
     this._unsub = await this._hass.connection.subscribeMessage(
       (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._loadChecks(); this._render(); },
-      { type: 'mowing_director/subscribe', entry_id: this._entryId },
+      { type: 'groundskeeper/subscribe', entry_id: this._entryId },
     );
     await this._subscribeNow();
   }
@@ -939,7 +939,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (!this._entryId || (this._tab !== 'zones' && this._tab !== 'now' && this._tab !== 'schedule')) return;
     try {
       this._zoneView = await this._hass.connection.sendMessagePromise({
-        type: 'mowing_director/get_zones', entry_id: this._entryId });
+        type: 'groundskeeper/get_zones', entry_id: this._entryId });
       this._render();
     } catch (err) {
       this._error = err.message || String(err);
@@ -950,7 +950,7 @@ class MowingDirectorPanel extends HTMLElement {
   async _zoneCmd(type, extra = {}) {
     try {
       await this._hass.connection.sendMessagePromise({
-        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+        type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
     } catch (err) {
       this._error = err.message || String(err);
     }
@@ -961,7 +961,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (!this._entryId || this._tab !== 'schedule') return;
     try {
       this._scheduleView = await this._hass.connection.sendMessagePromise({
-        type: 'mowing_director/get_schedule', entry_id: this._entryId });
+        type: 'groundskeeper/get_schedule', entry_id: this._entryId });
       this._render();
     } catch (err) {
       this._error = err.message || String(err);
@@ -972,7 +972,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (!this._entryId || this._tab !== 'checks') return;
     try {
       this._checksView = await this._hass.connection.sendMessagePromise({
-        type: 'mowing_director/list_checks', entry_id: this._entryId });
+        type: 'groundskeeper/list_checks', entry_id: this._entryId });
       this._render();
     } catch (err) {
       this._error = err.message || String(err);
@@ -983,7 +983,7 @@ class MowingDirectorPanel extends HTMLElement {
     this._checksNotice = null;
     try {
       await this._hass.connection.sendMessagePromise({
-        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+        type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
       return true;
     } catch (err) {
       this._checksNotice = err.message || String(err);
@@ -1062,7 +1062,7 @@ class MowingDirectorPanel extends HTMLElement {
     this._notice = null;
     try {
       result = await this._hass.connection.sendMessagePromise({
-        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+        type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
       const warnings = editWarningsText(result && result.warnings);
       if (warnings.length) this._notice = warnings.join(' ');
     } catch (err) {
@@ -1090,10 +1090,10 @@ class MowingDirectorPanel extends HTMLElement {
     try {
       if (kind === 'preview') {
         this._planPreview = await this._hass.connection.sendMessagePromise({
-          type: 'mowing_director/preview_plan', entry_id: this._entryId, ...payload });
+          type: 'groundskeeper/preview_plan', entry_id: this._entryId, ...payload });
       } else {
         await this._hass.connection.sendMessagePromise({
-          type: 'mowing_director/add_plan', entry_id: this._entryId, ...payload });
+          type: 'groundskeeper/add_plan', entry_id: this._entryId, ...payload });
         this._planPreview = null;
       }
     } catch (err) {
@@ -1195,8 +1195,8 @@ class MowingDirectorPanel extends HTMLElement {
     if (error) { d.error = error; this._render(); return; }
     try {
       await this._hass.connection.sendMessagePromise(d.id
-        ? { type: 'mowing_director/update_gate', entry_id: this._entryId, gate_id: d.id, changes: payload }
-        : { type: 'mowing_director/create_gate', entry_id: this._entryId, ...payload });
+        ? { type: 'groundskeeper/update_gate', entry_id: this._entryId, gate_id: d.id, changes: payload }
+        : { type: 'groundskeeper/create_gate', entry_id: this._entryId, ...payload });
     } catch (err) {
       d.error = err.message || String(err);
       this._render();
@@ -1286,11 +1286,11 @@ class MowingDirectorPanel extends HTMLElement {
         this._loadZones();
       }
       this._render();
-    }, { type: 'mowing_director/subscribe_now', entry_id: this._entryId });
+    }, { type: 'groundskeeper/subscribe_now', entry_id: this._entryId });
     this._unsubPrompts = await conn.subscribeMessage((ev) => {
       this._prompts = ev.prompts || [];
       this._render();
-    }, { type: 'mowing_director/subscribe_prompts', entry_id: this._entryId });
+    }, { type: 'groundskeeper/subscribe_prompts', entry_id: this._entryId });
   }
 
   _lengthUnit() {
@@ -1301,7 +1301,7 @@ class MowingDirectorPanel extends HTMLElement {
   async _nowCmd(type, extra = {}) {
     try {
       await this._hass.connection.sendMessagePromise({
-        type: `mowing_director/${type}`, entry_id: this._entryId, ...extra });
+        type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
       return null;
     } catch (err) {
       const message = errorText(err.code, err.message || String(err));
@@ -1379,7 +1379,7 @@ class MowingDirectorPanel extends HTMLElement {
             if (error) { this._sheet.error = error; this._render(); break; }
             try {
               const res = await this._hass.connection.sendMessagePromise({
-                type: 'mowing_director/edit_run', entry_id: this._entryId, run_id, ...payload });
+                type: 'groundskeeper/edit_run', entry_id: this._entryId, run_id, ...payload });
               const warnings = (res && res.warnings) || [];
               this._sheet = warnings.length ? { run_id, warnings } : null; // warnings show; edit already saved
             } catch (err) {
@@ -1399,7 +1399,7 @@ class MowingDirectorPanel extends HTMLElement {
     if (!this._entryId || this._tab !== 'settings') return;
     try {
       this._notify = await this._hass.connection.sendMessagePromise({
-        type: 'mowing_director/get_notify_settings', entry_id: this._entryId });
+        type: 'groundskeeper/get_notify_settings', entry_id: this._entryId });
       this._render();
     } catch (err) {
       this._error = err.message || String(err);
@@ -1409,7 +1409,7 @@ class MowingDirectorPanel extends HTMLElement {
   async _setNotify(extra) {
     try {
       this._notify = await this._hass.connection.sendMessagePromise({
-        type: 'mowing_director/set_notify_settings', entry_id: this._entryId, ...extra });
+        type: 'groundskeeper/set_notify_settings', entry_id: this._entryId, ...extra });
     } catch (err) {
       this._notifyError = err.message || String(err);
     }
@@ -1469,7 +1469,7 @@ class MowingDirectorPanel extends HTMLElement {
     else if (this._tab === 'settings') body = `<main>${this._settingsTab()}</main>`;
     else body = `<main><section class="card"><h2>${esc(label)}</h2><p>Coming soon.</p></section></main>`;
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
-      <header><h1>Mowing Director</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
+      <header><h1>Groundskeeper</h1><select id="mower" aria-label="Mower">${mowerOptions}</select></header>
       <nav role="tablist">${tabs}</nav>${banner}${body}`;
     this.shadowRoot.querySelector('#mower').onchange = (e) => {
       this._entryId = e.target.value;
@@ -1486,4 +1486,4 @@ class MowingDirectorPanel extends HTMLElement {
   }
 }
 
-customElements.define('mowing-director-panel', MowingDirectorPanel);
+customElements.define('groundskeeper-panel', GroundskeeperPanel);

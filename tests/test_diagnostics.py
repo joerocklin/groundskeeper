@@ -8,7 +8,7 @@ from homeassistant.const import CONF_DEVICE
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.mowing_director.diagnostics import (
+from custom_components.groundskeeper.diagnostics import (
     async_get_config_entry_diagnostics,
 )
 from tests.mammotion_states import install_baseline
@@ -40,7 +40,7 @@ async def test_diagnostics_snapshot_limits_and_redaction(hass: HomeAssistant) ->
 async def test_diagnostics_without_mower_device(hass: HomeAssistant) -> None:
     """A stale entry whose device is gone still answers without crashing."""
     entry = MockConfigEntry(
-        domain="mowing_director", title="Gone", unique_id="nope", data={CONF_DEVICE: "nope"}
+        domain="groundskeeper", title="Gone", unique_id="nope", data={CONF_DEVICE: "nope"}
     )
     entry.add_to_hass(hass)
     data = await async_get_config_entry_diagnostics(hass, entry)

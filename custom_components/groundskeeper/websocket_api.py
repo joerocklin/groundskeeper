@@ -2,7 +2,7 @@
 
 Pattern every later panel ticket follows (see docs/panel-websocket-pattern.md):
 
-- One command per panel action, named `mowing_director/<verb>`, always with
+- One command per panel action, named `groundskeeper/<verb>`, always with
   `require_admin` and an `entry_id` selecting the Mower.
 - State the panel shows comes from `build_snapshot`; extend it there.
 - Anything that changes what the panel shows calls

@@ -13,8 +13,8 @@ from pytest_homeassistant_custom_component.common import (
     async_mock_service,
 )
 
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
-from custom_components.mowing_director.runtime import async_get_director
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_prompts import fail_a_run, list_prompts, types  # noqa: F401
 from tests.test_on_hold_ha import hold_run  # noqa: F401
 from tests.test_tracer_bullet import (  # noqa: F401
@@ -24,7 +24,7 @@ from tests.test_tracer_bullet import (  # noqa: F401
     director,
     state_of,
 )
-from custom_components.mowing_director.adapter import ZoneTaskComplete
+from custom_components.groundskeeper.adapter import ZoneTaskComplete
 
 from homeassistant.components import persistent_notification
 
@@ -37,7 +37,7 @@ def _pn(hass):
 def _real_work_hours(monkeypatch):
     """Reminders follow the real default window, not conftest's whole-day one."""
     monkeypatch.setattr(
-        "custom_components.mowing_director.checks.DEFAULT_WINDOW", ("08:00", "00:00")
+        "custom_components.groundskeeper.checks.DEFAULT_WINDOW", ("08:00", "00:00")
     )
 
 
@@ -46,7 +46,7 @@ PIXEL, IPHONE = "mobile_app_pixel_8", "mobile_app_iphone"
 
 async def ws_call(hass, hass_ws_client, type_, **fields):
     ws = await hass_ws_client(hass)
-    await ws.send_json({"id": 1, "type": f"mowing_director/{type_}", **fields})
+    await ws.send_json({"id": 1, "type": f"groundskeeper/{type_}", **fields})
     return await ws.receive_json()
 
 
@@ -95,7 +95,7 @@ async def test_notify_targets_are_stored_in_config_and_readable(
         "is_raining": True, "run_started": False, "run_done": False,
         "schedule_completed": True,
     }
-    stored = hass_storage[f"mowing_director.{entry.entry_id}"]["data"]["config"]
+    stored = hass_storage[f"groundskeeper.{entry.entry_id}"]["data"]["config"]
     assert stored["notify_targets"] == [PIXEL]
 
 
@@ -134,8 +134,8 @@ async def test_failure_prompt_goes_to_every_target_with_actions(
         assert "authenticationRequired" not in str(data)
         assert data["push"]["interruption-level"] == "time-sensitive"
         assert data["priority"] == "high"
-        assert data["channel"] == "Mowing Director: Run failed"
-        assert data["clickAction"].startswith("/mowing-director")
+        assert data["channel"] == "Groundskeeper: Run failed"
+        assert data["clickAction"].startswith("/groundskeeper")
         assert data["url"] == data["clickAction"]
 
 
@@ -219,7 +219,7 @@ async def test_without_targets_failure_raises_a_persistent_notification(
     [prompt] = async_get_director(hass, entry.entry_id).state["prompts"]
     note = _pn(hass)[prompt["tag"]]
     assert note["title"] == "Example Mower: Run failed"
-    assert "/mowing-director" in note["message"]
+    assert "/groundskeeper" in note["message"]
     await hass.services.async_call(DOMAIN, "skip_plan", {}, blocking=True)
     assert prompt["tag"] not in _pn(hass)
 
@@ -320,7 +320,7 @@ async def test_reminders_replace_by_tag_and_skip_the_night(
 
 
 async def test_first_notification_goes_out_at_any_hour(hass, director, phones, freezer) -> None:
-    from custom_components.mowing_director.core import RaisePrompt
+    from custom_components.groundskeeper.core import RaisePrompt
 
     await hass.config.async_set_time_zone("UTC")
     freezer.move_to(datetime(2026, 10, 21, 3, 0, tzinfo=timezone.utc))
@@ -386,7 +386,7 @@ async def test_check_timeout_event_becomes_a_check_wait_notice(
 async def test_gate_urgent_resend_is_time_sensitive_but_the_first_warning_is_not(
     hass, director, phones
 ) -> None:
-    from custom_components.mowing_director.core import RaisePrompt
+    from custom_components.groundskeeper.core import RaisePrompt
 
     entry, _, _ = director
     d = async_get_director(hass, entry.entry_id)

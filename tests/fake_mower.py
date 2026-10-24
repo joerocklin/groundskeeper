@@ -23,7 +23,7 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers import selector
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     Accepted,
     AdapterSignal,
     AdapterSink,

@@ -1,4 +1,4 @@
-# Mowing Director
+# Groundskeeper
 
 ## On the use of AI
 

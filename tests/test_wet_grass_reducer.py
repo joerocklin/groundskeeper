@@ -5,13 +5,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from custom_components.mowing_director.adapter import RainStop
-from custom_components.mowing_director.checks import (
+from custom_components.groundskeeper.adapter import RainStop
+from custom_components.groundskeeper.checks import (
     default_check_records,
     forecast_confirms_rain,
     weather_condition_wet,
 )
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AnswerPrompt,
     ChecksEdited,
     SignalReceived,

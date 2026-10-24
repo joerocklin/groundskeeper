@@ -1,4 +1,4 @@
-"""Logbook descriptions for `mowing_director_event` (spec §13.4)."""
+"""Logbook descriptions for `groundskeeper_event` (spec §13.4)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .const import DOMAIN, EVENT_TYPE
 
 
 def describe(data: dict[str, Any]) -> str:
-    """One sentence for a Mowing Director event payload."""
+    """One sentence for a Groundskeeper event payload."""
     kind = data.get("type")
     zone = data.get("zone_name") or "a Zone"
     reason = f" ({data['reason']})" if data.get("reason") else ""
@@ -60,10 +60,10 @@ def async_describe_events(
     hass: HomeAssistant,
     async_describe_event: Callable[[str, str, Callable[[Event], dict[str, str]]], None],
 ) -> None:
-    """Describe the one Mowing Director event type."""
+    """Describe the one Groundskeeper event type."""
 
     @callback
     def _describe(event: Event) -> dict[str, str]:
-        return {LOGBOOK_ENTRY_NAME: "Mowing Director", LOGBOOK_ENTRY_MESSAGE: describe(dict(event.data))}
+        return {LOGBOOK_ENTRY_NAME: "Groundskeeper", LOGBOOK_ENTRY_MESSAGE: describe(dict(event.data))}
 
     async_describe_event(DOMAIN, EVENT_TYPE, _describe)

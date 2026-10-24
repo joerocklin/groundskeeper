@@ -1,4 +1,4 @@
-"""Mowing Director services (spec §13.1-13.3).
+"""Groundskeeper services (spec §13.1-13.3).
 
 Every service takes an optional `config_entry_id` (default: the only loaded
 Mower) and raises a translated `ServiceValidationError` where it does not

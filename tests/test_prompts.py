@@ -4,9 +4,9 @@ import pytest
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.adapter import Refused
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
-from custom_components.mowing_director.runtime import async_get_director
+from custom_components.groundskeeper.adapter import Refused
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_tracer_bullet import add_plan, advance, director, state_of  # noqa: F401
 
 PENDING = "sensor.example_mower_pending_prompts"
@@ -25,7 +25,7 @@ def types(events, type_):
 async def list_prompts(hass, hass_ws_client, entry):
     ws = await hass_ws_client(hass)
     await ws.send_json(
-        {"id": 1, "type": "mowing_director/list_prompts", "entry_id": entry.entry_id}
+        {"id": 1, "type": "groundskeeper/list_prompts", "entry_id": entry.entry_id}
     )
     msg = await ws.receive_json()
     assert msg["success"]
@@ -135,7 +135,7 @@ async def test_prompts_survive_in_the_store_until_answered(
     hass, hass_storage, director, freezer
 ) -> None:
     entry, mower, _ = director
-    key = f"mowing_director.{entry.entry_id}"
+    key = f"groundskeeper.{entry.entry_id}"
     await fail_a_run(hass, mower, freezer)
     assert [p["kind"] for p in hass_storage[key]["data"]["state"]["prompts"]] == ["run_failed"]
     await hass.services.async_call(DOMAIN, "skip_plan", {}, blocking=True)
@@ -148,7 +148,7 @@ async def test_websocket_subscription_pushes_prompt_list_changes(
     entry, mower, _ = director
     ws = await hass_ws_client(hass)
     await ws.send_json(
-        {"id": 1, "type": "mowing_director/subscribe_prompts", "entry_id": entry.entry_id}
+        {"id": 1, "type": "groundskeeper/subscribe_prompts", "entry_id": entry.entry_id}
     )
     assert (await ws.receive_json())["success"]
     assert (await ws.receive_json())["event"]["prompts"] == []
@@ -163,7 +163,7 @@ async def test_websocket_subscription_pushes_prompt_list_changes(
 
 async def test_list_prompts_unknown_mower_is_not_found(hass, hass_ws_client, director) -> None:
     ws = await hass_ws_client(hass)
-    await ws.send_json({"id": 1, "type": "mowing_director/list_prompts", "entry_id": "nope"})
+    await ws.send_json({"id": 1, "type": "groundskeeper/list_prompts", "entry_id": "nope"})
     msg = await ws.receive_json()
     assert not msg["success"] and msg["error"]["code"] == "not_found"
 
@@ -178,6 +178,6 @@ async def test_list_prompts_unknown_mower_is_not_found(hass, hass_ws_client, dir
     ],
 )
 def test_prompt_events_have_logbook_descriptions(payload, text) -> None:
-    from custom_components.mowing_director.logbook import describe
+    from custom_components.groundskeeper.logbook import describe
 
     assert describe(payload) == text

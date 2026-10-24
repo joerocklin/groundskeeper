@@ -13,7 +13,7 @@ from dataclasses import replace
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     Accepted,
     Refused,
     Unconfirmed,
@@ -136,7 +136,7 @@ def test_extras_schema_is_panel_renderable() -> None:
 
 
 def _settings():
-    from custom_components.mowing_director.adapter import RunSettings
+    from custom_components.groundskeeper.adapter import RunSettings
 
     return RunSettings(
         blade_height_mm=70,

@@ -7,8 +7,8 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import async_capture_events
 
-from custom_components.mowing_director.adapter import RainStop
-from custom_components.mowing_director.const import DOMAIN, EVENT_TYPE
+from custom_components.groundskeeper.adapter import RainStop
+from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from tests.test_prompts import list_prompts  # noqa: F401
 from tests.test_tracer_bullet import (  # noqa: F401
     MOWING,
@@ -47,7 +47,7 @@ async def test_on_hold_reason_and_prompt_are_exposed(
         "Zone: Front Lawn",
         "Plan: 70 mm",
         "Run 1 of 1 at 70 mm",
-        "The Mower was paused from outside Mowing Director.",
+        "The Mower was paused from outside Groundskeeper.",
     ]
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.mowing_director.gates import (
+from custom_components.groundskeeper.gates import (
     believed_open,
     derive_gating,
     normalise_gate,
@@ -103,7 +103,7 @@ def test_validation() -> None:
 
 
 def test_logbook_describes_the_gate_events() -> None:
-    from custom_components.mowing_director.logbook import describe
+    from custom_components.groundskeeper.logbook import describe
 
     for kind in ("gate_crossing_expected", "gate_crossing_ended", "gate_open_action_failed"):
         text = describe({"type": kind, "gate_name": "Fence gate", "zone_name": "Front Lawn"})

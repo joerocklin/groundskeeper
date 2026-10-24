@@ -1,4 +1,4 @@
-# Mowing Director
+# Groundskeeper
 
 A Home Assistant integration that directs a robot mower through multi-height step-down mowing across zones, sequencing work the mower's own app cannot express.
 

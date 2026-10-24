@@ -1,7 +1,7 @@
 """Pure Store validation (spec §14.7, #31): section checks run on load."""
 
-from custom_components.mowing_director.store import empty_store_data
-from custom_components.mowing_director.store_validation import validate_store
+from custom_components.groundskeeper.store import empty_store_data
+from custom_components.groundskeeper.store_validation import validate_store
 
 
 def test_a_fresh_store_is_valid_and_untouched() -> None:

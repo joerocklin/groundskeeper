@@ -266,7 +266,7 @@ class MammotionAdapter:
         """
         device = dr.async_get(self._hass).async_get(self._device_id)
         if device is None:
-            raise HomeAssistantError("Mowing Director Mower device not found")
+            raise HomeAssistantError("Groundskeeper Mower device not found")
         for domain, identifier in device.identifiers:
             if domain == MAMMOTION:
                 return str(identifier)

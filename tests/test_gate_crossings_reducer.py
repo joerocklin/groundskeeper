@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from homeassistant.components.lawn_mower import LawnMowerActivity as A
 
-from custom_components.mowing_director.core import (
+from custom_components.groundskeeper.core import (
     AnswerPrompt,
     GateActionEffect,
     SnapshotReceived,
@@ -75,7 +75,7 @@ def test_return_level_is_the_battery_when_returning_leads_to_recharging() -> Non
 
 def step_run(env):
     from tests.test_core_reducer import AddPlan, make_plan
-    from custom_components.mowing_director.core import initial_core_state
+    from custom_components.groundskeeper.core import initial_core_state
 
     state, _ = step(initial_core_state(), AddPlan(at(0), *make_plan(), start=True), env)
     state, _ = step(state, SnapshotReceived(at(0), DOCKED), env)
@@ -364,7 +364,7 @@ def test_leaving_the_dock_with_the_gate_closed_resends_once() -> None:
 
 
 def test_the_director_never_commands_the_mower_for_a_gate() -> None:
-    from custom_components.mowing_director.core import AbortRunEffect, ResumeRunEffect
+    from custom_components.groundskeeper.core import AbortRunEffect, ResumeRunEffect
 
     env = env_for(gate())
     state = mowing_through(env, battery=45)

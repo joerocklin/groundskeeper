@@ -21,16 +21,16 @@ from pytest_homeassistant_custom_component.common import (
     async_mock_service,
 )
 
-from custom_components.mowing_director.adapter import (
+from custom_components.groundskeeper.adapter import (
     CommandResult,
     MowerAdapter,
     NewError,
     Refused,
     Unconfirmed,
 )
-from custom_components.mowing_director.adapters import get_adapter_factory
-from custom_components.mowing_director.adapters.mammotion import MammotionAdapter
-from custom_components.mowing_director.const import DOMAIN
+from custom_components.groundskeeper.adapters import get_adapter_factory
+from custom_components.groundskeeper.adapters.mammotion import MammotionAdapter
+from custom_components.groundskeeper.const import DOMAIN
 from tests.adapter_contract import _AdapterContract, _run_settings
 from tests.conftest import make_mammotion_mower
 from tests.mammotion_states import (

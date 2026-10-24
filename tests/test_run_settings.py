@@ -2,7 +2,7 @@
 
 import pytest
 
-from custom_components.mowing_director.run_settings import (
+from custom_components.groundskeeper.run_settings import (
     SettingsError,
     finishing_set,
     resolve_run_settings,
