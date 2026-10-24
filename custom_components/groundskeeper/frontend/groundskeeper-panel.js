@@ -439,9 +439,9 @@ const errorText = (code, message) => NOTES[code] || message;
 
 // A rejected websocket call is a plain `{code, message}` object, and `message` may be empty.
 const errMessage = (err) => {
-  if (typeof err === 'string' && err) return err;
-  if (err && typeof err === 'object') return err.message || err.code || 'Request failed';
-  return 'Request failed';
+  const text = (v) => (typeof v === 'string' && v ? v : '');
+  if (err && typeof err === 'object') return text(err.message) || text(err.code) || 'Request failed';
+  return text(err) || 'Request failed';
 };
 
 const STATUS_LABEL = { idle: 'Idle', waiting: 'Waiting', running: 'Running', paused: 'Paused' };
@@ -1311,7 +1311,7 @@ class GroundskeeperPanel extends HTMLElement {
         type: `groundskeeper/${type}`, entry_id: this._entryId, ...extra });
       return null;
     } catch (err) {
-      const message = errorText(err.code, errMessage(err));
+      const message = errorText(err && err.code, errMessage(err));
       this._notice = message;
       this._render();
       return message;
@@ -1390,7 +1390,7 @@ class GroundskeeperPanel extends HTMLElement {
               const warnings = (res && res.warnings) || [];
               this._sheet = warnings.length ? { run_id, warnings } : null; // warnings show; edit already saved
             } catch (err) {
-              this._sheet.error = errorText(err.code, errMessage(err));
+              this._sheet.error = errorText(err && err.code, errMessage(err));
               this._sheet.warnings = [];
             }
             this._render();

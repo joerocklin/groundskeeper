@@ -20,6 +20,9 @@ from tests.test_panel_zones import js  # noqa: F401  (also applies the node skip
         (3, "Request failed"),
         ("boom", "boom"),
         (None, "Request failed"),
+        ("", "Request failed"),
+        ({"code": 7}, "Request failed"),
+        ({"message": {"nested": 1}}, "Request failed"),
     ],
 )
 def test_error_message_is_always_human_text(err, shown) -> None:
