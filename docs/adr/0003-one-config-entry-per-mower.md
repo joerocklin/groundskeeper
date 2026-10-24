@@ -1,5 +1,3 @@
 # One config entry per Mower, each fully independent
 
 Each Mower gets its own config entry. Nothing is shared between entries: adapter instance, Store, timers, Checks, notify targets, command log and debug recording are all per entry, and there is no global lock. This is so one Mower's failure or restart wait never blocks another. We chose it even though one Mammotion config entry can hold several mowers, so the director deliberately splits what its source integration groups. Services, events, entities, Store keys and recording files are all keyed by entry. The cost is that cross-Mower coordination (one Mower out at a time, a shared dock) is harder to add later. It is out of scope for phase 1, and would come back as a cross-Mower Check rather than shared state.
-
-Sources: [Charting decisions](../../.scratch/phase1-spec/issues/01-charting-decisions.md), [Run and Schedule state machine](../../.scratch/phase1-spec/issues/10-run-and-schedule-state-machine.md) §1, [Config flow and onboarding](../../.scratch/phase1-spec/issues/14-config-flow-and-onboarding.md) §1.
