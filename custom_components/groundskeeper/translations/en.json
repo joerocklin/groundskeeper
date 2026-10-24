@@ -52,17 +52,15 @@
         "abort": {
           "waiting": "Nothing changed. The Zones stay marked missing until they return."
         }
-      },
-      "description": "These Zones no longer match anything on the Mower's map: {zones}."
+      }
     },
     "native_schedule": {
       "title": "The Mower's own schedule is enabled",
-      "description": "These tasks in the Mower's own schedule are enabled and may start mowing outside the director's control: {tasks}.",
       "fix_flow": {
         "step": {
           "init": {
             "title": "The Mower's own schedule is enabled",
-            "description": "These native tasks are enabled: {tasks}.",
+            "description": "These tasks in the Mower's own schedule are enabled and may start mowing outside the director's control: {tasks}.",
             "menu_options": {
               "disable": "Disable these tasks",
               "ignore": "Ignore"
