@@ -524,7 +524,7 @@ def _director_or_error(hass, connection, msg) -> Director | None:
     return director
 
 
-async def _schedule_call(hass, connection, msg, call) -> None:
+async def _schedule_call(hass, connection, msg, call, *, notify: bool = True) -> None:
     """Run `call(director)`; a refused operation is a clean error carrying its key."""
     director = _director_or_error(hass, connection, msg)
     if director is None:
@@ -534,7 +534,8 @@ async def _schedule_call(hass, connection, msg, call) -> None:
     except ScheduleError as err:
         connection.send_error(msg["id"], err.key, err.placeholders.get("error", err.key))
         return
-    async_notify_state_changed(hass, msg["entry_id"])
+    if notify:  # a read must not push: the panel refetches on every push (#60, #67)
+        async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"], result)
 
 
@@ -560,7 +561,7 @@ def schedule_view(director: Director) -> dict[str, Any]:
 @websocket_api.async_response
 async def ws_get_schedule(hass, connection, msg) -> None:
     """The Schedule: status, Plans and Runs in order."""
-    await _schedule_call(hass, connection, msg, lambda d: _ready(schedule_view(d)))
+    await _schedule_call(hass, connection, msg, lambda d: _ready(schedule_view(d)), notify=False)
 
 
 async def _ready(value):
@@ -750,7 +751,7 @@ def _check_sets(director: Director, msg: dict) -> None:
 @websocket_api.async_response
 async def ws_get_run_settings(hass, connection, msg) -> None:
     """Mower and Zone default Run settings, Max cut and Finishing Run overrides."""
-    await _schedule_call(hass, connection, msg, lambda d: _ready(run_settings_view(d)))
+    await _schedule_call(hass, connection, msg, lambda d: _ready(run_settings_view(d)), notify=False)
 
 
 @websocket_api.require_admin
@@ -950,7 +951,7 @@ _GATE_FIELDS = {
 }
 
 
-async def _gates_call(hass, connection, msg, call) -> None:
+async def _gates_call(hass, connection, msg, call, *, notify: bool = True) -> None:
     director = async_get_director(hass, msg["entry_id"])
     if director is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
@@ -963,7 +964,8 @@ async def _gates_call(hass, connection, msg, call) -> None:
     except ValueError as err:
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
         return
-    async_notify_state_changed(hass, msg["entry_id"])
+    if notify:  # a read must not push: the panel refetches on every push (#60, #67)
+        async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"], result)
 
 
@@ -974,7 +976,7 @@ async def _gates_call(hass, connection, msg, call) -> None:
 @websocket_api.async_response
 async def ws_list_gates(hass, connection, msg) -> None:
     """Gates with believed state, the Zones behind them and unrouted Zones."""
-    await _gates_call(hass, connection, msg, lambda d: _ready(d.gate_views()))
+    await _gates_call(hass, connection, msg, lambda d: _ready(d.gate_views()), notify=False)
 
 
 @websocket_api.require_admin
@@ -1037,7 +1039,8 @@ async def ws_delete_gate(hass, connection, msg) -> None:
 async def ws_get_notify_settings(hass, connection, msg) -> None:
     """Legacy `notify.mobile_app_*` service names and the category toggles."""
     await _schedule_call(
-        hass, connection, msg, lambda d: _ready(notify_settings(d.data.get("config", {})))
+        hass, connection, msg, lambda d: _ready(notify_settings(d.data.get("config", {}))),
+        notify=False,
     )
 
 
@@ -1124,7 +1127,7 @@ async def ws_set_anomaly_action(hass, connection, msg) -> None:
 # -- Run history and retention limits (spec §14.3, §14.6) ----------------------
 
 
-async def _director_call(hass, connection, msg, call) -> None:
+async def _director_call(hass, connection, msg, call, *, notify: bool = True) -> None:
     director = async_get_director(hass, msg["entry_id"])
     if director is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
@@ -1134,7 +1137,8 @@ async def _director_call(hass, connection, msg, call) -> None:
     except ValueError as err:
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
         return
-    async_notify_state_changed(hass, msg["entry_id"])
+    if notify:  # a read must not push: the panel refetches on every push (#60, #67)
+        async_notify_state_changed(hass, msg["entry_id"])
     connection.send_result(msg["id"], result)
 
 
@@ -1154,7 +1158,7 @@ async def ws_history(hass, connection, msg) -> None:
     async def call(director: Director) -> dict:
         return director.history_page(msg["offset"], msg["limit"])
 
-    await _director_call(hass, connection, msg, call)
+    await _director_call(hass, connection, msg, call, notify=False)
 
 
 @websocket_api.require_admin
@@ -1168,7 +1172,7 @@ async def ws_get_retention(hass, connection, msg) -> None:
     async def call(director: Director) -> dict:
         return director.retention()
 
-    await _director_call(hass, connection, msg, call)
+    await _director_call(hass, connection, msg, call, notify=False)
 
 
 @websocket_api.require_admin
