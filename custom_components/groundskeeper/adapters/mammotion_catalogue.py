@@ -170,15 +170,22 @@ class MammotionCatalogue:
     async def list_zones(self) -> list[Zone]:
         """Zones as (native_ref, name, polygon or None)."""
         polygons: dict[str, dict[str, Any]] = {}
+        names: dict[str, str] = {}
         try:
             for feat in await self._geometry():
                 props = feat.get("properties", {})
                 if props.get("type_name") == "area":
-                    polygons[str(props["hash"])] = feat["geometry"]
+                    ref = str(props["hash"])
+                    polygons[ref] = feat["geometry"]
+                    # The map carries the name as the Mammotion app shows it;
+                    # the zone switch's name is "Area {name}" (issue #55).
+                    plain = props.get("Name") or props.get("title")
+                    if plain:
+                        names[ref] = plain
         except HomeAssistantError:
             pass  # geometry never blocks the Zone list (issue #11)
         return [
-            Zone(ref, self._switch_name(entry), polygons.get(ref))
+            Zone(ref, names.get(ref) or self._switch_name(entry), polygons.get(ref))
             for ref, entry in self._zone_switches().items()
         ]
 
