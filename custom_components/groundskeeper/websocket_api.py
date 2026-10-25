@@ -27,6 +27,7 @@ from homeassistant.helpers.dispatcher import (
 
 from .const import DOMAIN
 from .core import DETECTORS, plan_status
+from .gates import is_fraction
 from .heights import MAX_MAX_CUT, MIN_MAX_CUT
 from .run_settings import SettingsError, finishing_set, mower_run_defaults, validate_overrides
 from .notifier import (
@@ -941,6 +942,13 @@ async def ws_delete_check(hass, connection, msg) -> None:
 
 # -- Gates (spec §4.7) ---------------------------------------------------------------
 
+def _fraction(value: Any) -> float:
+    """A Gate position, 0..1 from `end_a` (same rule as `validate_gate`)."""
+    if not is_fraction(value):
+        raise vol.Invalid("a Gate position is a number from 0 to 1")
+    return value
+
+
 _GATE_FIELDS = {
     vol.Optional("name"): str,
     vol.Optional("channels"): [str],
@@ -948,6 +956,7 @@ _GATE_FIELDS = {
     vol.Optional("open_action"): vol.Any([dict], None),
     vol.Optional("close_action"): vol.Any([dict], None),
     vol.Optional("notify"): vol.Any(bool, None),
+    vol.Optional("positions"): {str: _fraction},
 }
 
 

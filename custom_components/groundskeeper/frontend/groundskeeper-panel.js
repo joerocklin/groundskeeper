@@ -159,16 +159,40 @@ const centroid = (pts) => [
   pts.reduce((a, p) => a + p[1], 0) / pts.length,
 ];
 
+// Segment lengths of a polyline and their sum.
+function arcLengths(pts) {
+  const lens = pts.slice(1).map((p, i) => dist(p, pts[i]));
+  return { lens, total: lens.reduce((a, l) => a + l, 0) };
+}
+
+// A Gate with no saved position sits half-way along its Channel.
+const GATE_MID = 0.5;
+
 // Point a fraction `f` (0..1) of the way along a polyline, by arc length.
 function polylinePoint(pts, f) {
-  const lens = pts.slice(1).map((p, i) => dist(p, pts[i]));
-  const total = lens.reduce((a, l) => a + l, 0);
+  const { lens, total } = arcLengths(pts);
   if (!total) return pts[0];
   let want = Math.min(Math.max(f, 0), 1) * total;
   let i = 0;
   while (i < lens.length - 1 && want > lens[i]) want -= lens[i++];
   const t = lens[i] ? Math.min(want / lens[i], 1) : 0;
   return [pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t];
+}
+
+// Fraction (0..1) of the way along a polyline, by arc length, of the point
+// on it nearest `p`: where a tap or drag snaps to.
+function nearestFraction(pts, p) {
+  const { lens, total } = arcLengths(pts);
+  if (!total) return 0;
+  let best = Infinity, bestAt = 0, before = 0;
+  lens.forEach((len, i) => {
+    const a = pts[i], b = pts[i + 1];
+    const t = len ? Math.min(Math.max(((p[0] - a[0]) * (b[0] - a[0]) + (p[1] - a[1]) * (b[1] - a[1])) / (len * len), 0), 1) : 0;
+    const d = dist(p, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+    if (d < best) { best = d; bestAt = before + t * len; }
+    before += len;
+  });
+  return bestAt / total;
 }
 
 // Source point order is unreliable, so run the polyline from `a` to `b`: the
@@ -267,15 +291,30 @@ function renderMap(zones, channels, opts = {}) {
         `data-channel="${esc(c.id)}"`, route, hasPath);
     })
     .join('');
-  // Gates sit on their Channels, drawn with the believed state (spec §4.7),
-  // half-way along the drawn route by arc length.
-  const mid = {};
-  routes.forEach(({ c, route }) => { mid[c.id] = polylinePoint(route, 0.5); });
-  const gateMarks = (opts.gates || []).flatMap((g) => (g.channels || [])
-    .filter((id) => mid[id])
-    .map((id) => `<g class="gate ${g.open ? 'open' : 'closed'}" data-gate="${esc(g.id)}"><title>${esc(g.name)}: ${g.open ? 'open' : 'closed'}</title>`
-      + `<rect x="${num(mid[id][0] - 6)}" y="${num(mid[id][1] - 6)}" width="12" height="12" rx="2"/></g>`))
-    .join('');
+  // Gates sit on their Channels, drawn with the believed state (spec §4.7), at
+  // their saved fraction along the drawn route by arc length (half-way if unset).
+  const routeOf = {};
+  routes.forEach(({ c, route }) => { routeOf[c.id] = route; });
+  // The Gate being edited (opts.editGate) replaces its saved twin and gets a
+  // draggable handle per Channel plus a tap target on each Channel's line.
+  const editing = opts.editGate;
+  const mark = (g, id, edit) => {
+    const f = (g.positions || {})[id];
+    const p = polylinePoint(routeOf[id], f == null ? GATE_MID : f);
+    const handle = edit ? ` data-gate-handle="${esc(g.id)}" data-channel-id="${esc(id)}"` : '';
+    return `<g class="gate ${g.open ? 'open' : 'closed'}${edit ? ' editing' : ''}" data-gate="${esc(g.id)}"${handle}><title>${esc(g.name)}: ${g.open ? 'open' : 'closed'}</title>`
+      + `<rect x="${num(p[0] - 6)}" y="${num(p[1] - 6)}" width="12" height="12" rx="2"/></g>`;
+  };
+  const marksOf = (g, edit) => (g.channels || []).filter((id) => routeOf[id]).map((id) => mark(g, id, edit));
+  const places = editing
+    ? (editing.channels || []).filter((id) => routeOf[id]).map((id) => {
+      const route = routeOf[id];
+      const attr = `data-place="${esc(id)}" data-route="${route.map(pt).join(' ')}"`;
+      return shape('channel-hit', attr, route, Boolean(paths[id]));
+    }).join('') : '';
+  const gateMarks = places
+    + (opts.gates || []).filter((g) => !editing || g.id !== editing.id).flatMap((g) => marksOf(g, false)).join('')
+    + (editing ? marksOf(editing, true).join('') : '');
   const hasDock = (channels || []).some(isDockChannel);
   let defs = '', shapes = '';
   zones.forEach((z, i) => {
@@ -393,9 +432,9 @@ const actionsText = (a) => (a && a.length ? JSON.stringify(a) : '');
 
 // Editable copy of a stored Gate (or a blank one). Actions are edited as JSON.
 function gateDraft(g) {
-  if (!g) return { id: null, name: '', channels: [], state_entity_id: '', open_action: '', close_action: '', notify: null };
+  if (!g) return { id: null, name: '', channels: [], positions: {}, state_entity_id: '', open_action: '', close_action: '', notify: null };
   return {
-    id: g.id, name: g.name, channels: [...(g.channels || [])],
+    id: g.id, name: g.name, channels: [...(g.channels || [])], positions: { ...(g.positions || {}) },
     state_entity_id: g.state_entity_id || g.state_entity || '',
     open_action: actionsText(g.open_action), close_action: actionsText(g.close_action),
     notify: g.notify,
@@ -429,6 +468,7 @@ function gatePayload(d) {
   return {
     payload: {
       name, channels: [...d.channels],
+      positions: Object.fromEntries(Object.entries(d.positions || {}).filter(([id]) => d.channels.includes(id))),
       state_entity: (d.state_entity_id || '').trim() || null,
       open_action: open.value, close_action: close.value,
       notify: d.notify == null ? null : d.notify,
@@ -1256,8 +1296,10 @@ class GroundskeeperPanel extends HTMLElement {
     return `<section class="card"><h2>Zones &amp; Channels</h2>
         ${renderMap(zones, channels, {
           selectedZoneId: sel && sel.id, stripeZoneId: sel && sel.id, angle: bearing,
-          gates, pickedChannelIds: draft ? draft.channels : undefined })}
-        ${draft ? '<p>Tap Channels on the map to put the Gate on them.</p>' : ''}
+          gates, pickedChannelIds: draft ? draft.channels : undefined,
+          editGate: draft ? { id: draft.id || 'new-gate', name: draft.name || 'New Gate', channels: draft.channels,
+            positions: draft.positions, open: Boolean((gates.find((g) => g.id === draft.id) || {}).open) } : undefined })}
+        ${draft ? '<p>Tap Channels on the map to put the Gate on them. Drag a Gate marker, or tap its Channel, to set where it sits.</p>' : ''}
         ${zoneListHtml(zones, sel && sel.id)}</section>${detail}${gateCard}`;
   }
 
@@ -1303,6 +1345,48 @@ class GroundskeeperPanel extends HTMLElement {
         this._zoneId = el.dataset.zone;
         this._render();
       });
+    });
+    // Placement: the pointer's SVG coordinates snap to the Channel's line.
+    const place = (e, cid) => {
+      const svg = root.querySelector('svg.map');
+      const line = root.querySelector(`[data-place="${cid}"]`);
+      const m = svg && svg.getScreenCTM && svg.getScreenCTM();
+      if (!line || !m) return null;
+      const q = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+      const route = line.dataset.route.split(' ').map((s) => s.split(',').map(Number));
+      return { route, f: nearestFraction(route, [q.x, q.y]) };
+    };
+    // Save the snapped fraction for one Channel into the draft and redraw.
+    const setPosition = (e, cid) => {
+      const hit = this._gateDraft && place(e, cid);
+      if (!hit) return;
+      this._readGateDraft(root);
+      this._gateDraft.positions[cid] = hit.f;
+      this._render();
+    };
+    root.querySelectorAll('[data-place]').forEach((el) => {
+      el.addEventListener('click', (e) => setPosition(e, el.dataset.place));
+    });
+    root.querySelectorAll('[data-gate-handle]').forEach((el) => {
+      el.style.touchAction = 'none';
+      el.addEventListener('pointerdown', (e) => { e.stopPropagation(); el.setPointerCapture(e.pointerId); el.dataset.drag = '1'; });
+      el.addEventListener('pointermove', (e) => {
+        if (!el.dataset.drag) return;
+        const hit = place(e, el.dataset.channelId);
+        if (!hit) return;
+        const p = polylinePoint(hit.route, hit.f);
+        const r = el.querySelector('rect');
+        r.setAttribute('x', num(p[0] - 6)); r.setAttribute('y', num(p[1] - 6));
+      });
+      const end = (e) => {
+        if (!el.dataset.drag) return;
+        delete el.dataset.drag;
+        setPosition(e, el.dataset.channelId);
+      };
+      // The click that follows a drag must not re-place the Gate via the line below.
+      el.addEventListener('click', (e) => e.stopPropagation());
+      el.addEventListener('pointerup', end);
+      el.addEventListener('pointercancel', () => { delete el.dataset.drag; });
     });
     root.querySelectorAll('[data-pick]').forEach((el) => {
       el.addEventListener('click', () => {
