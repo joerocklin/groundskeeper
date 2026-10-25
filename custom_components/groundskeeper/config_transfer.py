@@ -12,6 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .gates import prune_positions
+
 EXPORT_FORMAT = "groundskeeper_export"
 EXPORT_VERSION = 1
 
@@ -173,7 +175,7 @@ def plan_import(
         for gate in config.get("gates", []):
             gate["channels"] = [c for c in gate.get("channels", []) if c in kept]
             if "positions" in gate:
-                gate["positions"] = {c: f for c, f in gate["positions"].items() if c in kept}
+                gate["positions"] = prune_positions(gate["positions"], kept, valid_only=True)
 
     def resolve(ref: str, where: str) -> str:
         registry_id = registry_id_of(ref)

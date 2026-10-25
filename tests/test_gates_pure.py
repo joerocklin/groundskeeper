@@ -5,7 +5,9 @@ import pytest
 from custom_components.groundskeeper.gates import (
     believed_open,
     derive_gating,
+    is_fraction,
     normalise_gate,
+    prune_positions,
     validate_gate,
 )
 
@@ -128,3 +130,15 @@ def test_validate_rejects_out_of_range_or_non_numeric_positions() -> None:
             validate_gate(gate, ["a"])
     ok = normalise_gate({"id": "g", "name": "G", "channels": ["a"], "positions": {"a": 0}})
     validate_gate(ok, ["a"])
+
+
+def test_is_fraction_accepts_only_real_numbers_from_zero_to_one() -> None:
+    assert all(is_fraction(v) for v in (0, 1, 0.5))
+    assert not any(is_fraction(v) for v in (-0.1, 1.1, float("nan"), True, "0.5", None))
+
+
+def test_prune_positions_keeps_listed_channels_and_optionally_only_valid_fractions() -> None:
+    positions = {"a": 0.2, "b": 7, "gone": 0.4}
+    assert prune_positions(positions, ["a", "b"]) == {"a": 0.2, "b": 7}
+    assert prune_positions(positions, ["a", "b"], valid_only=True) == {"a": 0.2}
+    assert prune_positions(None, ["a"]) == {}

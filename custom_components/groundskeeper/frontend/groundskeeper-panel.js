@@ -159,10 +159,18 @@ const centroid = (pts) => [
   pts.reduce((a, p) => a + p[1], 0) / pts.length,
 ];
 
+// Segment lengths of a polyline and their sum.
+function arcLengths(pts) {
+  const lens = pts.slice(1).map((p, i) => dist(p, pts[i]));
+  return { lens, total: lens.reduce((a, l) => a + l, 0) };
+}
+
+// A Gate with no saved position sits half-way along its Channel.
+const GATE_MID = 0.5;
+
 // Point a fraction `f` (0..1) of the way along a polyline, by arc length.
 function polylinePoint(pts, f) {
-  const lens = pts.slice(1).map((p, i) => dist(p, pts[i]));
-  const total = lens.reduce((a, l) => a + l, 0);
+  const { lens, total } = arcLengths(pts);
   if (!total) return pts[0];
   let want = Math.min(Math.max(f, 0), 1) * total;
   let i = 0;
@@ -174,8 +182,7 @@ function polylinePoint(pts, f) {
 // Fraction (0..1) of the way along a polyline, by arc length, of the point
 // on it nearest `p`: where a tap or drag snaps to.
 function nearestFraction(pts, p) {
-  const lens = pts.slice(1).map((q, i) => dist(q, pts[i]));
-  const total = lens.reduce((a, l) => a + l, 0);
+  const { lens, total } = arcLengths(pts);
   if (!total) return 0;
   let best = Infinity, bestAt = 0, before = 0;
   lens.forEach((len, i) => {
@@ -293,7 +300,7 @@ function renderMap(zones, channels, opts = {}) {
   const editing = opts.editGate;
   const mark = (g, id, edit) => {
     const f = (g.positions || {})[id];
-    const p = polylinePoint(routeOf[id], f == null ? 0.5 : f);
+    const p = polylinePoint(routeOf[id], f == null ? GATE_MID : f);
     const handle = edit ? ` data-gate-handle="${esc(g.id)}" data-channel-id="${esc(id)}"` : '';
     return `<g class="gate ${g.open ? 'open' : 'closed'}${edit ? ' editing' : ''}" data-gate="${esc(g.id)}"${handle}><title>${esc(g.name)}: ${g.open ? 'open' : 'closed'}</title>`
       + `<rect x="${num(p[0] - 6)}" y="${num(p[1] - 6)}" width="12" height="12" rx="2"/></g>`;
@@ -1349,14 +1356,16 @@ class GroundskeeperPanel extends HTMLElement {
       const route = line.dataset.route.split(' ').map((s) => s.split(',').map(Number));
       return { route, f: nearestFraction(route, [q.x, q.y]) };
     };
+    // Save the snapped fraction for one Channel into the draft and redraw.
+    const setPosition = (e, cid) => {
+      const hit = this._gateDraft && place(e, cid);
+      if (!hit) return;
+      this._readGateDraft(root);
+      this._gateDraft.positions[cid] = hit.f;
+      this._render();
+    };
     root.querySelectorAll('[data-place]').forEach((el) => {
-      el.addEventListener('click', (e) => {
-        const hit = this._gateDraft && place(e, el.dataset.place);
-        if (!hit) return;
-        this._readGateDraft(root);
-        this._gateDraft.positions[el.dataset.place] = hit.f;
-        this._render();
-      });
+      el.addEventListener('click', (e) => setPosition(e, el.dataset.place));
     });
     root.querySelectorAll('[data-gate-handle]').forEach((el) => {
       el.style.touchAction = 'none';
@@ -1372,12 +1381,10 @@ class GroundskeeperPanel extends HTMLElement {
       const end = (e) => {
         if (!el.dataset.drag) return;
         delete el.dataset.drag;
-        const hit = this._gateDraft && place(e, el.dataset.channelId);
-        if (!hit) return;
-        this._readGateDraft(root);
-        this._gateDraft.positions[el.dataset.channelId] = hit.f;
-        this._render();
+        setPosition(e, el.dataset.channelId);
       };
+      // The click that follows a drag must not re-place the Gate via the line below.
+      el.addEventListener('click', (e) => e.stopPropagation());
       el.addEventListener('pointerup', end);
       el.addEventListener('pointercancel', () => { delete el.dataset.drag; });
     });

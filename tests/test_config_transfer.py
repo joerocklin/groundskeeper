@@ -158,3 +158,10 @@ def test_broken_references_list_each_with_where_used() -> None:
 
 def test_nothing_broken_when_everything_resolves() -> None:
     assert broken_references(config(), entity_exists=lambda r: True, notify_exists=lambda n: True) == []
+
+
+def test_import_drops_invalid_gate_positions() -> None:
+    data = exported()
+    data["config"]["gates"][0]["positions"] = {"c1": 1.7, "c2": "x"}
+    plan = plan_import(data, target_zones=TARGET, registry_id_of=to_registry_id)
+    assert plan.config["gates"][0]["positions"] == {}

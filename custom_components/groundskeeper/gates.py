@@ -26,6 +26,25 @@ DOCK = "dock"
 OPEN_STATES = frozenset({"on", "open", "opening", "unlocked", "unlocking"})
 
 
+def is_fraction(value: Any) -> bool:
+    """A usable Gate position: a real number from 0 to 1 (not a bool, not NaN)."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 1
+    )
+
+
+def prune_positions(
+    positions: Mapping[str, Any] | None, channels: Iterable[str], *, valid_only: bool = False
+) -> dict[str, Any]:
+    """`positions` limited to `channels`; `valid_only` also drops non-fractions (imports)."""
+    keep = set(channels)
+    return {
+        c: f for c, f in (positions or {}).items() if c in keep and (not valid_only or is_fraction(f))
+    }
+
+
 def normalise_gate(rec: Mapping[str, Any]) -> dict[str, Any]:
     """A stored Gate with every field present.
 
@@ -40,9 +59,7 @@ def normalise_gate(rec: Mapping[str, Any]) -> dict[str, Any]:
         "open_action": rec.get("open_action") or None,
         "close_action": rec.get("close_action") or None,
         "notify": rec.get("notify"),
-        "positions": {
-            c: f for c, f in (rec.get("positions") or {}).items() if c in channels
-        },
+        "positions": prune_positions(rec.get("positions"), channels),
     }
     if gate["notify"] is None:
         gate["notify"] = gate["open_action"] is None
@@ -58,11 +75,7 @@ def validate_gate(gate: Mapping[str, Any], channel_ids: Iterable[str]) -> None:
     if not channels or any(c not in known for c in channels):
         raise ValueError("A Gate sits on one or more existing Channels")
     for channel, fraction in (gate.get("positions") or {}).items():
-        if (
-            isinstance(fraction, bool)
-            or not isinstance(fraction, (int, float))
-            or not 0 <= fraction <= 1
-        ):
+        if not is_fraction(fraction):
             raise ValueError(f"The Gate position on {channel} is a fraction from 0 to 1")
     for key in ("open_action", "close_action"):
         action = gate.get(key)

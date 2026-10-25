@@ -83,6 +83,24 @@ async def test_positions_round_trip_and_reject_out_of_range(hass, hass_ws_client
     assert msg["result"]["gates"][0]["positions"] == {channel: 0.25}
 
 
+async def test_non_numeric_positions_are_rejected_and_stale_ones_not_stored(
+    hass, hass_ws_client, setup
+) -> None:
+    entry, _ = setup
+    channel = await channel_to_dock(hass, hass_ws_client, entry)
+    for bad in ("0.3", True, None):
+        msg = await ws(hass, hass_ws_client, entry, "create_gate", name="G",
+                       channels=[channel], positions={channel: bad})
+        assert not msg["success"], bad
+    gate = await make_gate(hass, hass_ws_client, entry, positions={channel: 0.3, "gone": 0.6})
+    stored = async_get_director(hass, entry.entry_id)._data["config"]["gates"]
+    assert stored[0]["positions"] == {channel: 0.3}
+    msg = await ws(hass, hass_ws_client, entry, "update_gate", gate_id=gate["id"],
+                   changes={"positions": {channel: 0.4, "gone": 0.6}})
+    assert msg["success"]
+    assert async_get_director(hass, entry.entry_id)._data["config"]["gates"][0]["positions"] == {channel: 0.4}
+
+
 async def test_state_entity_is_stored_as_a_registry_id(hass, hass_ws_client, setup) -> None:
     entry, _ = setup
     reg = er.async_get(hass).async_get_or_create("binary_sensor", "t", "gate_contact",
