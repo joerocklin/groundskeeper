@@ -43,6 +43,7 @@ const STYLE = `
   svg .zone.current { stroke: var(--success-color, #43a047); stroke-width: 3; }
   svg .zone.hidden { stroke-dasharray: 4 3; fill-opacity: .08; }
   svg .zone.missing { stroke: var(--error-color, #db4437); fill: none; stroke-dasharray: 2 3; }
+  svg .channel, svg .channel-hit { fill: none; }
   svg .channel { stroke: var(--secondary-text-color); stroke-width: 2; stroke-dasharray: 6 3; }
   svg .channel.picked { stroke: var(--primary-color); stroke-width: 4; stroke-dasharray: none; }
   svg .channel-hit { stroke: transparent; stroke-width: 18; cursor: pointer; }
@@ -120,10 +121,21 @@ const ringOf = (polygon) => {
   return c && c[0] && c[0].length >= 3 ? c[0] : null;
 };
 
+const DOCK = 'dock'; // a Channel end that is the dock, not a Zone (mirrors Channel.DOCK)
+const dist = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+const isDockChannel = (c) => c.end_a === DOCK || c.end_b === DOCK;
+
+// A Channel's path as [lon, lat] points, or null when it has no usable geometry.
+const pathOf = (c) => {
+  const g = c && c.path;
+  return g && g.type === 'LineString' && g.coordinates && g.coordinates.length >= 2 ? g.coordinates : null;
+};
+
 // Project every Zone ring into the map box together, keeping north up.
-function projectZones(zones) {
+// `extra` are further [lon, lat] points (Channel paths) the fit must include.
+function projectZones(zones, extra = []) {
   const rings = zones.map((z) => ringOf(z.polygon));
-  const pts = rings.flatMap((r) => r || []);
+  const pts = [...rings.flatMap((r) => r || []), ...extra];
   if (!pts.length) return { rings: rings.map(() => null), at: () => [MAP_W / 2, MAP_H / 2] };
   const lat0 = pts.reduce((a, p) => a + p[1], 0) / pts.length;
   const kx = Math.cos((lat0 * Math.PI) / 180);
@@ -146,6 +158,61 @@ const centroid = (pts) => [
   pts.reduce((a, p) => a + p[0], 0) / pts.length,
   pts.reduce((a, p) => a + p[1], 0) / pts.length,
 ];
+
+// Point a fraction `f` (0..1) of the way along a polyline, by arc length.
+function polylinePoint(pts, f) {
+  const lens = pts.slice(1).map((p, i) => dist(p, pts[i]));
+  const total = lens.reduce((a, l) => a + l, 0);
+  if (!total) return pts[0];
+  let want = Math.min(Math.max(f, 0), 1) * total;
+  let i = 0;
+  while (i < lens.length - 1 && want > lens[i]) want -= lens[i++];
+  const t = lens[i] ? Math.min(want / lens[i], 1) : 0;
+  return [pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t];
+}
+
+// Source point order is unreliable, so run the polyline from `a` to `b`: the
+// order with the shorter total end-to-anchor distance wins, a tie keeps it.
+function orientPath(pts, a, b) {
+  const first = pts[0], last = pts[pts.length - 1];
+  return dist(first, b) + dist(last, a) < dist(first, a) + dist(last, b) ? [...pts].reverse() : pts;
+}
+
+// A dock Channel's path has no dock anchor to compare with, so the end nearer
+// its Zone is the Zone end; a tie keeps the given order.
+function orientDockPath(pts, zoneAnchor, dockFirst) {
+  const near = dist(pts[0], zoneAnchor), far = dist(pts[pts.length - 1], zoneAnchor);
+  if (near === far) return pts;
+  return (near < far) === dockFirst ? [...pts].reverse() : pts;
+}
+
+// Each Channel's path, projected and run end_a -> end_b, keyed by Channel id.
+// Channels without a usable path, or whose Zone end can't be placed, are left out.
+function channelPaths(channels, centre, at) {
+  const paths = {};
+  (channels || []).forEach((c) => {
+    const lonLat = pathOf(c);
+    if (!lonLat) return;
+    const pts = lonLat.map(at);
+    if (isDockChannel(c)) {
+      const anchor = centre[c.end_a === DOCK ? c.end_b : c.end_a];
+      if (anchor) paths[c.id] = orientDockPath(pts, anchor, c.end_a === DOCK);
+    } else if (centre[c.end_a] && centre[c.end_b]) {
+      paths[c.id] = orientPath(pts, centre[c.end_a], centre[c.end_b]);
+    }
+  });
+  return paths;
+}
+
+// Where the first dock Channel (by native_ref) that has a path reaches the dock.
+function dockPoint(channels, paths) {
+  const c = (channels || [])
+    .filter((ch) => paths[ch.id] && isDockChannel(ch))
+    .sort((x, y) => String(x.native_ref).localeCompare(String(y.native_ref)))[0];
+  if (!c) return null;
+  const route = paths[c.id];
+  return c.end_a === DOCK ? route[0] : route[route.length - 1];
+}
 
 // Stripe segments at an absolute compass angle (0 = north, clockwise) across
 // the ring's bounding circle, as <line> elements clipped by the zone clipPath.
@@ -171,34 +238,45 @@ function stripesSvg(pts, angle, clipId) {
  * currentZoneId (the Mower's Zone), highlightZoneId.
  */
 function renderMap(zones, channels, opts = {}) {
-  const { rings } = projectZones(zones);
+  // Only paths that can be drawn (every Zone end has an outline) widen the fit.
+  const placed = new Set(zones.filter((z) => ringOf(z.polygon)).map((z) => z.id));
+  const drawable = (channels || []).filter((c) => [c.end_a, c.end_b].every((r) => r === DOCK || placed.has(r)));
+  const { rings, at } = projectZones(zones, drawable.flatMap((c) => pathOf(c) || []));
   const centre = {};
   zones.forEach((z, i) => { if (rings[i]) centre[z.id] = centroid(rings[i]); });
-  const dock = [MAP_PAD, MAP_H - MAP_PAD];
-  const end = (ref) => (ref === 'dock' ? dock : centre[ref]);
+  const paths = channelPaths(channels, centre, at);
+  // The dock sits where a dock path ends; the corner pin is only the fallback.
+  const dock = dockPoint(channels, paths) || [MAP_PAD, MAP_H - MAP_PAD];
+  const end = (ref) => (ref === DOCK ? dock : centre[ref]);
   const picked = new Set(opts.pickedChannelIds || []);
-  const segs = (channels || [])
-    .map((c) => ({ c, a: end(c.end_a), b: end(c.end_b) }))
-    .filter(({ a, b }) => a && b);
-  const seg = (a, b) => `x1="${num(a[0])}" y1="${num(a[1])}" x2="${num(b[0])}" y2="${num(b[1])}"`;
+  const routes = (channels || [])
+    .map((c) => ({ c, route: paths[c.id] || [end(c.end_a), end(c.end_b)] }))
+    .filter(({ route }) => route.every(Boolean));
+  const pt = (p) => `${num(p[0])},${num(p[1])}`;
+  const shape = (cls, attr, route, hasPath) => (hasPath
+    ? `<polyline class="${cls}" ${attr} points="${route.map(pt).join(' ')}"/>`
+    : `<line class="${cls}" ${attr} x1="${num(route[0][0])}" y1="${num(route[0][1])}" x2="${num(route[1][0])}" y2="${num(route[1][1])}"/>`);
   // Channels carry their id so the Gate editor can pick them; the wide
   // transparent twin underneath is the tap target (only while picking).
-  const lines = segs
-    .map(({ c, a, b }) => {
+  const lines = routes
+    .map(({ c, route }) => {
+      const hasPath = Boolean(paths[c.id]);
       const hit = opts.pickedChannelIds
-        ? `<line class="channel-hit" data-pick="${esc(c.id)}" ${seg(a, b)}/>` : '';
-      return `${hit}<line class="channel${picked.has(c.id) ? ' picked' : ''}" data-channel="${esc(c.id)}" ${seg(a, b)}/>`;
+        ? shape('channel-hit', `data-pick="${esc(c.id)}"`, route, hasPath) : '';
+      return hit + shape(`channel${picked.has(c.id) ? ' picked' : ''}`,
+        `data-channel="${esc(c.id)}"`, route, hasPath);
     })
     .join('');
-  // Gates sit on their Channels, drawn with the believed state (spec §4.7).
+  // Gates sit on their Channels, drawn with the believed state (spec §4.7),
+  // half-way along the drawn route by arc length.
   const mid = {};
-  segs.forEach(({ c, a, b }) => { mid[c.id] = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]; });
+  routes.forEach(({ c, route }) => { mid[c.id] = polylinePoint(route, 0.5); });
   const gateMarks = (opts.gates || []).flatMap((g) => (g.channels || [])
     .filter((id) => mid[id])
     .map((id) => `<g class="gate ${g.open ? 'open' : 'closed'}" data-gate="${esc(g.id)}"><title>${esc(g.name)}: ${g.open ? 'open' : 'closed'}</title>`
       + `<rect x="${num(mid[id][0] - 6)}" y="${num(mid[id][1] - 6)}" width="12" height="12" rx="2"/></g>`))
     .join('');
-  const hasDock = (channels || []).some((c) => c.end_a === 'dock' || c.end_b === 'dock');
+  const hasDock = (channels || []).some(isDockChannel);
   let defs = '', shapes = '';
   zones.forEach((z, i) => {
     const pts = rings[i];
@@ -213,7 +291,7 @@ function renderMap(zones, channels, opts = {}) {
     const [x, y] = centroid(pts);
     shapes += `<text class="label" x="${num(x)}" y="${num(y)}">${esc(z.name)}</text>`;
   });
-  const dockMark = hasDock ? `<circle class="dock" cx="${dock[0]}" cy="${dock[1]}" r="5"/>` : '';
+  const dockMark = hasDock ? `<circle class="dock" cx="${num(dock[0])}" cy="${num(dock[1])}" r="5"/>` : '';
   return `<svg class="map" viewBox="0 0 ${MAP_W} ${MAP_H}" role="img" aria-label="Zones and Channels"><defs>${defs}</defs>${shapes}${lines}${gateMarks}${dockMark}</svg>`;
 }
 

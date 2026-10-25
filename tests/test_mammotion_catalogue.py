@@ -295,3 +295,25 @@ async def test_set_task_enabled_maps_failures(setup, error, expected) -> None:
     services.toggle_error = error
     result = await catalogue.set_task_enabled("plan-1", True)
     assert isinstance(result, expected)
+
+
+async def test_list_channels_carry_the_path_geometry(setup) -> None:
+    catalogue, *_ = setup
+    by_ref = {c.native_ref: c for c in await catalogue.list_channels()}
+    path1 = by_ref["1000000000000000008"]
+    assert path1.path["type"] == "LineString"
+    assert len(path1.path["coordinates"]) == 8
+    assert len(by_ref["1000000000000000009"].path["coordinates"]) == 2
+
+
+async def test_list_channels_only_keep_line_string_geometry(setup) -> None:
+    catalogue, services, *_ = setup
+    for feat in services.geojson["features"]:
+        if feat["properties"].get("hash") == 1000000000000000008:
+            feat["geometry"] = {"type": "MultiLineString", "coordinates": []}
+        if feat["properties"].get("hash") == 1000000000000000009:
+            feat["geometry"] = {"type": "LineString", "coordinates": [[0, 0]]}
+    by_ref = {c.native_ref: c for c in await catalogue.list_channels()}
+    assert by_ref["1000000000000000008"].path is None
+    assert by_ref["1000000000000000009"].path is None  # a line needs two points
+    assert by_ref["1000000000000000010"].path is not None

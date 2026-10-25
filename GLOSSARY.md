@@ -21,7 +21,7 @@ A route the Mower travels between two Zones, or between a Zone and its dock, out
 _Avoid_: Path (the stripes of a mow), passage, corridor, route
 
 **Gate**:
-A physical barrier on one or more Channels that must be open for the Mower to pass; a person opens it, or Home Assistant does where it is automated, and it is presumed closed unless known to be open.
+A physical barrier on one or more Channels that must be open for the Mower to pass; a person opens it, or Home Assistant does where it is automated, and it is presumed closed unless known to be open. A Gate sits at a point along each Channel it covers, which the owner can adjust to match where the barrier really is.
 _Avoid_: Door, passage, fence
 
 **Run**:

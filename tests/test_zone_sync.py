@@ -16,6 +16,7 @@ from custom_components.groundskeeper.zone_sync import (
 from tests.fake_mower import FakeMower
 
 POLY = {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}
+PATH = {"type": "LineString", "coordinates": [[0, 0], [0.5, 0.2], [1, 1]]}
 
 
 def _ids():
@@ -89,8 +90,27 @@ def test_channels_reconcile_by_end_zones_across_ref_change() -> None:
         zones,
         _ids(),
     )
-    assert out[0] == {"id": "c1", "native_ref": "new", "end_a": "dock", "end_b": "z1"}
+    assert out[0] == {
+        "id": "c1", "native_ref": "new", "end_a": "dock", "end_b": "z1", "path": None,
+    }
     assert out[1]["id"] == "id0" and {out[1]["end_a"], out[1]["end_b"]} == {"z1", "z2"}
+
+
+def test_channel_path_is_stored_and_survives_a_refresh_without_geometry() -> None:
+    zones = [_zone("z1", "a", "Front")]
+    out = reconcile_channels([], [Channel("p1", "dock", "a", PATH)], zones, _ids())
+    assert out[0]["path"] == PATH
+    again = reconcile_channels(out, [Channel("p1", "dock", "a")], zones, _ids())
+    assert again[0]["path"] == PATH  # geometry not refetched yet: keep the last one
+
+
+def test_channel_path_is_replaced_when_the_map_changes() -> None:
+    zones = [_zone("z1", "a", "Front")]
+    known = [{"id": "c1", "native_ref": "p1", "end_a": "dock", "end_b": "z1",
+              "path": PATH}]
+    newer = {"type": "LineString", "coordinates": [[0, 0], [2, 2]]}
+    out = reconcile_channels(known, [Channel("p1", "dock", "a", newer)], zones, _ids())
+    assert out[0]["path"] == newer
 
 
 def _entry(hass):
@@ -366,3 +386,13 @@ async def test_ws_get_zones_unknown_mower(hass, hass_ws_client) -> None:
     ws = await hass_ws_client(hass)
     await ws.send_json({"id": 1, "type": "groundskeeper/get_zones", "entry_id": "nope"})
     assert (await ws.receive_json())["error"]["code"] == "not_found"
+
+
+async def test_zone_view_serves_channel_paths_and_they_persist(hass) -> None:
+    mower = FakeMower()
+    mower.channels = tuple(replace(c, path=PATH) for c in mower.channels)
+    entry, sync = await _attached(hass, mower)
+    view = await sync.async_zone_view()
+    assert [c["path"] for c in view["channels"]] == [PATH, PATH]
+    stored = await entry.runtime_data.async_load()
+    assert all(c["path"] == PATH for c in stored["config"]["channels"])

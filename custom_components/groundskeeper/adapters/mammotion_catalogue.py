@@ -39,6 +39,17 @@ MAMMOTION = "mammotion"
 _TRAILING_INT = re.compile(r"(\d+)$")
 
 
+def _line_string(geometry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A usable Channel path: a GeoJSON LineString of at least two points."""
+    if (
+        geometry
+        and geometry.get("type") == "LineString"
+        and len(geometry.get("coordinates") or []) >= 2
+    ):
+        return geometry
+    return None
+
+
 class MammotionCatalogue:
     """Reads Zones, Channels and native tasks for one Mammotion Mower device."""
 
@@ -190,7 +201,7 @@ class MammotionCatalogue:
         ]
 
     async def list_channels(self) -> list[Channel]:
-        """Channels as (native_ref, end_a, end_b); parent hash 0 is the dock."""
+        """Channels with their path; parent hash 0 is the dock."""
 
         def end(parent_hash: Any) -> str:
             return Channel.DOCK if not int(parent_hash) else str(parent_hash)
@@ -200,6 +211,7 @@ class MammotionCatalogue:
                 str(feat["properties"]["hash"]),
                 end(feat["properties"]["parent_hash_a"]),
                 end(feat["properties"]["parent_hash_b"]),
+                path=_line_string(feat.get("geometry")),
             )
             for feat in await self._geometry()
             if feat.get("properties", {}).get("type_name") == "path"
