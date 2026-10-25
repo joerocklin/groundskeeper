@@ -221,6 +221,9 @@ class Channel:
     native_ref: str
     end_a: str
     end_b: str
+    # GeoJSON LineString (WGS84) or None until fetched - like Zone.polygon,
+    # geometry never blocks setup (issue #11).
+    path: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

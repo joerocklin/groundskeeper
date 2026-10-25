@@ -141,6 +141,8 @@ def reconcile_channels(
                 "native_ref": ch.native_ref,
                 "end_a": a,
                 "end_b": b,
+                # A refresh without geometry keeps the last known path.
+                "path": ch.path or (match or {}).get("path"),
             }
         )
     return result

@@ -295,3 +295,12 @@ async def test_set_task_enabled_maps_failures(setup, error, expected) -> None:
     services.toggle_error = error
     result = await catalogue.set_task_enabled("plan-1", True)
     assert isinstance(result, expected)
+
+
+async def test_list_channels_carry_the_path_geometry(setup) -> None:
+    catalogue, *_ = setup
+    by_ref = {c.native_ref: c for c in await catalogue.list_channels()}
+    path1 = by_ref["1000000000000000008"]
+    assert path1.path["type"] == "LineString"
+    assert len(path1.path["coordinates"]) == 8
+    assert len(by_ref["1000000000000000009"].path["coordinates"]) == 2

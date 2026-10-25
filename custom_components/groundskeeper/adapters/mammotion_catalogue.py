@@ -190,7 +190,7 @@ class MammotionCatalogue:
         ]
 
     async def list_channels(self) -> list[Channel]:
-        """Channels as (native_ref, end_a, end_b); parent hash 0 is the dock."""
+        """Channels as (native_ref, end_a, end_b, path); parent hash 0 is the dock."""
 
         def end(parent_hash: Any) -> str:
             return Channel.DOCK if not int(parent_hash) else str(parent_hash)
@@ -200,6 +200,7 @@ class MammotionCatalogue:
                 str(feat["properties"]["hash"]),
                 end(feat["properties"]["parent_hash_a"]),
                 end(feat["properties"]["parent_hash_b"]),
+                feat.get("geometry"),
             )
             for feat in await self._geometry()
             if feat.get("properties", {}).get("type_name") == "path"
