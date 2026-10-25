@@ -119,12 +119,12 @@ def _add_zone_switches(hass, entry, device, geojson: dict) -> None:
             suggested_object_id=p["Name"].lower().replace(" ", "_"),
             config_entry=entry,
             device_id=device.id,
-            original_name=p["Name"],
+            original_name=f"Area {p['Name']}",  # Mammotion's "Area {name}" switch
         )
         hass.states.async_set(
             entity.entity_id,
             "on",
-            {"hash": p["hash"], "friendly_name": p["Name"]},
+            {"hash": p["hash"], "friendly_name": f"Area {p['Name']}"},
         )
 
 
@@ -163,6 +163,29 @@ async def test_zones_without_geometry_when_fetch_fails(setup) -> None:
     zones = await catalogue.list_zones()
     assert len(zones) == 7
     assert all(z.polygon is None for z in zones)
+    # No map to read the plain name from: fall back to the switch's own name.
+    assert {z.native_ref: z.name for z in zones}[BACKYARD] == "Area Backyard"
+
+
+async def test_zone_without_matching_map_feature_uses_switch_name(setup) -> None:
+    catalogue, _, _, entry, device = setup
+    # A switch for a Zone the map does not (yet) carry, e.g. a rebuilt map.
+    # A genuine "Area 51" Zone has no extra prefix (Mammotion's `area_plain`).
+    ent = er.async_get(catalogue._hass).async_get_or_create(
+        "switch",
+        "mammotion",
+        "1000000000000000099",
+        suggested_object_id="area_51",
+        config_entry=entry,
+        device_id=device.id,
+        original_name="Area 51",
+    )
+    catalogue._hass.states.async_set(
+        ent.entity_id, "on", {"hash": 1000000000000000099, "friendly_name": "Area 51"}
+    )
+    by_ref = {z.native_ref: z for z in await catalogue.list_zones()}
+    assert by_ref["1000000000000000099"].name == "Area 51"
+    assert by_ref[BACKYARD].name == "Backyard"
 
 
 async def test_zone_discovery_uses_unique_id_when_switch_unavailable(setup) -> None:
