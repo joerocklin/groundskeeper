@@ -824,15 +824,18 @@ function checkCardHtml(c, view) {
     <p><button data-act="save-check">Save</button> ${del}</p></section>`;
 }
 
+const entityOptionsHtml = (ids) => (ids || []).map((e) => `<option value="${esc(e)}">`).join('');
+
 const blankCustomDraft = () => ({ name: '', mode: 'entity', entity: '', operator: 'is', value: '', template: '', timeout_h: '', policy: 'notify' });
 
-function customCheckFormHtml(d) {
+function customCheckFormHtml(d, allIds) {
   const entity = d.mode !== 'template';
   return `<section class="card" id="custom-check-form"><h3>New Custom Check</h3>
     <label>Name <input type="text" id="cc-name" value="${esc(d.name)}"></label>
     <label>Kind <select id="cc-mode">${optionsHtml([['entity', 'Entity condition'], ['template', 'Template']], d.mode)}</select></label>
     ${entity
       ? `<label>Entity <input type="text" id="cc-entity" list="custom-ids" value="${esc(d.entity)}"></label>
+         <datalist id="custom-ids">${entityOptionsHtml(allIds)}</datalist>
          <label>Passes when it <select id="cc-operator">${optionsHtml(OPERATORS, d.operator)}</select></label>
          <label>Value <input type="text" id="cc-value" value="${esc(d.value)}"></label>`
       : `<label>Template (passes when it renders true) <textarea id="cc-template" rows="3">${esc(d.template)}</textarea></label>`}
@@ -842,14 +845,16 @@ function customCheckFormHtml(d) {
     <p><button data-act="add-custom-check">Add Check</button></p></section>`;
 }
 
-function checksTabHtml(view, entityIds, draft) {
-  const ids = (id, re) => `<datalist id="${id}">${entityIds.filter((e) => re.test(e)).map((e) => `<option value="${esc(e)}">`).join('')}</datalist>`;
+// `allIds` is the every-entity candidate list for the custom Check's Entity
+// input; null until that input is first focused (see `_wireChecks`).
+function checksTabHtml(view, entityIds, draft, allIds) {
+  const ids = (id, re) => `<datalist id="${id}">${entityOptionsHtml(entityIds.filter((e) => re.test(e)))}</datalist>`;
   const anomalies = DETECTORS.map(([d, l]) => `<tr><td>${esc(l)}</td><td><select data-detector="${d}">${
     optionsHtml([['off', 'Off'], ['notify', 'Notify'], ['pause', 'Pause after the Run']], (view.anomaly_actions || {})[d] || 'notify')}</select></td></tr>`).join('');
   return `${view.checks.map((c) => checkCardHtml(c, view)).join('')}
-    ${customCheckFormHtml(draft || blankCustomDraft())}
+    ${customCheckFormHtml(draft || blankCustomDraft(), allIds)}
     <section class="card"><h3>Anomaly detectors</h3><table>${anomalies}</table></section>
-    ${ids('weather-ids', /^weather\./)}${ids('sensor-ids', /^binary_sensor\./)}${ids('custom-ids', /./)}`;
+    ${ids('weather-ids', /^weather\./)}${ids('sensor-ids', /^binary_sensor\./)}`;
 }
 
 // `update_check` changes from a card's form values, or an error.
@@ -966,6 +971,7 @@ class GroundskeeperPanel extends HTMLElement {
     this._planPreview = null;
     this._checksView = null;
     this._customDraft = blankCustomDraft();
+    this._allEntityIds = null; // every entity id, built on first focus of the custom Check Entity input
     this._unsub = null;
     this._started = false;
     // Now tab state (spec §16.2)
@@ -1014,7 +1020,7 @@ class GroundskeeperPanel extends HTMLElement {
     this._notify = null;
     if (!this._entryId) return;
     this._unsub = await this._hass.connection.subscribeMessage(
-      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._loadChecks(); this._render(); },
+      (snapshot) => { this._snapshot = snapshot; this._loadZones(); this._loadSchedule(); this._render(); },
       { type: 'groundskeeper/subscribe', entry_id: this._entryId },
     );
     await this._subscribeNow();
@@ -1092,7 +1098,7 @@ class GroundskeeperPanel extends HTMLElement {
     if (!this._checksView) return '<section class="card"><p>Loading Checks.</p></section>';
     const ids = Object.keys((this._hass && this._hass.states) || {}).sort();
     const notice = this._checksNotice ? `<p class="warn" id="checks-notice">${esc(this._checksNotice)}</p>` : '';
-    return notice + checksTabHtml(this._checksView, ids, this._customDraft);
+    return notice + checksTabHtml(this._checksView, ids, this._customDraft, this._allEntityIds);
   }
 
   _readCheckCard(card) {
@@ -1111,6 +1117,15 @@ class GroundskeeperPanel extends HTMLElement {
   }
 
   _wireChecks(root) {
+    root.querySelectorAll('#cc-entity').forEach((el) => {
+      el.onfocus = () => {
+        if (!this._allEntityIds) {
+          this._allEntityIds = Object.keys((this._hass && this._hass.states) || {}).sort();
+          const list = root.querySelector('#custom-ids');
+          if (list) list.innerHTML = entityOptionsHtml(this._allEntityIds);
+        }
+      };
+    });
     root.querySelectorAll('#cc-mode').forEach((el) => {
       el.onchange = () => { this._readCustomDraft(root); this._render(); };
     });
@@ -1558,7 +1573,8 @@ class GroundskeeperPanel extends HTMLElement {
       <nav role="tablist">${tabs}</nav>${banner}${body}`;
     this.shadowRoot.querySelector('#mower').onchange = (e) => {
       this._entryId = e.target.value;
-      this._subscribe().then(() => this._render());
+      this._checksView = null; // another Mower's Checks; a snapshot push no longer refetches
+      this._subscribe().then(() => { this._render(); this._loadChecks(); });
     };
     this.shadowRoot.querySelectorAll('nav button').forEach((b) => {
       b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); this._loadChecks(); this._loadNotify(); };
