@@ -824,6 +824,7 @@ class Director:
             "open_action": fields.get("open_action"),
             "close_action": fields.get("close_action"),
             "notify": fields.get("notify"),
+            "positions": dict(fields.get("positions") or {}),
         }
         self._validate_gate(normalise_gate(raw))
         await self._gates_saved([*self._data.get("config", {}).get("gates", []), raw])

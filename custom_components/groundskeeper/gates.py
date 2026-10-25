@@ -4,7 +4,10 @@ A Gate is a physical barrier the Mower cannot open. It is user-declared per
 Mower, stored in `config.gates`:
 
     {"id", "name", "channels", "state_entity", "open_action", "close_action",
-     "notify"}
+     "notify", "positions"}
+
+`positions` maps a Channel id to the fraction (0..1, from `end_a`) at which the
+Gate is drawn along it; a missing entry means half-way. Display-only.
 
 `derive_gating` works out which Zones lie behind which Gates from the Channel
 graph; `believed_open` is the believed-state rule. Reading HA entities and
@@ -28,14 +31,18 @@ def normalise_gate(rec: Mapping[str, Any]) -> dict[str, Any]:
 
     "Notify me before crossings" defaults on when there is no open action.
     """
+    channels = list(rec.get("channels") or [])
     gate = {
         "id": rec["id"],
         "name": rec.get("name", ""),
-        "channels": list(rec.get("channels") or []),
+        "channels": channels,
         "state_entity": rec.get("state_entity") or None,
         "open_action": rec.get("open_action") or None,
         "close_action": rec.get("close_action") or None,
         "notify": rec.get("notify"),
+        "positions": {
+            c: f for c, f in (rec.get("positions") or {}).items() if c in channels
+        },
     }
     if gate["notify"] is None:
         gate["notify"] = gate["open_action"] is None
@@ -50,6 +57,13 @@ def validate_gate(gate: Mapping[str, Any], channel_ids: Iterable[str]) -> None:
     channels = gate.get("channels") or []
     if not channels or any(c not in known for c in channels):
         raise ValueError("A Gate sits on one or more existing Channels")
+    for channel, fraction in (gate.get("positions") or {}).items():
+        if (
+            isinstance(fraction, bool)
+            or not isinstance(fraction, (int, float))
+            or not 0 <= fraction <= 1
+        ):
+            raise ValueError(f"The Gate position on {channel} is a fraction from 0 to 1")
     for key in ("open_action", "close_action"):
         action = gate.get(key)
         if action is not None and not (

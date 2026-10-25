@@ -948,6 +948,7 @@ _GATE_FIELDS = {
     vol.Optional("open_action"): vol.Any([dict], None),
     vol.Optional("close_action"): vol.Any([dict], None),
     vol.Optional("notify"): vol.Any(bool, None),
+    vol.Optional("positions"): {str: vol.All(vol.Coerce(float), vol.Range(min=0, max=1))},
 }
 
 

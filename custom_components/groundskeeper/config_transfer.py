@@ -172,6 +172,8 @@ def plan_import(
         kept = {c["id"] for c in channels}
         for gate in config.get("gates", []):
             gate["channels"] = [c for c in gate.get("channels", []) if c in kept]
+            if "positions" in gate:
+                gate["positions"] = {c: f for c, f in gate["positions"].items() if c in kept}
 
     def resolve(ref: str, where: str) -> str:
         registry_id = registry_id_of(ref)

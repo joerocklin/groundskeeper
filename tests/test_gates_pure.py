@@ -108,3 +108,23 @@ def test_logbook_describes_the_gate_events() -> None:
     for kind in ("gate_crossing_expected", "gate_crossing_ended", "gate_open_action_failed"):
         text = describe({"type": kind, "gate_name": "Fence gate", "zone_name": "Front Lawn"})
         assert "Fence gate" in text
+
+
+# -- placement along a Channel (issue #72) -------------------------------------
+
+
+def test_positions_default_to_empty_and_drop_removed_channels() -> None:
+    assert normalise_gate({"id": "g", "channels": ["a"]})["positions"] == {}
+    gate = normalise_gate(
+        {"id": "g", "channels": ["a"], "positions": {"a": 0.25, "gone": 0.9}}
+    )
+    assert gate["positions"] == {"a": 0.25}
+
+
+def test_validate_rejects_out_of_range_or_non_numeric_positions() -> None:
+    for bad in (-0.1, 1.5, "half", True, None):
+        gate = normalise_gate({"id": "g", "name": "G", "channels": ["a"], "positions": {"a": bad}})
+        with pytest.raises(ValueError, match="position"):
+            validate_gate(gate, ["a"])
+    ok = normalise_gate({"id": "g", "name": "G", "channels": ["a"], "positions": {"a": 0}})
+    validate_gate(ok, ["a"])
