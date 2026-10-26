@@ -23,6 +23,9 @@ from tests.fake_mower import DEFAULT_SNAPSHOT, FakeMower
 
 @pytest.fixture
 async def setup(hass, monkeypatch, freezer):
+    # The default work window is 08:00-00:00; keep these tests off the wall clock.
+    monkeypatch.setattr(
+        "custom_components.groundskeeper.checks.DEFAULT_WINDOW", ("00:00", "00:00"))
     mower = FakeMower()
     monkeypatch.setitem(adapters.ADAPTER_REGISTRY, "mammotion", lambda h, e: mower)
     _, device, _ = await make_mammotion_mower(hass)
