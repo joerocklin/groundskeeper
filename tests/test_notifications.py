@@ -33,9 +33,11 @@ def _pn(hass):
     return persistent_notification._async_get_or_create_notifications(hass)
 
 
-@pytest.fixture(autouse=True)
-def _real_work_hours(monkeypatch):
-    """Reminders follow the real default window, not conftest's whole-day one."""
+@pytest.fixture
+def real_work_hours(monkeypatch):
+    """Reminders follow the real default window, not conftest's whole-day one.
+    Only for tests that pin the timezone and clock; the rest must not depend on
+    the wall clock."""
     monkeypatch.setattr(
         "custom_components.groundskeeper.checks.DEFAULT_WINDOW", ("08:00", "00:00")
     )
@@ -292,7 +294,7 @@ async def test_check_wait_notice_respects_its_toggle(
 
 
 async def test_reminders_replace_by_tag_and_skip_the_night(
-    hass, director, phones, freezer
+    hass, director, phones, freezer, real_work_hours
 ) -> None:
     await hass.config.async_set_time_zone("UTC")
     freezer.move_to(datetime(2026, 10, 21, 20, 0, tzinfo=timezone.utc))
@@ -319,7 +321,7 @@ async def test_reminders_replace_by_tag_and_skip_the_night(
     assert len(sent(phones[PIXEL])) == 4
 
 
-async def test_first_notification_goes_out_at_any_hour(hass, director, phones, freezer) -> None:
+async def test_first_notification_goes_out_at_any_hour(hass, director, phones, freezer, real_work_hours) -> None:
     from custom_components.groundskeeper.core import RaisePrompt
 
     await hass.config.async_set_time_zone("UTC")
@@ -332,7 +334,7 @@ async def test_first_notification_goes_out_at_any_hour(hass, director, phones, f
 
 
 async def test_restart_resends_nothing_and_catches_up_with_one_reminder(
-    hass, director, phones, freezer
+    hass, director, phones, freezer, real_work_hours
 ) -> None:
     await hass.config.async_set_time_zone("UTC")
     freezer.move_to(datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc))
