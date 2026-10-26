@@ -134,7 +134,7 @@ def test_payload_parses_actions_and_clears_blank_fields() -> None:
                                   open_action='[{"action": "script.open"}]'))["payload"]
     assert p == {"name": "G", "channels": ["c1"], "state_entity": "cover.g",
                  "open_action": [{"action": "script.open"}], "close_action": None,
-                 "notify": None}
+                 "notify": None, "positions": {}}
     p = call("gatePayload", draft(name="G", channels=["c1"], notify=False))["payload"]
     assert p["state_entity"] is None and p["notify"] is False
 

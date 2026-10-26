@@ -5,7 +5,9 @@ import pytest
 from custom_components.groundskeeper.gates import (
     believed_open,
     derive_gating,
+    is_fraction,
     normalise_gate,
+    prune_positions,
     validate_gate,
 )
 
@@ -108,3 +110,35 @@ def test_logbook_describes_the_gate_events() -> None:
     for kind in ("gate_crossing_expected", "gate_crossing_ended", "gate_open_action_failed"):
         text = describe({"type": kind, "gate_name": "Fence gate", "zone_name": "Front Lawn"})
         assert "Fence gate" in text
+
+
+# -- placement along a Channel (issue #72) -------------------------------------
+
+
+def test_positions_default_to_empty_and_drop_removed_channels() -> None:
+    assert normalise_gate({"id": "g", "channels": ["a"]})["positions"] == {}
+    gate = normalise_gate(
+        {"id": "g", "channels": ["a"], "positions": {"a": 0.25, "gone": 0.9}}
+    )
+    assert gate["positions"] == {"a": 0.25}
+
+
+def test_validate_rejects_out_of_range_or_non_numeric_positions() -> None:
+    for bad in (-0.1, 1.5, "half", True, None):
+        gate = normalise_gate({"id": "g", "name": "G", "channels": ["a"], "positions": {"a": bad}})
+        with pytest.raises(ValueError, match="position"):
+            validate_gate(gate, ["a"])
+    ok = normalise_gate({"id": "g", "name": "G", "channels": ["a"], "positions": {"a": 0}})
+    validate_gate(ok, ["a"])
+
+
+def test_is_fraction_accepts_only_real_numbers_from_zero_to_one() -> None:
+    assert all(is_fraction(v) for v in (0, 1, 0.5))
+    assert not any(is_fraction(v) for v in (-0.1, 1.1, float("nan"), True, "0.5", None))
+
+
+def test_prune_positions_keeps_listed_channels_and_optionally_only_valid_fractions() -> None:
+    positions = {"a": 0.2, "b": 7, "gone": 0.4}
+    assert prune_positions(positions, ["a", "b"]) == {"a": 0.2, "b": 7}
+    assert prune_positions(positions, ["a", "b"], valid_only=True) == {"a": 0.2}
+    assert prune_positions(None, ["a"]) == {}

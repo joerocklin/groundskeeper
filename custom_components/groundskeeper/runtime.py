@@ -824,8 +824,10 @@ class Director:
             "open_action": fields.get("open_action"),
             "close_action": fields.get("close_action"),
             "notify": fields.get("notify"),
+            "positions": dict(fields.get("positions") or {}),
         }
         self._validate_gate(normalise_gate(raw))
+        raw["positions"] = normalise_gate(raw)["positions"]
         await self._gates_saved([*self._data.get("config", {}).get("gates", []), raw])
         return normalise_gate(raw)
 
@@ -839,6 +841,7 @@ class Director:
         if "name" in changes:
             raw["name"] = str(changes["name"]).strip()
         self._validate_gate(normalise_gate(raw))
+        raw["positions"] = normalise_gate(raw)["positions"]
         stored[index] = raw
         await self._gates_saved(stored)
         return normalise_gate(raw)

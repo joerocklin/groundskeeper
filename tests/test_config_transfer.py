@@ -36,7 +36,8 @@ def config():
         ],
         "gates": [
             {"id": "g1", "name": "Side gate", "channels": ["c1", "c2"], "state_entity": "reg-gate",
-             "open_action": [{"service": "script.open_reg_gate"}]},
+             "open_action": [{"service": "script.open_reg_gate"}],
+             "positions": {"c1": 0.2, "c2": 0.8}},
         ],
         "notify_targets": ["mobile_app_pixel"],
     }
@@ -98,6 +99,7 @@ def test_zones_match_by_native_ref_then_name_and_remap_ids() -> None:
     ends = {(c["end_a"], c["end_b"]) for c in plan.config["channels"]}
     assert ends == {("T1", "dock"), ("T1", "T2")}
     assert plan.config["gates"][0]["channels"] == ["c1", "c2"]
+    assert plan.config["gates"][0]["positions"] == {"c1": 0.2, "c2": 0.8}
 
 
 def test_unmatched_zones_are_dropped_listed_with_their_channels() -> None:
@@ -108,6 +110,7 @@ def test_unmatched_zones_are_dropped_listed_with_their_channels() -> None:
     assert [z["id"] for z in plan.config["zones"]] == ["T1"]
     assert [c["id"] for c in plan.config["channels"]] == ["c1"]
     assert plan.config["gates"][0]["channels"] == ["c1"]
+    assert plan.config["gates"][0]["positions"] == {"c1": 0.2}
 
 
 def test_entity_ids_re_resolve_to_registry_ids_and_unresolved_are_kept_and_reported() -> None:
@@ -155,3 +158,10 @@ def test_broken_references_list_each_with_where_used() -> None:
 
 def test_nothing_broken_when_everything_resolves() -> None:
     assert broken_references(config(), entity_exists=lambda r: True, notify_exists=lambda n: True) == []
+
+
+def test_import_drops_invalid_gate_positions() -> None:
+    data = exported()
+    data["config"]["gates"][0]["positions"] = {"c1": 1.7, "c2": "x"}
+    plan = plan_import(data, target_zones=TARGET, registry_id_of=to_registry_id)
+    assert plan.config["gates"][0]["positions"] == {}
