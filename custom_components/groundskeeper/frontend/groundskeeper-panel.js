@@ -1662,6 +1662,7 @@ class GroundskeeperPanel extends HTMLElement {
 
   _openTab(tab) {
     this._tab = tab;
+    this._setupError = null;
     this._render();
     this._loadZones(); this._loadSchedule(); this._loadChecks(); this._loadNotify();
   }
@@ -1718,6 +1719,7 @@ class GroundskeeperPanel extends HTMLElement {
       <nav role="tablist">${tabs}</nav>${banner}${body}`;
     this.shadowRoot.querySelector('#mower').onchange = (e) => {
       this._entryId = e.target.value;
+      this._setupError = null; // that refusal was about the other Mower
       this._checksView = null; // another Mower's Checks; a snapshot push no longer refetches
       this._subscribe().then(() => { this._render(); this._loadChecks(); });
     };

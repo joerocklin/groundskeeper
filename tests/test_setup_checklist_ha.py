@@ -1,5 +1,7 @@
 """The setup checklist's marks, through the websocket API (spec §4.3, issue #42)."""
 
+import asyncio
+
 import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_DEVICE
@@ -14,8 +16,11 @@ from tests.fake_mower import FakeMower
 def add_mower(hass, monkeypatch):
     """Add a Groundskeeper Mower through the config flow; returns its entry."""
 
-    async def add(name: str = "Luba-SERIAL1", nick: str = "Luba"):
-        monkeypatch.setitem(adapters.ADAPTER_REGISTRY, "mammotion", lambda h, e: FakeMower())
+    async def add(name: str = "Luba-SERIAL1", nick: str = "Luba", *, zones=None):
+        mower = FakeMower()
+        if zones is not None:
+            mower.zones = zones
+        monkeypatch.setitem(adapters.ADAPTER_REGISTRY, "mammotion", lambda h, e: mower)
         _, device, _ = await make_mammotion_mower(hass, name, nick)
         result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(
@@ -23,8 +28,11 @@ def add_mower(hass, monkeypatch):
         )
         result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         await hass.async_block_till_done()
-        return result["result"]
+        entry = result["result"]
+        add.mowers[entry.entry_id] = mower
+        return entry
 
+    add.mowers = {}  # entry_id -> its FakeMower
     return add
 
 
@@ -118,3 +126,54 @@ async def test_an_export_does_not_carry_the_marks(hass, hass_ws_client, entry) -
     await ws.send_json({"id": 2, "type": f"{DOMAIN}/export_config", "entry_id": entry.entry_id})
     exported = (await ws.receive_json())["result"]["export"]
     assert "setup" not in exported["config"]
+
+
+async def _export(ws, msg_id, entry) -> dict:
+    await ws.send_json({"id": msg_id, "type": f"{DOMAIN}/export_config", "entry_id": entry.entry_id})
+    return (await ws.receive_json())["result"]["export"]
+
+
+async def _import(ws, msg_id, entry, export) -> dict:
+    await ws.send_json({"id": msg_id, "type": f"{DOMAIN}/import_config",
+                        "entry_id": entry.entry_id, "export": export})
+    return await ws.receive_json()
+
+
+async def test_an_import_keeps_this_mowers_marks(hass, hass_ws_client, entry) -> None:
+    ws = await hass_ws_client(hass)
+    assert (await set_step(ws, 1, entry, "bearings"))["success"]
+    export = await _export(ws, 2, entry)
+    assert (await _import(ws, 3, entry, export))["success"]
+    assert (await steps_done(ws, 4, entry))["bearings"] is True
+
+
+async def test_an_import_ignores_marks_in_the_file(hass, hass_ws_client, entry) -> None:
+    ws = await hass_ws_client(hass)
+    export = await _export(ws, 1, entry)
+    export["config"]["setup"] = {"recording_reviewed": True, "bearings_reviewed": True}
+    assert (await _import(ws, 2, entry, export))["success"]
+    done = await steps_done(ws, 3, entry)
+    assert done["recording"] is False and done["bearings"] is False
+
+
+async def test_zones_imported_in_the_background_reach_an_open_panel(
+    hass, hass_ws_client, add_mower
+) -> None:
+    from custom_components.groundskeeper.adapter import Zone, ZonesChanged
+    from tests.test_zone_bearing import rect
+
+    entry = await add_mower(zones=())  # nothing to import yet
+    mower = add_mower.mowers[entry.entry_id]
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": f"{DOMAIN}/subscribe", "entry_id": entry.entry_id})
+    assert (await ws.receive_json())["success"]
+    first = await ws.receive_json()
+    assert {i["id"]: i["done"] for i in first["event"]["setup_checklist"]["items"]}["zones"] is False
+
+    mower.zones = (
+        Zone("11111111", "Front Lawn", {"type": "Polygon", "coordinates": [rect(40, 8, 30)]}),
+    )
+    mower.emit_signal(ZonesChanged())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    pushed = await asyncio.wait_for(ws.receive_json(), timeout=2)  # no push: fail, don't hang
+    assert {i["id"]: i["done"] for i in pushed["event"]["setup_checklist"]["items"]}["zones"] is True

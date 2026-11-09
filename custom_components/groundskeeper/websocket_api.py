@@ -25,7 +25,7 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_send,
 )
 
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_STATE_CHANGED
 from .core import DETECTORS, plan_status
 from .gates import is_fraction
 from .heights import MAX_MAX_CUT, MIN_MAX_CUT
@@ -53,8 +53,6 @@ from .schedule_ops import (
 )
 from .transfer import async_export, async_import, async_undo_import
 from .zone_sync import async_get_zone_sync
-
-SIGNAL_STATE_CHANGED = f"{DOMAIN}_state_changed_{{}}"
 
 
 def _loaded_entry(hass: HomeAssistant, entry_id: str) -> ConfigEntry | None:

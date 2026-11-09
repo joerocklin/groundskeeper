@@ -75,5 +75,20 @@ const click = (act, match) => {
 
   await click('setup-step', { step: 'notify' });
   out.error_shown = shadow.innerHTML.includes('Mower is in safe idle');
+
+  // A refusal is about one Mower at one moment: it must not follow the owner around.
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  p._openTab('history');
+  out.error_after_tab_change = shadow.innerHTML.includes('Mower is in safe idle');
+  await click('setup-step', { step: 'notify' });
+  // Switching Mower re-subscribes; the new Mower's snapshot arrives and the banner is back.
+  p._hass.connection.subscribeMessage = async (cb, msg) => {
+    if (msg.type.endsWith('/subscribe')) cb({ entry_id: 'e', title: 'M', setup_checklist: checklist });
+    return () => {};
+  };
+  nodes['#mower'].onchange({ target: { value: 'e' } });
+  await settle();
+  out.banner_after_mower_switch = shadow.innerHTML.includes('id="setup-checklist"');
+  out.error_after_mower_switch = shadow.innerHTML.includes('Mower is in safe idle');
   process.stdout.write(JSON.stringify(out));
 })();

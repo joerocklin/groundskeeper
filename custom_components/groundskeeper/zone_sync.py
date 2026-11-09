@@ -25,10 +25,11 @@ from typing import Any
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import ulid as ulid_util
 
 from .adapter import AdapterSignal, MowerAdapter, Zone, ZonesChanged
-from .const import DOMAIN
+from .const import DOMAIN, SIGNAL_STATE_CHANGED
 from .zone_angles import angle_estimates, refresh_zone_angles
 
 _LOGGER = logging.getLogger(__name__)
@@ -201,6 +202,10 @@ class ZoneSync:
             await self.async_sync()
         except HomeAssistantError as err:
             _LOGGER.warning("Zone sync failed, will retry on change: %s", err)
+            return
+        # Nobody asked for this sync, so no command is about to push for it:
+        # tell open panels (the setup checklist's "Zones imported" step).
+        async_dispatcher_send(self._hass, SIGNAL_STATE_CHANGED.format(self._entry_id))
 
     # -- state --------------------------------------------------------------
 

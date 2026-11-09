@@ -90,6 +90,12 @@ async def async_import(director: Director, export: Any) -> dict[str, Any]:
             raise ImportError_("invalid_config")
     except ImportError_ as err:
         raise _fail("import_invalid") from err
+    # Setup progress belongs to this Mower: an import neither brings in the
+    # file's nor loses its own (in safe idle its own is unreadable).
+    plan.config.pop("setup", None)
+    own_setup = None if safe_idle else director.data.get("config", {}).get("setup")
+    if own_setup:
+        plan.config["setup"] = copy.deepcopy(own_setup)
     plan.report["unresolved_notify"] = [
         t for t in plan.config.get("notify_targets", []) if not notify_exists(hass, t)
     ]

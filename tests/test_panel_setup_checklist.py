@@ -139,3 +139,9 @@ def test_a_yes_to_gates_says_what_to_do_next() -> None:
 
     unanswered = call("setupBannerHtml", checklist())
     assert "Add a Gate" not in unanswered
+
+
+def test_a_refusal_does_not_follow_the_owner_to_another_tab_or_mower(clicks) -> None:
+    assert clicks["error_after_tab_change"] is False
+    assert clicks["banner_after_mower_switch"] is True  # the check below means something
+    assert clicks["error_after_mower_switch"] is False
