@@ -1008,7 +1008,7 @@ const SETUP_CONTROLS = {
   recording: [['Done']],
 };
 const SETUP_NOTES = {
-  recording: 'Debug recording is on by default. It stores the Mower\'s telemetry, including its GPS position, and the results of Checks and Anomaly detectors, on this Home Assistant instance, to help diagnose problems.',
+  recording: 'Debug recording stores the Mower\'s telemetry, including its GPS position, and the results of Checks and Anomaly detectors, on this Home Assistant instance, to help diagnose problems.',
 };
 
 // Banner above every tab until the setup checklist is complete (spec §4.3, §16.3).
@@ -1024,8 +1024,12 @@ function setupBannerHtml(checklist, error) {
   const noteText = (i) => (i.id === 'gates' && i.answer === 'yes'
     ? 'Add a Gate in Zones & Gates; this step is done once one exists.' : SETUP_NOTES[i.id]);
   const note = (i) => (!i.done && noteText(i) ? ` <span class="hint">${esc(noteText(i))}</span>` : '');
+  // The recording step also shows whether recording is on, with its switch; that
+  // stays after Done, for as long as the banner does. Done is still what completes it.
+  const recordingSwitch = (i) => (i.id === 'recording' && typeof i.enabled === 'boolean'
+    ? ` <span>Debug recording is ${i.enabled ? 'on' : 'off'}.</span> <button data-act="recording-toggle" data-enabled="${!i.enabled}">${i.enabled ? 'Turn off' : 'Turn on'}</button>` : '');
   const items = checklist.items
-    .map((i) => `<li${i.done ? ' class="done"' : ''}>${esc(i.label)}${note(i)}${link(i)}${controls(i)}</li>`).join('');
+    .map((i) => `<li${i.done ? ' class="done"' : ''}>${esc(i.label)}${note(i)}${link(i)}${recordingSwitch(i)}${controls(i)}</li>`).join('');
   const refused = error ? `<p class="warn" id="setup-error">${esc(error)}</p>` : '';
   return `<div class="banner" id="setup-checklist"><ol>${items}</ol>${refused}</div>`;
 }
@@ -1675,14 +1679,25 @@ class GroundskeeperPanel extends HTMLElement {
     root.querySelectorAll('[data-act="setup-step"]').forEach((b) => {
       b.onclick = () => this._setSetupStep(b.dataset.step, b.dataset.answer);
     });
+    root.querySelectorAll('[data-act="recording-toggle"]').forEach((b) => {
+      b.onclick = () => this._setRecording(b.dataset.enabled === 'true');
+    });
   }
 
   // The backend's snapshot push redraws the banner; only a refusal is shown here.
   async _setSetupStep(step, answer) {
+    await this._sendSetup({
+      type: 'groundskeeper/set_setup_step', entry_id: this._entryId, step, ...(answer ? { answer } : {}) });
+  }
+
+  async _setRecording(enabled) {
+    await this._sendSetup({ type: 'groundskeeper/set_debug_recording', entry_id: this._entryId, enabled });
+  }
+
+  async _sendSetup(msg) {
     this._setupError = null;
     try {
-      await this._hass.connection.sendMessagePromise({
-        type: 'groundskeeper/set_setup_step', entry_id: this._entryId, step, ...(answer ? { answer } : {}) });
+      await this._hass.connection.sendMessagePromise(msg);
     } catch (err) {
       this._setupError = errMessage(err);
       this._render();

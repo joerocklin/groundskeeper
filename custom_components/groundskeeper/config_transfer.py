@@ -12,10 +12,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .const import RECORDING_FLAG
 from .gates import prune_positions
 
 EXPORT_FORMAT = "groundskeeper_export"
 EXPORT_VERSION = 1
+
+# `config` keys that belong to this Mower, not to its configuration: its setup
+# progress, and whether it records (a file must not turn GPS recording on).
+# An export leaves them out and an import keeps the Mower's own.
+MOWER_OWN_KEYS = ("setup", RECORDING_FLAG)
 
 _WET_GRASS = "wet_grass"
 _CUSTOM = "custom"
@@ -94,7 +100,8 @@ def build_export(
 ) -> dict[str, Any]:
     """The export file: `config` (entity_ids), optionally `history`; never state."""
     out_config = copy.deepcopy(config)
-    out_config.pop("setup", None)  # this Mower's setup progress, not its configuration
+    for key in MOWER_OWN_KEYS:
+        out_config.pop(key, None)
     _rewrite(out_config, lambda ref, _where: entity_id_of(ref) or ref)
     out: dict[str, Any] = {
         "format": EXPORT_FORMAT,

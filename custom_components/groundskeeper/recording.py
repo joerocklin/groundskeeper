@@ -9,6 +9,7 @@ reaches the core.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +21,11 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.loader import async_get_integration
 
 from .adapter import MowerAdapter
-from .const import DOMAIN
+from .const import DOMAIN, RECORDING_FLAG
 from .recording_db import RecordingWriter
 
 _LOGGER = logging.getLogger(__name__)
 
-OPT_ENABLED = "debug_recording"
 OPT_SIZE_WARN = "recording_size_warn_bytes"
 DEFAULT_SIZE_WARN_BYTES = 1 << 30  # spec §15.3
 LOW_DISK_FRACTION = 0.10
@@ -64,9 +64,18 @@ def async_all_recordings(hass: HomeAssistant) -> list[DebugRecording]:
     return list(hass.data.get(DOMAIN, {}).get(_KEY, {}).values())
 
 
-def recording_enabled(entry: ConfigEntry) -> bool:
-    """The explicit per-entry flag; entries from before the feature are off."""
-    return bool(entry.options.get(OPT_ENABLED, False))
+def recording_enabled(entry: ConfigEntry, config: Mapping[str, Any]) -> bool:
+    """Whether this Mower records: the Store's flag, else the entry's option.
+
+    The Store `config` holds the flag (ADR 0001: an options write would reload
+    the entry). `entry.options` only answers for entries that have no Store
+    flag yet, so they keep the value they had; entries from before the feature
+    have neither and are off.
+    """
+    flag = config.get(RECORDING_FLAG)
+    if flag is None:
+        flag = entry.options.get(RECORDING_FLAG, False)
+    return bool(flag)
 
 
 class DebugRecording:
@@ -120,8 +129,8 @@ class DebugRecording:
     async def _on_stop(self, _event: Event) -> None:
         await self.async_stop()
 
-    async def async_stop(self) -> None:
-        """Record the unload, flush and close the file."""
+    async def async_stop(self, event: str = "unload") -> None:
+        """Record why it stopped (`unload`, or `recording_disabled`), flush and close the file."""
         if self._unsub_stop is not None:
             self._unsub_stop()
             self._unsub_stop = None
@@ -129,7 +138,7 @@ class DebugRecording:
         writer, self.writer = self.writer, None
         if writer is None:
             return
-        writer.record("lifecycle", {"event": "unload"})
+        writer.record("lifecycle", {"event": event})
         try:
             await self.hass.async_add_executor_job(writer.close)
         except Exception:  # noqa: BLE001

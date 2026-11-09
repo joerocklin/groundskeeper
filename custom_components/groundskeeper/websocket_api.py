@@ -38,6 +38,7 @@ from .notifier import (
     notify_settings,
 )
 from .now_view import CONTROLS as RUN_CONTROLS, now_view
+from .recording import recording_enabled
 from .runtime import Director, async_get_director
 from .setup_checklist import ANSWERS, MARKS, apply_mark, build_checklist
 from .schedule_ops import (
@@ -73,7 +74,9 @@ def build_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
         "title": entry.title,
         "device_id": entry.data.get("device_id"),
         # Banner above the tabs until complete (spec §16.3, §4.3).
-        "setup_checklist": build_checklist(config, entry.title),
+        "setup_checklist": build_checklist(
+            config, entry.title, recording=recording_enabled(entry, config)
+        ),
     }
 
 
@@ -93,6 +96,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         websocket_api.async_register_command(hass, command)
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_set_setup_step)
+    websocket_api.async_register_command(hass, ws_set_debug_recording)
     websocket_api.async_register_command(hass, ws_refresh_zones)
     websocket_api.async_register_command(hass, ws_set_zone_hidden)
     websocket_api.async_register_command(hass, ws_get_zones)
@@ -215,6 +219,25 @@ async def ws_set_setup_step(hass, connection, msg) -> None:
         await director.async_edit_config(
             lambda cfg: apply_mark(cfg, msg["step"], msg.get("answer"))
         )
+        return {}
+
+    await _schedule_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_debug_recording",
+        vol.Required("entry_id"): str,
+        vol.Required("enabled"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_debug_recording(hass, connection, msg) -> None:
+    """Turn this Mower's debug recording on or off, live; the push updates the banner."""
+
+    async def call(director: Director) -> dict:
+        await director.async_set_recording(msg["enabled"])
         return {}
 
     await _schedule_call(hass, connection, msg, call)

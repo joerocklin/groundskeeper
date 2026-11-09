@@ -37,7 +37,9 @@ p._hass = {
   connection: {
     sendMessagePromise: async (msg) => {
       sent.push(msg);
-      if (msg.step === 'notify') throw { code: 'safe_idle', message: 'Mower is in safe idle' };
+      if (msg.step === 'notify' || msg.enabled === true) {
+        throw { code: 'safe_idle', message: 'Mower is in safe idle' };
+      }
       return {};
     },
   },
@@ -63,6 +65,7 @@ const click = (act, match) => {
     { dataset: { step: 'gates', answer: 'no' } },
     { dataset: { step: 'notify' } },
   ];
+  buttons['recording-toggle'] = [{ dataset: { enabled: 'false' } }, { dataset: { enabled: 'true' } }];
   p._render();
   out.banner_on_any_tab = shadow.innerHTML.includes('id="setup-checklist"');
 
@@ -72,6 +75,9 @@ const click = (act, match) => {
   await click('setup-step', { step: 'bearings' });
   await click('setup-step', { step: 'gates' });
   out.sent = sent.map((m) => ({ ...m }));
+
+  await click('recording-toggle', { enabled: 'false' });
+  out.recording_sent = sent.slice(out.sent.length).map((m) => ({ ...m }));
 
   await click('setup-step', { step: 'notify' });
   out.error_shown = shadow.innerHTML.includes('Mower is in safe idle');
@@ -90,5 +96,11 @@ const click = (act, match) => {
   await settle();
   out.banner_after_mower_switch = shadow.innerHTML.includes('id="setup-checklist"');
   out.error_after_mower_switch = shadow.innerHTML.includes('Mower is in safe idle');
+
+  // Last, so a refusal left over from the steps above cannot make this pass.
+  p._setupError = null;
+  p._render();
+  await click('recording-toggle', { enabled: 'true' });
+  out.recording_error_shown = shadow.innerHTML.includes('Mower is in safe idle');
   process.stdout.write(JSON.stringify(out));
 })();

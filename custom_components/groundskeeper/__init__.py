@@ -21,7 +21,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 
 from .adapters import get_adapter_factory
-from .const import DOMAIN
+from .const import DOMAIN, RECORDING_FLAG
 from .core import active_run, normalise_core_state
 from .housekeeping import async_detach_housekeeping
 from .notifier import ACTION_EVENT, async_handle_action_event
@@ -92,7 +92,13 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: GroundskeeperConfigEntry
 ) -> bool:
     """Load a Mower's Store, start its adapter and Director, add entities."""
-    store = MowerStore(hass, entry.entry_id)
+    # A new Mower records by default (pre-1.0, spec §15.7); the Store carries the
+    # flag from its first write so a later change of default never flips it.
+    store = MowerStore(
+        hass,
+        entry.entry_id,
+        new_config={RECORDING_FLAG: entry.options.get(RECORDING_FLAG, True)},
+    )
     await store.async_data()  # seeds the empty shape on first install
     entry.runtime_data = store
     await async_register_panel(hass)

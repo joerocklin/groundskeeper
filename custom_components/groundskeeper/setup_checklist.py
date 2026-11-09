@@ -46,8 +46,15 @@ def apply_mark(config: dict[str, Any], step: str, answer: str | None = None) -> 
         setup[MARKS[step]] = True
 
 
-def build_checklist(config: Mapping[str, Any], title: str) -> dict[str, Any]:
-    """Ordered steps (id, label, tab, done) and whether all are done."""
+def build_checklist(
+    config: Mapping[str, Any], title: str, *, recording: bool = False
+) -> dict[str, Any]:
+    """Ordered steps (id, label, tab, done) and whether all are done.
+
+    `recording` is whether the Mower's debug recording is on; the recording
+    step shows it as `enabled` beside its toggle. Only the owner's mark
+    completes that step, not the toggle.
+    """
     marks = config.get("setup") or {}
     done = {
         "zones": bool(config.get("zones")),
@@ -63,4 +70,6 @@ def build_checklist(config: Mapping[str, Any], title: str) -> dict[str, Any]:
     for item in items:
         if item["id"] == "gates":  # "yes" leaves the step open until a Gate exists
             item["answer"] = marks.get("gates_answer")
+        elif item["id"] == "recording":
+            item["enabled"] = recording
     return {"items": items, "complete": all(i["done"] for i in items)}

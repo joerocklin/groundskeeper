@@ -19,12 +19,13 @@ from homeassistant.const import EVENT_SERVICE_REGISTERED, EVENT_SERVICE_REMOVED
 from homeassistant.util import dt as dt_util
 
 from .config_transfer import (
+    MOWER_OWN_KEYS,
     ImportError_,
     broken_references,
     build_export,
     plan_import,
 )
-from .const import DOMAIN
+from .const import DOMAIN, RECORDING_FLAG
 from .store_validation import validate_store
 
 if TYPE_CHECKING:
@@ -69,6 +70,16 @@ def async_export(director: Director, include_history: bool) -> dict[str, Any]:
     )
 
 
+def _keep_own(
+    config: dict[str, Any], own: dict[str, Any] | None, keys: tuple[str, ...] = MOWER_OWN_KEYS
+) -> None:
+    """Replace `config`'s per-Mower `keys` with `own`'s (dropping any it brought)."""
+    for key in keys:
+        config.pop(key, None)
+        if own and key in own:
+            config[key] = copy.deepcopy(own[key])
+
+
 async def async_import(director: Director, export: Any) -> dict[str, Any]:
     """Replace `config` from an export; returns the import report."""
     hass = director.hass
@@ -90,12 +101,10 @@ async def async_import(director: Director, export: Any) -> dict[str, Any]:
             raise ImportError_("invalid_config")
     except ImportError_ as err:
         raise _fail("import_invalid") from err
-    # Setup progress belongs to this Mower: an import neither brings in the
-    # file's nor loses its own (in safe idle its own is unreadable).
-    plan.config.pop("setup", None)
-    own_setup = None if safe_idle else director.data.get("config", {}).get("setup")
-    if own_setup:
-        plan.config["setup"] = copy.deepcopy(own_setup)
+    # Setup progress and the recording choice belong to this Mower: an import
+    # neither brings in the file's nor loses its own (in safe idle its own is
+    # unreadable).
+    _keep_own(plan.config, None if safe_idle else director.data.get("config", {}))
     plan.report["unresolved_notify"] = [
         t for t in plan.config.get("notify_targets", []) if not notify_exists(hass, t)
     ]
@@ -124,6 +133,8 @@ async def async_undo_import(director: Director) -> None:
         snapshot = director.data.pop(UNDO_KEY, None)
         if snapshot is None:
             raise _fail("nothing_to_undo")
+        # What the owner chose about recording since the import still stands.
+        _keep_own(snapshot["config"], director.data.get("config", {}), (RECORDING_FLAG,))
         director.data["config"] = snapshot["config"]
         await director.store.async_save(director.data)
     await director.config_replaced()

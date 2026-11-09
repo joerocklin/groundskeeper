@@ -1,6 +1,7 @@
 """The setup checklist's marks, through the websocket API (spec §4.3, issue #42)."""
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 from homeassistant.config_entries import SOURCE_USER
@@ -8,6 +9,7 @@ from homeassistant.const import CONF_DEVICE
 
 from custom_components.groundskeeper import adapters
 from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.recording import async_get_recording
 from tests.conftest import make_mammotion_mower
 from tests.fake_mower import FakeMower
 
@@ -177,3 +179,129 @@ async def test_zones_imported_in_the_background_reach_an_open_panel(
     await hass.async_block_till_done(wait_background_tasks=True)
     pushed = await asyncio.wait_for(ws.receive_json(), timeout=2)  # no push: fail, don't hang
     assert {i["id"]: i["done"] for i in pushed["event"]["setup_checklist"]["items"]}["zones"] is True
+
+
+async def _set_recording(ws, msg_id, entry, enabled) -> dict:
+    await ws.send_json({"id": msg_id, "type": f"{DOMAIN}/set_debug_recording",
+                        "entry_id": entry.entry_id, "enabled": enabled})
+    return await ws.receive_json()
+
+
+async def _recording_item(ws, msg_id, entry) -> dict:
+    await ws.send_json({"id": msg_id, "type": f"{DOMAIN}/get_state", "entry_id": entry.entry_id})
+    items = (await ws.receive_json())["result"]["setup_checklist"]["items"]
+    return next(i for i in items if i["id"] == "recording")
+
+
+async def test_the_banner_toggle_turns_the_live_recording_off_and_on(
+    hass, hass_ws_client, entry
+) -> None:
+    ws = await hass_ws_client(hass)
+    assert (await _recording_item(ws, 1, entry))["enabled"] is True  # a new Mower records
+    assert async_get_recording(hass, entry.entry_id) is not None
+
+    assert (await _set_recording(ws, 2, entry, False))["success"]
+    item = await _recording_item(ws, 3, entry)
+    assert item["enabled"] is False
+    assert item["done"] is False  # the toggle is not the owner's "Done"
+    assert async_get_recording(hass, entry.entry_id) is None
+
+    assert (await _set_recording(ws, 4, entry, True))["success"]
+    assert (await _recording_item(ws, 5, entry))["enabled"] is True
+    assert async_get_recording(hass, entry.entry_id) is not None
+
+
+async def test_the_recording_choice_survives_a_reload(hass, hass_ws_client, entry) -> None:
+    ws = await hass_ws_client(hass)
+    assert (await _set_recording(ws, 1, entry, False))["success"]
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert (await _recording_item(ws, 2, entry))["enabled"] is False
+    assert async_get_recording(hass, entry.entry_id) is None
+
+
+async def test_toggling_recording_pushes_a_fresh_snapshot_to_the_panel(
+    hass, hass_ws_client, entry
+) -> None:
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": f"{DOMAIN}/subscribe", "entry_id": entry.entry_id})
+    assert (await ws.receive_json())["success"]
+    await ws.receive_json()  # the first snapshot
+
+    await ws.send_json({"id": 2, "type": f"{DOMAIN}/set_debug_recording",
+                        "entry_id": entry.entry_id, "enabled": False})
+    messages = [
+        await asyncio.wait_for(ws.receive_json(), timeout=2),  # the result
+        await asyncio.wait_for(ws.receive_json(), timeout=2),  # and the push; no push: fail, don't hang
+    ]
+    pushed = next(m for m in messages if m["type"] == "event")
+    recording = next(i for i in pushed["event"]["setup_checklist"]["items"] if i["id"] == "recording")
+    assert recording["enabled"] is False
+
+
+async def test_only_an_admin_may_toggle_recording(
+    hass, hass_ws_client, hass_read_only_user, entry
+) -> None:
+    refresh = await hass.auth.async_create_refresh_token(
+        hass_read_only_user, client_id="https://example.com/",
+        access_token_expiration=timedelta(days=2))
+    ws = await hass_ws_client(hass, hass.auth.async_create_access_token(refresh))
+    refused = await _set_recording(ws, 1, entry, False)
+    assert refused["success"] is False and refused["error"]["code"] == "unauthorized"
+    assert async_get_recording(hass, entry.entry_id) is not None
+
+
+async def test_an_export_does_not_carry_the_recording_choice(hass, hass_ws_client, entry) -> None:
+    ws = await hass_ws_client(hass)
+    assert (await _set_recording(ws, 1, entry, False))["success"]
+    assert "debug_recording" not in (await _export(ws, 2, entry))["config"]
+
+
+@pytest.mark.parametrize("own", [True, False])
+async def test_an_import_keeps_this_mowers_recording_choice(
+    hass, hass_ws_client, entry, own
+) -> None:
+    ws = await hass_ws_client(hass)
+    assert (await _set_recording(ws, 1, entry, own))["success"]
+    export = await _export(ws, 2, entry)  # no flag in it: also a file from before the flag
+    assert (await _import(ws, 3, entry, export))["success"]
+    assert (await _recording_item(ws, 4, entry))["enabled"] is own
+    assert (async_get_recording(hass, entry.entry_id) is not None) is own
+
+
+async def test_an_import_ignores_the_recording_choice_in_the_file(
+    hass, hass_ws_client, entry
+) -> None:
+    ws = await hass_ws_client(hass)
+    export = await _export(ws, 1, entry)
+
+    assert (await _set_recording(ws, 2, entry, False))["success"]
+    export["config"]["debug_recording"] = True
+    assert (await _import(ws, 3, entry, export))["success"]
+    assert async_get_recording(hass, entry.entry_id) is None  # the file cannot turn GPS recording on
+
+    assert (await _set_recording(ws, 4, entry, True))["success"]
+    export["config"]["debug_recording"] = False
+    assert (await _import(ws, 5, entry, export))["success"]
+    assert async_get_recording(hass, entry.entry_id) is not None
+
+
+async def test_undoing_an_import_keeps_the_recording_choice_made_since(
+    hass, hass_ws_client, entry
+) -> None:
+    ws = await hass_ws_client(hass)
+    export = await _export(ws, 1, entry)
+    assert (await _import(ws, 2, entry, export))["success"]
+    assert (await _set_recording(ws, 3, entry, False))["success"]
+
+    await ws.send_json({"id": 4, "type": f"{DOMAIN}/undo_import", "entry_id": entry.entry_id})
+    assert (await ws.receive_json())["success"]
+    assert (await _recording_item(ws, 5, entry))["enabled"] is False
+    assert async_get_recording(hass, entry.entry_id) is None
+
+
+async def test_enabled_must_be_true_or_false(hass, hass_ws_client, entry) -> None:
+    ws = await hass_ws_client(hass)
+    refused = await _set_recording(ws, 1, entry, "maybe")
+    assert refused["success"] is False
+    assert async_get_recording(hass, entry.entry_id) is not None
