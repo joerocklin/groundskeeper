@@ -94,6 +94,7 @@ def build_export(
 ) -> dict[str, Any]:
     """The export file: `config` (entity_ids), optionally `history`; never state."""
     out_config = copy.deepcopy(config)
+    out_config.pop("setup", None)  # this Mower's setup progress, not its configuration
     _rewrite(out_config, lambda ref, _where: entity_id_of(ref) or ref)
     out: dict[str, Any] = {
         "format": EXPORT_FORMAT,

@@ -33,6 +33,11 @@ const STYLE = `
   nav button[aria-selected="true"] { color: var(--primary-color); border-color: var(--primary-color); }
   .banner { margin: 16px; padding: 12px 16px; border-radius: 8px;
     background: var(--warning-color, #ffa600); color: #000; }
+  .banner ol { margin: 0; padding-left: 20px; }
+  .banner li { margin: 6px 0; }
+  .banner li.done { text-decoration: line-through; opacity: .7; }
+  .banner .hint, .banner .warn { color: inherit; display: block; }
+  .banner button { font: inherit; margin-left: 4px; }
   main { padding: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .card { background: var(--card-background-color); border-radius: 12px; padding: 16px;
     box-shadow: var(--ha-card-box-shadow, none); border: 1px solid var(--divider-color); }
@@ -994,6 +999,37 @@ function settingsTabHtml(notifyHtml) {
     <section class="card" id="settings-storage"></section>`;
 }
 
+// What completes each setup step the owner marks by hand: [button label, answer].
+// "Zones imported" completes itself.
+const SETUP_CONTROLS = {
+  bearings: [['Bearings checked']],
+  gates: [['No', 'no'], ['Yes', 'yes']],
+  notify: [['No phone, panel only']],
+  recording: [['Done']],
+};
+const SETUP_NOTES = {
+  recording: 'Debug recording is on by default. It stores the Mower\'s telemetry, including its GPS position, and the results of Checks and Anomaly detectors, on this Home Assistant instance, to help diagnose problems.',
+};
+
+// Banner above every tab until the setup checklist is complete (spec §4.3, §16.3).
+function setupBannerHtml(checklist, error) {
+  if (!checklist || checklist.complete) return '';
+  const tabName = (id) => (TABS.find(([t]) => t === id) || [])[1];
+  const link = (i) => (i.tab && !i.done
+    ? ` <button data-act="open-tab" data-tab="${esc(i.tab)}">Open ${esc(tabName(i.tab))}</button>` : '');
+  const controls = (i) => (i.done ? '' : (SETUP_CONTROLS[i.id] || [])
+    .filter(([, answer]) => !answer || answer !== i.answer) // an answer already given is not offered again
+    .map(([label, answer]) =>
+      ` <button data-act="setup-step" data-step="${esc(i.id)}"${answer ? ` data-answer="${answer}"` : ''}>${esc(label)}</button>`).join(''));
+  const noteText = (i) => (i.id === 'gates' && i.answer === 'yes'
+    ? 'Add a Gate in Zones & Gates; this step is done once one exists.' : SETUP_NOTES[i.id]);
+  const note = (i) => (!i.done && noteText(i) ? ` <span class="hint">${esc(noteText(i))}</span>` : '');
+  const items = checklist.items
+    .map((i) => `<li${i.done ? ' class="done"' : ''}>${esc(i.label)}${note(i)}${link(i)}${controls(i)}</li>`).join('');
+  const refused = error ? `<p class="warn" id="setup-error">${esc(error)}</p>` : '';
+  return `<div class="banner" id="setup-checklist"><ol>${items}</ol>${refused}</div>`;
+}
+
 class GroundskeeperPanel extends HTMLElement {
   constructor() {
     super();
@@ -1624,6 +1660,35 @@ class GroundskeeperPanel extends HTMLElement {
     });
   }
 
+  _openTab(tab) {
+    this._tab = tab;
+    this._setupError = null;
+    this._render();
+    this._loadZones(); this._loadSchedule(); this._loadChecks(); this._loadNotify();
+  }
+
+  // The setup banner's links open the tab where the step is done; its buttons mark a step.
+  _wireSetup(root) {
+    root.querySelectorAll('[data-act="open-tab"]').forEach((b) => {
+      b.onclick = () => this._openTab(b.dataset.tab);
+    });
+    root.querySelectorAll('[data-act="setup-step"]').forEach((b) => {
+      b.onclick = () => this._setSetupStep(b.dataset.step, b.dataset.answer);
+    });
+  }
+
+  // The backend's snapshot push redraws the banner; only a refusal is shown here.
+  async _setSetupStep(step, answer) {
+    this._setupError = null;
+    try {
+      await this._hass.connection.sendMessagePromise({
+        type: 'groundskeeper/set_setup_step', entry_id: this._entryId, step, ...(answer ? { answer } : {}) });
+    } catch (err) {
+      this._setupError = errMessage(err);
+      this._render();
+    }
+  }
+
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
     const rh = this.shadowRoot.querySelector('#run-height');
@@ -1638,10 +1703,7 @@ class GroundskeeperPanel extends HTMLElement {
     const tabs = TABS
       .map(([id, label]) => `<button role="tab" data-tab="${id}" aria-selected="${id === this._tab}">${esc(label)}</button>`)
       .join('');
-    const checklist = this._snapshot && this._snapshot.setup_checklist;
-    const banner = checklist && !checklist.complete
-      ? `<div class="banner" id="setup-checklist">Finish setup: ${checklist.items.length} item(s) left</div>`
-      : '';
+    const banner = setupBannerHtml(this._snapshot && this._snapshot.setup_checklist, this._setupError);
     const label = (TABS.find(([id]) => id === this._tab) || [])[1];
     let body;
     if (this._error) body = `<div class="empty">${esc(this._error)}</div>`;
@@ -1657,12 +1719,14 @@ class GroundskeeperPanel extends HTMLElement {
       <nav role="tablist">${tabs}</nav>${banner}${body}`;
     this.shadowRoot.querySelector('#mower').onchange = (e) => {
       this._entryId = e.target.value;
+      this._setupError = null; // that refusal was about the other Mower
       this._checksView = null; // another Mower's Checks; a snapshot push no longer refetches
       this._subscribe().then(() => { this._render(); this._loadChecks(); });
     };
     this.shadowRoot.querySelectorAll('nav button').forEach((b) => {
-      b.onclick = () => { this._tab = b.dataset.tab; this._render(); this._loadZones(); this._loadSchedule(); this._loadChecks(); this._loadNotify(); };
+      b.onclick = () => this._openTab(b.dataset.tab);
     });
+    this._wireSetup(this.shadowRoot);
     if (this._tab === 'zones') this._wireZones(this.shadowRoot);
     if (this._tab === 'now' && this._now) this._wireNow(this.shadowRoot);
     if (this._tab === 'schedule') this._wireSchedule(this.shadowRoot);

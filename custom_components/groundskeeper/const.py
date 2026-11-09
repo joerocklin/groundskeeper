@@ -16,3 +16,7 @@ PANEL_JS_MIN = "groundskeeper-panel.min.js"
 
 # The one bus event every Groundskeeper automation hook listens to (spec §13.4).
 EVENT_TYPE = "groundskeeper_event"
+
+# Dispatcher signal (formatted with an entry id) that pushes a fresh snapshot
+# to every panel subscribed to that Mower.
+SIGNAL_STATE_CHANGED = f"{DOMAIN}_state_changed_{{}}"

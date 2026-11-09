@@ -43,7 +43,21 @@ async def test_get_state_targets_one_entry(hass, hass_ws_client) -> None:
     assert msg["success"]
     assert msg["result"]["entry_id"] == luba.entry_id
     assert msg["result"]["title"] == "Luba"
-    assert msg["result"]["setup_checklist"] == {"complete": True, "items": []}
+
+
+async def test_get_state_carries_the_setup_checklist(hass, hass_ws_client) -> None:
+    """A new Mower's snapshot lists the setup steps, none done, named for the Mower."""
+    luba, _ = await _setup(hass, "Luba", "Yuka")
+    ws = await hass_ws_client(hass)
+    await ws.send_json(
+        {"id": 1, "type": "groundskeeper/get_state", "entry_id": luba.entry_id}
+    )
+    checklist = (await ws.receive_json())["result"]["setup_checklist"]
+    assert checklist["complete"] is False
+    assert [i["id"] for i in checklist["items"]] == [
+        "zones", "bearings", "gates", "notify", "recording"
+    ]
+    assert checklist["items"][2]["label"] == "Does Luba pass through any gates?"
 
 
 async def test_unknown_entry_is_not_found(hass, hass_ws_client) -> None:
