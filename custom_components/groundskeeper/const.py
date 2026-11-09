@@ -2,6 +2,10 @@
 
 DOMAIN = "groundskeeper"
 
+# Whether a Mower records its debug recording (spec §15.7): a key of the Store
+# `config`, and of `entry.options` for an entry from before it moved there.
+RECORDING_FLAG = "debug_recording"
+
 # Adapter registry: integrations whose lawn_mower devices the director can
 # drive. Phase 1: mammotion only (spec §4.1).
 ADAPTER_DOMAINS: tuple[str, ...] = ("mammotion",)

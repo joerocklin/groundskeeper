@@ -118,9 +118,6 @@ class GroundskeeperConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(
                 title=self._mower_name,
                 data={CONF_DEVICE: self._device_id},
-                # Explicit per entry so a later change of the default never
-                # flips existing entries (spec §15.7). On by default pre-1.0.
-                options={"debug_recording": True},
                 description="mower_added",
                 description_placeholders={
                     "mower": self._mower_name,

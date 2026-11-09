@@ -59,9 +59,12 @@ def of_kind(rows, kind):
     return [json.loads(p) for k, _r, p in rows if k == kind]
 
 
-async def test_config_flow_stores_flag_and_creates_file_with_meta(hass, director) -> None:
+async def test_config_flow_stores_flag_and_creates_file_with_meta(
+    hass, hass_storage, director
+) -> None:
     entry, _, _ = director
-    assert entry.options["debug_recording"] is True  # explicit per entry
+    stored = hass_storage[f"groundskeeper.{entry.entry_id}"]["data"]["config"]
+    assert stored["debug_recording"] is True  # explicit per Mower, in the Store
     path = db_path(hass, entry)
     assert path.exists()
     await flush(hass, entry)

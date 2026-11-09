@@ -80,3 +80,13 @@ def test_the_gates_item_carries_the_owners_answer() -> None:
 
     assert gates({})["answer"] is None
     assert gates({"setup": {"gates_answer": "yes"}})["answer"] == "yes"
+
+
+def test_the_recording_step_reports_whether_recording_is_on_but_only_a_mark_completes_it() -> None:
+    def items(**kw):
+        return {i["id"]: i for i in build_checklist({}, "Luba", **kw)["items"]}
+
+    assert items(recording=True)["recording"]["enabled"] is True
+    assert items(recording=False)["recording"]["enabled"] is False
+    assert items(recording=True)["recording"]["done"] is False
+    assert "enabled" not in items(recording=True)["bearings"]

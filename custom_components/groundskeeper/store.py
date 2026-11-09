@@ -2,7 +2,8 @@
 
 One HA Store per config entry, key `groundskeeper.<entry_id>`, holding
 everything the panel edits plus all runtime state. `entry.data` holds only
-the Mower's device_id; `entry.options` is unused.
+the Mower's device_id; `entry.options` is unused, bar the recording flag an
+entry from before it moved here may still carry (`recording.recording_enabled`).
 """
 
 from __future__ import annotations
@@ -10,8 +11,9 @@ from __future__ import annotations
 import copy
 import logging
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
@@ -51,8 +53,17 @@ def empty_store_data() -> dict:
 class MowerStore(storage.Store[dict]):
     """One Store per Mower, atomically written."""
 
-    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
-        """Initialise the Store for one config entry."""
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry_id: str,
+        new_config: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Initialise the Store for one config entry.
+
+        `new_config` seeds `config` when the Store file does not exist yet (a
+        new Mower). A Store that already exists, and safe idle, never get it.
+        """
         super().__init__(
             hass,
             STORAGE_VERSION,
@@ -61,6 +72,7 @@ class MowerStore(storage.Store[dict]):
             minor_version=STORAGE_VERSION_MINOR,
         )
 
+        self._new_config = dict(new_config or {})
         self._shared: dict | None = None
         self.safe_idle: str | None = None
         self.state_discarded = False
@@ -116,6 +128,7 @@ class MowerStore(storage.Store[dict]):
                 self.safe_idle = SAFE_IDLE_CORRUPT
             elif raw is None:
                 data = empty_store_data()
+                data["config"].update(copy.deepcopy(self._new_config))
                 await super().async_save(copy.deepcopy(data))
                 self._shared = data
                 return data
@@ -150,6 +163,10 @@ class MowerStore(storage.Store[dict]):
         data = empty_store_data()
         if config is not None:
             data["config"] = config
+        # Starting over is a new Mower again: it gets the defaults a new one does,
+        # without overriding a choice the restored config already holds.
+        for key, value in self._new_config.items():
+            data["config"].setdefault(key, copy.deepcopy(value))
         if history is not None:
             data["history"] = history
         self._shared = data

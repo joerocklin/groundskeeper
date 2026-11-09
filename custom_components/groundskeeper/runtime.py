@@ -55,7 +55,7 @@ from .adapter import (
     Snapshot,
     Unconfirmed,
 )
-from .const import DOMAIN, EVENT_TYPE
+from .const import DOMAIN, EVENT_TYPE, RECORDING_FLAG
 from .checks import (
     MODE_ENTITY,
     TYPE_CUSTOM,
@@ -216,10 +216,10 @@ class Director:
         self._cancel_started: CALLBACK_TYPE | None = None
         self._check_unsubs: list[CALLBACK_TYPE] = []
         self._forecast_rain = False  # Wet grass: latest forecast confirmation (§9.4)
-        # Debug recording (spec §15): None when the entry's flag is off.
-        self.recording: DebugRecording | None = (
-            DebugRecording(hass, entry, adapter) if recording_enabled(entry) else None
-        )
+        # Debug recording (spec §15): None while the Mower's flag is off. The
+        # flag lives in the Store `config`, so this is set once that is loaded.
+        self.recording: DebugRecording | None = None
+        self._recording_lock = asyncio.Lock()  # one start or stop at a time
         self._last_snapshot: dict[str, Any] | None = None
         self._unsub_raw_state: CALLBACK_TYPE | None = None
 
@@ -240,6 +240,7 @@ class Director:
 
     async def config_replaced(self) -> None:
         """`config` was swapped wholesale (import, undo): re-wire everything that reads it."""
+        await self._sync_recording()  # first: it reads only the flag, so a failing dispatch cannot skip it
         self._resubscribe_checks()
         await self.dispatch(lambda now: ChecksEdited(now, tuple(c["id"] for c in self.checks)))
         await self.dispatch(GatesEdited)
@@ -335,9 +336,7 @@ class Director:
         data = await self._store.async_data()
         self._data = data
         self._loaded_at = dt_util.utcnow()
-        if self.recording is not None:
-            await self.recording.async_start()
-            self._listen_raw_state()
+        await self._sync_recording(announce=False)
         self._check_store()
         data.update(normalise_core_state(data))
         self.record(
@@ -457,9 +456,7 @@ class Director:
     def async_unload(self) -> None:
         """Stop timers and observation. Never commands the Mower."""
         self._closed = True
-        if self._unsub_raw_state is not None:
-            self._unsub_raw_state()
-            self._unsub_raw_state = None
+        self._unlisten_raw_state()
         self.broken_references.close()
         self._unsubscribe_checks()
         for cancel in (self._wait_cancel, self._cancel_started, self._unsub_adapter):
@@ -984,6 +981,41 @@ class Director:
 
     # -- debug recording (spec §15) ------------------------------------------------
 
+    async def async_set_recording(self, enabled: bool) -> None:
+        """Turn the debug recording on or off for this Mower, live.
+
+        Saves the flag in the Store `config` (never a reload, ADR 0001) and
+        starts or stops the recording to match. Stopping keeps the file.
+        """
+        await self.async_edit_config(lambda cfg: cfg.__setitem__(RECORDING_FLAG, enabled))
+        await self._sync_recording()
+
+    async def _sync_recording(self, *, announce: bool = True) -> None:
+        """Make the running recording match the Mower's flag.
+
+        The flag is read inside the lock, so toggles in a row end up matching
+        the last one saved.
+        """
+        async with self._recording_lock:
+            if self._closed:  # unloading stops the recording; nothing may start one now
+                return
+            want = recording_enabled(self.entry, self._data.get("config", {}))
+            if want and self.recording is None:
+                recording = DebugRecording(self.hass, self.entry, self.adapter)
+                await recording.async_start()
+                if self._closed:  # unloaded while it was opening: unload cannot see it yet
+                    await recording.async_stop()
+                    return
+                self.recording = recording
+                self._last_snapshot = None  # the first snapshot after starting is recorded
+                self._listen_raw_state()
+                if announce:
+                    self.record("lifecycle", {"event": "recording_enabled"})
+            elif not want and self.recording is not None:
+                self._unlisten_raw_state()
+                recording, self.recording = self.recording, None
+                await recording.async_stop("recording_disabled")
+
     def record(self, kind: str, payload: Any, run_id: str | None = None) -> None:
         """Record on the debug recording; a no-op when it is off. Never raises."""
         if self.recording is None:
@@ -1064,6 +1096,11 @@ class Director:
         self._unsub_raw_state = self.hass.bus.async_listen(
             EVENT_STATE_CHANGED, _changed, event_filter=_on_device
         )
+
+    def _unlisten_raw_state(self) -> None:
+        if self._unsub_raw_state is not None:
+            self._unsub_raw_state()
+            self._unsub_raw_state = None
 
     def _record_changes(self, old: dict[str, Any], new: dict[str, Any]) -> None:
         """Transitions, run summaries, Check and detector changes, errors."""

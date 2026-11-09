@@ -143,7 +143,7 @@ async def test_flow_lists_mower_and_creates_entry(hass, hass_storage) -> None:
     assert entry.unique_id == mower.id
     assert entry.title == "Example Mower"
     assert entry.data == {CONF_DEVICE: mower.id}
-    assert entry.options == {"debug_recording": True}
+    assert entry.options == {}  # ADR 0001: the Store holds the recording flag, not options
 
     # One Store per Mower, created with the right key and sections.
     key = f"groundskeeper.{entry.entry_id}"
@@ -154,6 +154,7 @@ async def test_flow_lists_mower_and_creates_entry(hass, hass_storage) -> None:
     assert stored["key"] == key
     assert set(stored["data"]) == {"config", "state", "learned", "history"}
     assert stored["data"]["config"]["recurrences"] == []
+    assert stored["data"]["config"]["debug_recording"] is True  # on by default pre-1.0 (spec §15.7)
 
     # No options flow, so HA shows no Configure button.
     assert not entry.supports_options

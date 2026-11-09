@@ -25,8 +25,11 @@ def call(fn: str, *args):
     return json.loads(out.stdout)
 
 
-def checklist(done: tuple[str, ...] = ()) -> dict:
-    """The snapshot's checklist for a Mower called Luba, with `done` steps ticked."""
+def checklist(done: tuple[str, ...] = (), recording: bool | None = None) -> dict:
+    """The snapshot's checklist for a Mower called Luba, with `done` steps ticked.
+
+    `recording` is whether its debug recording is on (the snapshot always says).
+    """
     steps = [
         ("zones", "Zones imported", "zones"),
         ("bearings", "Review Zone bearings", "zones"),
@@ -35,6 +38,8 @@ def checklist(done: tuple[str, ...] = ()) -> dict:
         ("recording", "Review debug recording", None),
     ]
     items = [{"id": i, "label": l, "tab": t, "done": i in done} for i, l, t in steps]
+    if recording is not None:
+        next(i for i in items if i["id"] == "recording")["enabled"] = recording
     return {"items": items, "complete": len(done) == len(steps)}
 
 
@@ -91,10 +96,42 @@ def test_a_finished_step_offers_no_control() -> None:
 
 
 def test_the_recording_step_says_what_is_recorded() -> None:
-    html = call("setupBannerHtml", checklist())
+    html = call("setupBannerHtml", checklist(recording=True))
     recording = html[html.index("Review debug recording"):]
     assert "GPS position" in recording
-    assert "on by default" in recording
+    assert "on by default" not in recording  # not true of an entry from before the feature
+
+
+def _recording_row(html: str) -> str:
+    return html[html.index("Review debug recording"):]
+
+
+def test_the_recording_step_says_whether_recording_is_on_and_offers_the_switch() -> None:
+    on = _recording_row(call("setupBannerHtml", checklist(recording=True)))
+    assert "Debug recording is on" in on
+    assert 'data-act="recording-toggle" data-enabled="false"' in on
+    assert "Turn off" in on
+
+    off = _recording_row(call("setupBannerHtml", checklist(recording=False)))
+    assert "Debug recording is off" in off
+    assert 'data-act="recording-toggle" data-enabled="true"' in off
+    assert "Turn on" in off
+
+
+def test_the_switch_does_not_stand_in_for_done() -> None:
+    row = _recording_row(call("setupBannerHtml", checklist(recording=False)))
+    assert 'data-act="setup-step" data-step="recording"' in row  # Done is still how it completes
+
+
+def test_the_switch_stays_after_done_while_other_steps_are_open() -> None:
+    html = call("setupBannerHtml", checklist(("recording",), recording=True))
+    row = _recording_row(html)
+    assert 'data-act="recording-toggle" data-enabled="false"' in row
+    assert 'data-act="setup-step" data-step="recording"' not in row  # Done is done
+
+
+def test_no_switch_without_the_state_to_show() -> None:
+    assert "recording-toggle" not in call("setupBannerHtml", checklist())
 
 
 SMOKE = Path(__file__).with_name("panel_setup_smoke.js")
@@ -126,6 +163,16 @@ def test_a_control_sends_its_step_and_answer_for_the_current_mower(clicks) -> No
 
 def test_a_refused_step_shows_why(clicks) -> None:
     assert clicks["error_shown"] is True
+
+
+def test_the_switch_sends_the_new_choice_for_the_current_mower(clicks) -> None:
+    assert clicks["recording_sent"] == [
+        {"type": "groundskeeper/set_debug_recording", "entry_id": "e", "enabled": False},
+    ]
+
+
+def test_a_refused_switch_shows_why(clicks) -> None:
+    assert clicks["recording_error_shown"] is True
 
 
 def test_a_yes_to_gates_says_what_to_do_next() -> None:
