@@ -39,6 +39,7 @@ from .notifier import (
 )
 from .now_view import CONTROLS as RUN_CONTROLS, now_view
 from .runtime import Director, async_get_director
+from .setup_checklist import ANSWERS, MARKS, apply_mark, build_checklist
 from .schedule_ops import (
     ScheduleError,
     create_plan,
@@ -65,14 +66,16 @@ def _loaded_entry(hass: HomeAssistant, entry_id: str) -> ConfigEntry | None:
     return entry
 
 
-def build_snapshot(entry: ConfigEntry) -> dict[str, Any]:
+def build_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """Everything the panel shows for one Mower. Extended by later tickets."""
+    director = async_get_director(hass, entry.entry_id)
+    config = director.data.get("config", {}) if director is not None else {}
     return {
         "entry_id": entry.entry_id,
         "title": entry.title,
         "device_id": entry.data.get("device_id"),
         # Banner above the tabs until complete (spec §16.3, §4.3).
-        "setup_checklist": {"complete": True, "items": []},
+        "setup_checklist": build_checklist(config, entry.title),
     }
 
 
@@ -91,6 +94,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
                     ws_list_gates, ws_create_gate, ws_update_gate, ws_delete_gate):
         websocket_api.async_register_command(hass, command)
     websocket_api.async_register_command(hass, ws_subscribe)
+    websocket_api.async_register_command(hass, ws_set_setup_step)
     websocket_api.async_register_command(hass, ws_refresh_zones)
     websocket_api.async_register_command(hass, ws_set_zone_hidden)
     websocket_api.async_register_command(hass, ws_get_zones)
@@ -159,7 +163,7 @@ def ws_get_state(
     if entry is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown Mower")
         return
-    connection.send_result(msg["id"], build_snapshot(entry))
+    connection.send_result(msg["id"], build_snapshot(hass, entry))
 
 
 @websocket_api.require_admin
@@ -181,7 +185,7 @@ def ws_subscribe(
         entry = _loaded_entry(hass, entry_id)
         if entry is not None:
             connection.send_message(
-                websocket_api.event_message(msg["id"], build_snapshot(entry))
+                websocket_api.event_message(msg["id"], build_snapshot(hass, entry))
             )
 
     connection.subscriptions[msg["id"]] = async_dispatcher_connect(
@@ -189,6 +193,33 @@ def ws_subscribe(
     )
     connection.send_result(msg["id"])
     _push()
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_setup_step",
+        vol.Required("entry_id"): str,
+        vol.Required("step"): vol.In([*MARKS, "gates"]),
+        vol.Optional("answer"): vol.In(ANSWERS),
+    }
+)
+@websocket_api.async_response
+async def ws_set_setup_step(hass, connection, msg) -> None:
+    """Mark a setup checklist step done; the snapshot push updates the banner.
+
+    The Gates step takes the owner's yes/no `answer` instead.
+    """
+
+    async def call(director: Director) -> dict:
+        if msg["step"] == "gates" and "answer" not in msg:
+            raise ScheduleError("answer_required", error="Answer yes or no.")
+        await director.async_edit_config(
+            lambda cfg: apply_mark(cfg, msg["step"], msg.get("answer"))
+        )
+        return {}
+
+    await _schedule_call(hass, connection, msg, call)
 
 
 @websocket_api.require_admin
