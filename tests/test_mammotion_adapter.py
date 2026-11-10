@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.config_entries import ConfigEntry
@@ -513,4 +514,67 @@ async def test_source_version_reads_the_installed_integration(hass: HomeAssistan
     await adapter.async_start()
     assert adapter.source_version == "0.6.18"
     await adapter.async_close()
+
+
+# -- job settings for the debug recording (#44) ---------------------------------
+
+
+def _install_mammotion_runtime(hass: HomeAssistant, work, *, name: str = NAME) -> SimpleNamespace:
+    """A stand-in for Mammotion-HA's `runtime_data` with one Mower; returns its data."""
+    source = MockConfigEntry(domain="mammotion")
+    source.add_to_hass(hass)
+    data = SimpleNamespace(work=work)
+    source.runtime_data = SimpleNamespace(
+        mowers=[
+            SimpleNamespace(
+                name=name, unique_name=name, reporting_coordinator=SimpleNamespace(data=data)
+            )
+        ]
+    )
+    return data
+
+
+async def test_job_settings_read_the_whitelisted_scalars(hass: HomeAssistant) -> None:
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    _install_mammotion_runtime(
+        hass,
+        SimpleNamespace(
+            job_id=0,
+            edge_mode=2,
+            knife_height=60,
+            toward=90,
+            speed=0.6,
+            zone_hashs=[111, 222],
+            reserved="x" * 500,
+            auto_change_direction=None,  # not reported: left out
+            latitude=39.0,  # not on the whitelist, however it got here
+            polygon={"type": "Polygon"},
+        ),
+    )
+    settings = make_adapter(hass, entry).job_settings()
+
+    assert settings["edge_mode"] == 2
+    assert settings["knife_height"] == 60
+    assert settings["zone_hashs"] == [111, 222]
+    assert len(settings["reserved"]) == 128
+    assert "auto_change_direction" not in settings
+    assert "latitude" not in settings and "polygon" not in settings
+    json.dumps(settings)  # plain JSON
+
+
+async def test_job_settings_are_none_when_they_cannot_be_reached(hass: HomeAssistant) -> None:
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    adapter = make_adapter(hass, entry)
+    assert adapter.job_settings() is None  # no mammotion entry at all
+
+    data = _install_mammotion_runtime(hass, SimpleNamespace(edge_mode=1), name="Luba-OTHER")
+    assert adapter.job_settings() is None  # another Mower's data
+
+    mine = _install_mammotion_runtime(hass, SimpleNamespace())
+    assert adapter.job_settings() is None  # nothing usable on `work`
+    mine.work = None
+    assert adapter.job_settings() is None  # no job yet
+    assert data.work.edge_mode == 1  # (the other Mower's data was never read)
 

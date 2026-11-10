@@ -131,6 +131,10 @@ class FakeMower:
     model_name: str | None = "Fake 9000"
     source_ver: str | None = "0.6.18"
     redact_terms: list[str] = field(default_factory=lambda: ["SN-FAKE-1"])
+    job_settings_value: dict[str, Any] | None = None
+    job_settings_error: Exception | None = None
+    # Like Mammotion, a source version that only becomes known in `async_start`.
+    source_ver_on_start: str | None = None
 
     # What the core saw, in order: (command name, args tuple).
     commands: list[tuple[str, tuple[Any, ...]]] = field(default_factory=list)
@@ -203,6 +207,12 @@ class FakeMower:
     def limits(self) -> Limits:
         """The limits descriptor given at construction."""
         return self.limits_descriptor
+
+    def job_settings(self) -> dict[str, Any] | None:
+        """Scripted job settings (None by default); raises `job_settings_error` if set."""
+        if self.job_settings_error is not None:
+            raise self.job_settings_error
+        return self.job_settings_value
 
     def subscribe(self, sink: AdapterSink) -> CALLBACK_TYPE:
         """Register a sink; returns unsubscribe."""
@@ -278,7 +288,9 @@ class FakeMower:
     # -- MowerAdapter lifecycle and metadata ------------------------------------
 
     async def async_start(self) -> None:
-        """No-op: FakeMower only emits on demand."""
+        """Emits nothing; only learns a late `source_ver_on_start`, as Mammotion does."""
+        if self.source_ver_on_start is not None:
+            self.source_ver = self.source_ver_on_start
 
     async def async_close(self) -> None:
         """No-op: FakeMower holds no subscriptions."""

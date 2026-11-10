@@ -328,6 +328,17 @@ class MowerAdapter(Protocol):
         """Device limits (spec §3.6)."""
         ...
 
+    def job_settings(self) -> dict[str, Any] | None:
+        """The running job's settings as the source holds them, or None.
+
+        For the debug recording only (height, edge laps, Zones the owner chose
+        in the Mower's own app, which are not entities). Read-only and cheap:
+        it is called on each recorded snapshot change. Values are JSON scalars
+        and lists of scalars; never a position or an entity id. A source that
+        cannot say returns None. It must not raise, but the caller survives it.
+        """
+        ...
+
     def subscribe(self, sink: AdapterSink) -> CALLBACK_TYPE:
         """Push snapshot changes and signals to `sink`; returns unsubscribe."""
         ...

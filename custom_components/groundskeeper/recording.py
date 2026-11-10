@@ -96,20 +96,9 @@ class DebugRecording:
     async def async_start(self) -> None:
         """Open the file off the loop and start the writer thread."""
         try:
-            integration = await async_get_integration(self.hass, DOMAIN)
-            terms = list(self.adapter.redact)
-            meta = redact(
-                {
-                    "integration_version": str(integration.version),
-                    "model": self.adapter.model,
-                    "firmware_version": self.adapter.firmware_version,
-                    "adapter_domain": self.adapter.source_domain,
-                },
-                terms,
-            )
             writer = RecordingWriter(
                 recording_path(self.hass, self.entry.entry_id),
-                meta,
+                await self._meta(),
                 on_event=self._from_thread,
             )
             await self.hass.async_add_executor_job(writer.open)
@@ -125,6 +114,31 @@ class DebugRecording:
         self._unsub_stop = self.hass.bus.async_listen_once(
             EVENT_HOMEASSISTANT_STOP, self._on_stop
         )
+
+    async def _meta(self) -> dict[str, str | None]:
+        integration = await async_get_integration(self.hass, DOMAIN)
+        return redact(
+            {
+                "integration_version": str(integration.version),
+                "model": self.adapter.model,
+                "firmware_version": self.adapter.firmware_version,
+                "source_version": self.adapter.source_version,
+                "adapter_domain": self.adapter.source_domain,
+            },
+            list(self.adapter.redact),
+        )
+
+    async def async_refresh_meta(self) -> None:
+        """Rewrite the meta rows. Some adapters only learn their source version
+        when they start, which is after the recording has opened."""
+        writer = self.writer
+        if writer is None:
+            return
+        try:
+            meta = await self._meta()
+            await self.hass.async_add_executor_job(writer.set_meta, meta)
+        except Exception:  # noqa: BLE001 - no recording failure reaches the core
+            _LOGGER.debug("recording meta refresh failed", exc_info=True)
 
     async def _on_stop(self, _event: Event) -> None:
         await self.async_stop()
@@ -146,15 +160,32 @@ class DebugRecording:
 
     # -- recording -----------------------------------------------------------------
 
-    def record(self, kind: str, payload: Any, run_id: str | None = None) -> None:
-        """Enqueue one record (redacted); never raises."""
+    def record(
+        self,
+        kind: str,
+        payload: Any,
+        run_id: str | None = None,
+        ts: int | None = None,
+    ) -> None:
+        """Enqueue one record (redacted); never raises. `ts` (ms) backdates it."""
         writer = self.writer
         if writer is None:
             return
         try:
-            writer.record(kind, redact(payload, list(self.adapter.redact)), run_id=run_id)
+            writer.record(
+                kind, redact(payload, list(self.adapter.redact)), run_id=run_id, ts=ts
+            )
         except Exception:  # noqa: BLE001
             _LOGGER.debug("recording failed", exc_info=True)
+
+    @property
+    def accepting(self) -> bool:
+        """True while a record handed in now would be written.
+
+        False when recording is off, after a write error, while paused for low
+        disk space, and while the queue is full.
+        """
+        return self.writer is not None and self.writer.accepting
 
     def record_check(
         self,

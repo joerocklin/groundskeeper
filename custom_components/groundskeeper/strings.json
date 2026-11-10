@@ -130,6 +130,9 @@
     "entry_ambiguous": {
       "message": "More than one Mower is loaded; pass config_entry_id."
     },
+    "tag_rate_limited": {
+      "message": "Too many Tags in the last minute; try again shortly."
+    },
     "unknown_zone": {
       "message": "No Zone is called or has the id \"{zone}\"."
     },
@@ -465,6 +468,17 @@
         "charge_not_rising": "Charge not rising while docked",
         "run_too_long": "Run far longer than the Zone's history"
       }
+    },
+    "tag_label": {
+      "options": {
+        "job_start": "I started a job in the app",
+        "edge_laps_begin": "Edge laps began",
+        "edge_laps_end": "Edge laps ended",
+        "progress_check": "Checked the app's progress",
+        "moving": "The app shows the Mower moving",
+        "stopped": "The app shows the Mower stopped",
+        "note": "Something else"
+      }
     }
   },
   "services": {
@@ -575,6 +589,48 @@
         "config_entry_id": {
           "name": "Mower",
           "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "add_tag": {
+      "name": "Add Tag",
+      "description": "Note something the Mower's telemetry cannot say, such as a job you started in the Mammotion app, in the debug recording. Record-only; never commands the Mower.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        },
+        "label": {
+          "name": "What happened",
+          "description": "The kind of Tag."
+        },
+        "note": {
+          "name": "Note",
+          "description": "Free text, up to 200 characters. Keep serial numbers and locations out of it."
+        },
+        "minutes_ago": {
+          "name": "Minutes ago",
+          "description": "How long ago it happened, up to 24 hours. The Tag is stamped with that time."
+        },
+        "zone": {
+          "name": "Zone",
+          "description": "The Zone you picked in the app."
+        },
+        "height_mm": {
+          "name": "Blade height",
+          "description": "The blade height you chose in the app."
+        },
+        "edge_laps": {
+          "name": "Edge laps",
+          "description": "Whether edge laps were on."
+        },
+        "laps": {
+          "name": "Laps",
+          "description": "How many edge laps."
+        },
+        "app_progress_pct": {
+          "name": "App progress",
+          "description": "The progress the Mammotion app shows, to compare with Home Assistant's."
         }
       }
     },

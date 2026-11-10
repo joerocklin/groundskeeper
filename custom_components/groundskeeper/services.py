@@ -7,7 +7,9 @@ apply. Registered once in `async_setup`, never per entry.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -24,7 +26,7 @@ from .const import DOMAIN
 from .core import DETECTORS
 from . import controls
 from .schedule_ops import POSITIONS, ScheduleError, create_plan, remove_plan
-from .runtime import Director, async_get_director
+from .runtime import Director, TagRateLimited, async_get_director
 from .transfer import async_export
 
 ATTR_ZONE = "zone"
@@ -41,8 +43,47 @@ ATTR_PROMPT_ID = "prompt_id"
 ATTR_ACTION = "action"
 ATTR_DETECTOR = "detector"
 ATTR_INCLUDE_HISTORY = "include_history"
+ATTR_LABEL = "label"
+ATTR_NOTE = "note"
+ATTR_MINUTES_AGO = "minutes_ago"
+ATTR_HEIGHT_MM = "height_mm"
+ATTR_EDGE_LAPS = "edge_laps"
+ATTR_LAPS = "laps"
+ATTR_APP_PROGRESS = "app_progress_pct"
+
+# Tags the Stage 1 trial asks for (docs/manual-tagging.md): what the owner sees
+# in the Mammotion app that Home Assistant cannot.
+TAG_LABELS = (
+    "job_start",
+    "edge_laps_begin",
+    "edge_laps_end",
+    "progress_check",
+    "moving",
+    "stopped",
+    "note",
+)
+_TAG_FIELDS = (ATTR_ZONE, ATTR_HEIGHT_MM, ATTR_EDGE_LAPS, ATTR_LAPS, ATTR_APP_PROGRESS)
 
 _ENTRY = {vol.Optional(ATTR_CONFIG_ENTRY_ID): str}
+
+
+def _real_number(value: Any) -> float:
+    """A number as a float. `True` is not a number here (Coerce(float) takes it as 1.0)."""
+    if isinstance(value, bool):
+        raise vol.Invalid("expected a number")
+    return vol.Coerce(float)(value)
+
+
+def _whole_number(value: Any) -> int:
+    """A whole number: 5 and 5.0 pass; True, 2.5, NaN and inf do not.
+
+    `Coerce(int)` takes `True` as 1 and cuts 2.5 to 2, so a mistyped tag would
+    land in the recording looking deliberate.
+    """
+    number = _real_number(value)
+    if not math.isfinite(number) or not number.is_integer():
+        raise vol.Invalid("expected a whole number")
+    return int(number)
 
 
 def _fail(key: str, **placeholders: str) -> ServiceValidationError:
@@ -121,10 +162,47 @@ def async_register_services(hass: HomeAssistant) -> None:
     async def dismiss_anomaly(call: ServiceCall) -> None:
         await controls.async_dismiss_anomaly(_director(hass, call), call.data[ATTR_DETECTOR])
 
+    async def add_tag(call: ServiceCall) -> ServiceResponse:
+        director = _director(hass, call)
+        data = call.data
+        try:
+            recorded = director.add_tag(
+                data[ATTR_LABEL],
+                note=data.get(ATTR_NOTE),
+                minutes_ago=data[ATTR_MINUTES_AGO],
+                fields={key: data[key] for key in _TAG_FIELDS if key in data},
+            )
+        except TagRateLimited:
+            raise _fail("tag_rate_limited") from None
+        return {"recorded": recorded}
+
     async def export_config(call: ServiceCall) -> ServiceResponse:
         director = _director(hass, call)
         return async_export(director, call.data.get(ATTR_INCLUDE_HISTORY, False))
 
+    hass.services.async_register(
+        DOMAIN,
+        "add_tag",
+        add_tag,
+        schema=vol.Schema(
+            {
+                **_ENTRY,
+                vol.Required(ATTR_LABEL): vol.In(TAG_LABELS),
+                vol.Optional(ATTR_NOTE): vol.All(str, vol.Length(max=200)),
+                vol.Optional(ATTR_MINUTES_AGO, default=0): vol.All(
+                    _whole_number, vol.Range(min=0, max=1440)
+                ),
+                vol.Optional(ATTR_ZONE): vol.All(str, vol.Length(max=80)),
+                vol.Optional(ATTR_HEIGHT_MM): vol.All(_real_number, vol.Range(min=0, max=200)),
+                vol.Optional(ATTR_EDGE_LAPS): bool,
+                vol.Optional(ATTR_LAPS): vol.All(_whole_number, vol.Range(min=0, max=10)),
+                vol.Optional(ATTR_APP_PROGRESS): vol.All(
+                    _real_number, vol.Range(min=0, max=100)
+                ),
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         "export_config",
