@@ -355,7 +355,7 @@ class MammotionAdapter:
                 # recorded snapshot and Store write, put raw GPS into the Store
                 # and diagnostics (#49), and the stall rule's exact-equality
                 # comparison would be defeated by millimetre noise at rest.
-                # Revisit after #49 and the freeze-versus-stop trial.
+                # See "Out of scope" on #82; revisit after #49.
                 position=None,
             ),
             job_ref=None,  # no stable Mammotion job id on v0.6.18

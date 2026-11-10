@@ -413,16 +413,30 @@ def _renamed_map(renames: dict[int, str]) -> dict:
     return geojson
 
 
+def _area_feature(zone_hash: int, name: str) -> dict:
+    """A map feature for one more Zone (the polygon's shape is irrelevant)."""
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+        "properties": {"hash": zone_hash, "Name": name, "title": name, "type_name": "area"},
+    }
+
+
 async def _zone_adapter(
-    hass: HomeAssistant, *, fetch: bool = True, geojson: dict | None = None, **services
+    hass: HomeAssistant,
+    *,
+    fetch: bool = True,
+    geojson: dict | None = None,
+    fail_geojson: bool = False,
 ):
     """An adapter over live-shaped Zone switches ("Area <name>") and the fake
-    ExampleSite map. `fetch` loads the geometry as Zone sync does at setup.
-    Returns the adapter, the entry, the Mower and the service-call log."""
+    ExampleSite map. `fetch` loads the geometry as Zone sync does at setup;
+    `fail_geojson` makes that fetch fail. Returns the adapter, the entry, the
+    Mower and the service-call log."""
     entry, mower = await make_director_entry(hass)
     install_baseline(hass, entry, mower, NAME)
     install_zone_switches(hass, entry, mower, NAME, geojson)
-    calls = register_fake_mammotion_services(hass, geojson, **services)
+    calls = register_fake_mammotion_services(hass, geojson, fail_geojson=fail_geojson)
     adapter = make_adapter(hass, entry)
     if fetch:
         await adapter.list_zones()
@@ -444,25 +458,23 @@ async def test_zone_resolves_from_the_plain_work_area_name(hass: HomeAssistant) 
 
 
 async def test_a_zone_genuinely_named_area_51_resolves(hass: HomeAssistant) -> None:
-    """No "Area " prefix is stripped by pattern: a Zone whose map name and
-    switch name are both "Area 51" (Mammotion adds no second prefix) still
-    resolves, and so does the Zone beside it."""
+    """A Zone whose map name and switch name are both "Area 51" (Mammotion
+    adds no second prefix to it) resolves, and so does the Zone beside it. The
+    guarantee that no "Area " prefix is stripped by pattern is the
+    no-geometry test below."""
     geojson = zone_geojson()
-    geojson["features"].append(
-        {
-            "type": "Feature",
-            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
-            "properties": {"hash": 1000000000000000051, "Name": "Area 51", "title": "Area 51",
-                           "type_name": "area"},
-        }
-    )
-    adapter, entry, mower, _ = await _zone_adapter(hass, fetch=False, geojson=zone_geojson())
-    add_zone_switch(hass, entry, mower, NAME, 1000000000000000051, "Area 51")
-    register_fake_mammotion_services(hass, geojson)
+    geojson["features"].append(_area_feature(1000000000000000051, "Area 51"))
+    adapter, entry, mower, _ = await _zone_adapter(hass, fetch=False, geojson=geojson)
+    # The helper made the switch "Area Area 51"; the live switch is "Area 51".
+    reg = er.async_get(hass)
+    switch = reg.async_get_entity_id("switch", "mammotion", f"{NAME}_1000000000000000051")
+    reg.async_update_entity(switch, original_name="Area 51")
     await adapter.list_zones()
 
     _work_area(hass, entry, mower, "Area 51")
     assert adapter.snapshot.zone == "1000000000000000051"
+    _work_area(hass, entry, mower, "51")
+    assert adapter.snapshot.zone is None
     _work_area(hass, entry, mower, "Side yard")
     assert adapter.snapshot.zone == SIDE_YARD
 
@@ -557,14 +569,7 @@ async def test_a_zone_set_change_never_serves_the_previous_maps_names(
     assert adapter.snapshot.zone is None
 
     new_map = _renamed_map({1000000000000000001: "Back lawn"})
-    new_map["features"].append(
-        {
-            "type": "Feature",
-            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
-            "properties": {"hash": 1000000000000000099, "Name": "Pond", "title": "Pond",
-                           "type_name": "area"},
-        }
-    )
+    new_map["features"].append(_area_feature(1000000000000000099, "Pond"))
     register_fake_mammotion_services(hass, new_map)
     await adapter.list_zones()  # Zone sync refreshes on ZonesChanged
 
@@ -574,6 +579,35 @@ async def test_a_zone_set_change_never_serves_the_previous_maps_names(
     assert adapter.snapshot.zone == "1000000000000000099"
     _work_area(hass, entry, mower, "Backyard")
     assert adapter.snapshot.zone is None  # the previous map's name
+
+
+async def test_a_rekeyed_zone_never_resolves_to_its_old_hash(hass: HomeAssistant) -> None:
+    """A map rebuild re-keys the Backyard: its switch state moves to a new
+    hash with no registry change. The adapter derives on that state event
+    before the catalogue drops its cached map, and must not return the old
+    hash; once the map is refetched the new hash resolves."""
+    old, new = "1000000000000000001", 1000000000000000101
+    adapter, entry, mower, _ = await _zone_adapter(hass)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+    _work_area(hass, entry, mower, "Backyard")
+    await hass.async_block_till_done()
+    assert recorder.snapshots[-1].zone == old
+
+    switch = er.async_get(hass).async_get_entity_id("switch", "mammotion", f"{NAME}_{old}")
+    hass.states.async_set(switch, "on", {"hash": new, "friendly_name": "Area Backyard"})
+    await hass.async_block_till_done()
+    assert ZonesChanged() in recorder.signals
+    assert recorder.snapshots[-1].zone is None
+
+    rebuilt = zone_geojson()
+    for feat in rebuilt["features"]:
+        if feat["properties"].get("hash") == int(old):
+            feat["properties"]["hash"] = new
+    register_fake_mammotion_services(hass, rebuilt)
+    await adapter.list_zones()  # Zone sync refreshes on ZonesChanged
+
+    assert adapter.snapshot.zone == str(new)
 
 
 # -- limits (spec §3.6) ------------------------------------------------------
