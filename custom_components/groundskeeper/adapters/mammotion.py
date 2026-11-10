@@ -350,7 +350,13 @@ class MammotionAdapter:
             movement=Movement(
                 progress_pct=progress,
                 area_m2=area,
-                position=None,  # hass-mammotion exposes no position entity
+                # Deliberately unmapped, though the Mower's device tracker does
+                # carry GPS: mapping it would make almost every GPS update a
+                # recorded snapshot and Store write, put raw GPS into the Store
+                # and diagnostics (#49), and the stall rule's exact-equality
+                # comparison would be defeated by millimetre noise at rest.
+                # Revisit after #49 and the freeze-versus-stop trial.
+                position=None,
             ),
             job_ref=None,  # no stable Mammotion job id on v0.6.18
             rain=rain,
@@ -384,20 +390,16 @@ class MammotionAdapter:
     def _zone_ref(self) -> str | None:
         """Current Zone as its native_ref (the Zone hash).
 
-        `work_area` reports the Zone *name*, or `path` / `Not working` /
-        `unknown` when the Mower is transiting or idle; those map to None.
+        `work_area` reports the Zone *name* as the Mammotion app shows it
+        (the Zone switches are named "Area {name}"), or `path` / `Not
+        working` / `unknown` when the Mower is transiting or idle; those map
+        to None. The catalogue resolves the name without a service call:
+        deriving a snapshot must never start the Mower's report stream.
         """
         name = self._state("sensor", "work_area")
         if name is None or name in _NOT_A_ZONE:
             return None
-        for ref, entry in self._zone_switches().items():
-            state = self._hass.states.get(entry.entity_id)
-            candidates = {entry.name, entry.original_name}
-            if state is not None:
-                candidates.add(state.attributes.get("friendly_name"))
-            if name in candidates:
-                return ref
-        return None
+        return self._catalogue.zone_ref_for_name(name)
 
     @callback
     def _blade_height_mm(self) -> int | None:

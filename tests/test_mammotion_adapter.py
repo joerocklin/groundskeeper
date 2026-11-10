@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
@@ -33,7 +34,14 @@ from custom_components.groundskeeper.adapter import Movement, Snapshot
 from custom_components.groundskeeper.adapters import ADAPTER_REGISTRY
 from custom_components.groundskeeper.const import DOMAIN
 from tests.conftest import make_mammotion_mower
-from tests.mammotion_states import install_baseline, set_entity
+from tests.mammotion_states import (
+    add_zone_switch,
+    install_baseline,
+    install_zone_switches,
+    register_fake_mammotion_services,
+    set_entity,
+    zone_geojson,
+)
 
 NAME = "Luba-SERIAL1"
 
@@ -387,6 +395,185 @@ async def test_zones_changed_on_registry_and_rekey(hass: HomeAssistant) -> None:
     hass.states.async_set(entity_id, "on", {"hash": 8888888888888888})
     await hass.async_block_till_done()
     assert recorder.signals.count(ZonesChanged()) == 2
+
+
+# -- current Zone from `work_area` (issue #82) --------------------------------
+
+# Side yard from the live ExampleSite map (tests/fixtures/zone.json).
+SIDE_YARD = "1000000000000000007"
+
+
+def _renamed_map(renames: dict[int, str]) -> dict:
+    """The ExampleSite map with some areas renamed, by Zone hash."""
+    geojson = zone_geojson()
+    for feat in geojson["features"]:
+        props = feat["properties"]
+        if props.get("type_name") == "area" and props["hash"] in renames:
+            props["Name"] = props["title"] = renames[props["hash"]]
+    return geojson
+
+
+async def _zone_adapter(
+    hass: HomeAssistant, *, fetch: bool = True, geojson: dict | None = None, **services
+):
+    """An adapter over live-shaped Zone switches ("Area <name>") and the fake
+    ExampleSite map. `fetch` loads the geometry as Zone sync does at setup.
+    Returns the adapter, the entry, the Mower and the service-call log."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    install_zone_switches(hass, entry, mower, NAME, geojson)
+    calls = register_fake_mammotion_services(hass, geojson, **services)
+    adapter = make_adapter(hass, entry)
+    if fetch:
+        await adapter.list_zones()
+    return adapter, entry, mower, calls
+
+
+def _work_area(hass: HomeAssistant, entry, mower, value: str) -> None:
+    set_entity(hass, entry, mower, NAME, "sensor:work_area", value, {})
+
+
+async def test_zone_resolves_from_the_plain_work_area_name(hass: HomeAssistant) -> None:
+    """On a real install the Zone switches are named "Area Side yard" while
+    `work_area` carries the plain name the app shows (issue #82)."""
+    adapter, entry, mower, _ = await _zone_adapter(hass)
+
+    _work_area(hass, entry, mower, "Side yard")
+
+    assert adapter.snapshot.zone == SIDE_YARD
+
+
+async def test_a_zone_genuinely_named_area_51_resolves(hass: HomeAssistant) -> None:
+    """No "Area " prefix is stripped by pattern: a Zone whose map name and
+    switch name are both "Area 51" (Mammotion adds no second prefix) still
+    resolves, and so does the Zone beside it."""
+    geojson = zone_geojson()
+    geojson["features"].append(
+        {
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+            "properties": {"hash": 1000000000000000051, "Name": "Area 51", "title": "Area 51",
+                           "type_name": "area"},
+        }
+    )
+    adapter, entry, mower, _ = await _zone_adapter(hass, fetch=False, geojson=zone_geojson())
+    add_zone_switch(hass, entry, mower, NAME, 1000000000000000051, "Area 51")
+    register_fake_mammotion_services(hass, geojson)
+    await adapter.list_zones()
+
+    _work_area(hass, entry, mower, "Area 51")
+    assert adapter.snapshot.zone == "1000000000000000051"
+    _work_area(hass, entry, mower, "Side yard")
+    assert adapter.snapshot.zone == SIDE_YARD
+
+
+@pytest.mark.parametrize("value", ["path", "Not working", "unknown", "", "No Such Zone"])
+async def test_work_area_that_is_not_a_zone_gives_none(hass: HomeAssistant, value: str) -> None:
+    """Transit, idle, an unknown or empty reading, and a name matching no
+    Zone all give no current Zone."""
+    adapter, entry, mower, _ = await _zone_adapter(hass)
+    _work_area(hass, entry, mower, "Side yard")
+    assert adapter.snapshot.zone == SIDE_YARD
+
+    _work_area(hass, entry, mower, value)
+
+    assert adapter.snapshot.zone is None
+
+
+async def test_a_plain_name_shared_by_two_zones_is_ambiguous(hass: HomeAssistant) -> None:
+    """Two Zones both called "Lawn": `work_area` cannot say which, so None
+    rather than a guess; the unshared Zones still resolve."""
+    adapter, entry, mower, _ = await _zone_adapter(
+        hass, geojson=_renamed_map({1000000000000000001: "Lawn", 1000000000000000002: "Lawn"})
+    )
+
+    _work_area(hass, entry, mower, "Lawn")
+    assert adapter.snapshot.zone is None
+
+    _work_area(hass, entry, mower, "Side yard")
+    assert adapter.snapshot.zone == SIDE_YARD
+
+
+@pytest.mark.parametrize("fail_geojson", [False, True], ids=["not-fetched-yet", "fetch-failed"])
+async def test_without_geometry_a_zone_resolves_by_exact_switch_name(
+    hass: HomeAssistant, fail_geojson: bool
+) -> None:
+    """No map to read the plain name from (not fetched yet, or the fetch
+    failed): fall back to the exact switch name, so a Zone the map does not
+    carry still resolves. The plain name of a live-shaped switch does not:
+    the "Area " prefix is never stripped by pattern."""
+    adapter, entry, mower, calls = await _zone_adapter(
+        hass, fetch=fail_geojson, fail_geojson=fail_geojson
+    )
+    add_zone_switch(hass, entry, mower, NAME, 1000000000000000051, "Area 51")
+    fetches_before = calls.count("get_geojson")
+
+    _work_area(hass, entry, mower, "Area 51")
+    assert adapter.snapshot.zone == "1000000000000000051"
+    _work_area(hass, entry, mower, "Side yard")
+    assert adapter.snapshot.zone is None
+    _work_area(hass, entry, mower, "Area Side yard")
+    assert adapter.snapshot.zone == SIDE_YARD
+
+    assert calls.count("get_geojson") == fetches_before  # derivation never fetches
+
+
+async def test_deriving_a_snapshot_never_calls_a_mammotion_service(hass: HomeAssistant) -> None:
+    """`get_geojson` starts a 5-minute report stream on the real Mower, so
+    neither the pull nor the push path may reach for geometry that has not
+    been fetched."""
+    adapter, entry, mower, calls = await _zone_adapter(hass, fetch=False)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+
+    _work_area(hass, entry, mower, "Side yard")
+    set_entity(hass, entry, mower, NAME, "sensor:battery_percent", "79", {})  # a push
+    await hass.async_block_till_done()
+    assert adapter.snapshot.zone is None  # no geometry yet, and none fetched for it
+    assert recorder.snapshots[-1].battery == 79
+    assert recorder.snapshots[-1].zone is None
+
+    assert calls == []
+
+
+async def test_a_zone_set_change_never_serves_the_previous_maps_names(
+    hass: HomeAssistant,
+) -> None:
+    """A new Zone appears (map update): until the refreshed map is fetched,
+    the old map's names are not served; afterwards the new map's are."""
+    backyard = "1000000000000000001"
+    adapter, entry, mower, _ = await _zone_adapter(hass)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+    _work_area(hass, entry, mower, "Backyard")
+    await hass.async_block_till_done()
+    assert recorder.snapshots[-1].zone == backyard
+
+    # The map is rebuilt: the Backyard is renamed in the app and a Pond is added.
+    add_zone_switch(hass, entry, mower, NAME, 1000000000000000099, "Area Pond")
+    await hass.async_block_till_done()
+    assert ZonesChanged() in recorder.signals
+    assert recorder.snapshots[-1].zone is None  # in the gap: nothing from the old map
+    assert adapter.snapshot.zone is None
+
+    new_map = _renamed_map({1000000000000000001: "Back lawn"})
+    new_map["features"].append(
+        {
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+            "properties": {"hash": 1000000000000000099, "Name": "Pond", "title": "Pond",
+                           "type_name": "area"},
+        }
+    )
+    register_fake_mammotion_services(hass, new_map)
+    await adapter.list_zones()  # Zone sync refreshes on ZonesChanged
+
+    _work_area(hass, entry, mower, "Back lawn")
+    assert adapter.snapshot.zone == backyard
+    _work_area(hass, entry, mower, "Pond")
+    assert adapter.snapshot.zone == "1000000000000000099"
+    _work_area(hass, entry, mower, "Backyard")
+    assert adapter.snapshot.zone is None  # the previous map's name
 
 
 # -- limits (spec §3.6) ------------------------------------------------------

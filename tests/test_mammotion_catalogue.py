@@ -188,6 +188,25 @@ async def test_zone_without_matching_map_feature_uses_switch_name(setup) -> None
     assert by_ref[BACKYARD].name == "Backyard"
 
 
+async def test_zone_ref_for_name_uses_the_names_list_zones_reports(setup) -> None:
+    catalogue, services, *_ = setup
+    await catalogue.list_zones()  # fetches the map
+
+    assert catalogue.zone_ref_for_name("Side yard") == SIDE
+    assert catalogue.zone_ref_for_name("Backyard") == BACKYARD
+    assert catalogue.zone_ref_for_name("Area Side yard") is None  # not the app's name
+    assert catalogue.zone_ref_for_name("Nowhere") is None
+    assert services.count("get_geojson") == 1  # the lookup itself never fetches
+
+
+async def test_zone_ref_for_name_before_any_fetch_matches_switch_names_only(setup) -> None:
+    catalogue, services, *_ = setup
+
+    assert catalogue.zone_ref_for_name("Area Side yard") == SIDE  # exact switch name
+    assert catalogue.zone_ref_for_name("Side yard") is None  # no prefix stripping
+    assert services.count("get_geojson") == 0
+
+
 async def test_zone_discovery_uses_unique_id_when_switch_unavailable(setup) -> None:
     catalogue, _, _, entry, device = setup
     # An unavailable switch has no `hash` attribute (research §5).

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
 ZONE_JSON = Path(__file__).parents[1] / "tests/fixtures/zone.json"
@@ -126,39 +127,66 @@ def install_zone_switches(
 ) -> None:
     """Create the Zone switches for the map, as hass-mammotion does.
 
-    unique_id `{name}_{hash}`, `hash` in the state attributes.
+    unique_id `{name}_{hash}`, `hash` in the state attributes. The live shape
+    (issue #82): the registry `original_name` and the friendly name carry
+    Mammotion's "Area " prefix and the registry `name` is unset, while the
+    map and the `work_area` sensor carry the plain name the app shows.
     """
     for feat in (geojson or zone_geojson())["features"]:
         props = feat["properties"]
         if props.get("type_name") != "area":
             continue
-        reg = er.async_get(hass)
-        entity = reg.async_get_or_create(
-            "switch",
-            MAMMOTION,
-            f"{name}_{props['hash']}",
-            suggested_object_id=str(props["Name"]).lower().replace(" ", "_"),
-            config_entry=entry,
-            device_id=device.id,
-            original_name=props["Name"],
+        add_zone_switch(
+            hass,
+            entry,
+            device,
+            name,
+            props["hash"],
+            f"Area {props['Name']}",
+            object_id=str(props["Name"]).lower().replace(" ", "_"),
         )
-        hass.states.async_set(
-            entity.entity_id,
-            "on",
-            {"hash": props["hash"], "friendly_name": props["Name"]},
-        )
+
+
+def add_zone_switch(
+    hass: HomeAssistant,
+    entry: Any,
+    device: Any,
+    name: str,
+    zone_hash: int,
+    switch_name: str,
+    object_id: str | None = None,
+) -> str:
+    """One Zone switch with the given registry `original_name` (and friendly
+    name); the registry `name` stays unset. Returns its entity_id."""
+    entity = er.async_get(hass).async_get_or_create(
+        "switch",
+        MAMMOTION,
+        f"{name}_{zone_hash}",
+        suggested_object_id=object_id or switch_name.lower().replace(" ", "_"),
+        config_entry=entry,
+        device_id=device.id,
+        original_name=switch_name,
+    )
+    hass.states.async_set(
+        entity.entity_id, "on", {"hash": zone_hash, "friendly_name": switch_name}
+    )
+    return entity.entity_id
 
 
 def register_fake_mammotion_services(
     hass: HomeAssistant,
     geojson: dict[str, Any] | None = None,
     tasks: dict[str, Any] | None = None,
-) -> None:
+    fail_geojson: bool = False,
+) -> list[str]:
     """Fake the read-only `mammotion` response services (never the real ones).
 
     `get_geojson` starts a 5-minute report stream on the real Mower, so
     tests must never call it for real; these fakes answer in-process.
+    Returns the log of service names called, in order; `fail_geojson`
+    makes `get_geojson` raise, as an offline Mower does.
     """
+    calls: list[str] = []
     geojson = geojson if geojson is not None else zone_geojson()
     tasks = tasks or {
         "tasks": [
@@ -173,9 +201,13 @@ def register_fake_mammotion_services(
     }
 
     async def get_geojson(call: Any) -> dict[str, Any]:
+        calls.append("get_geojson")
+        if fail_geojson:
+            raise HomeAssistantError("mower offline")
         return {call.data["entity_id"][0]: geojson}
 
     async def get_tasks(call: Any) -> dict[str, Any]:
+        calls.append("get_tasks")
         return {call.data["entity_id"][0]: tasks}
 
     hass.services.async_register(
@@ -184,3 +216,4 @@ def register_fake_mammotion_services(
     hass.services.async_register(
         MAMMOTION, "get_tasks", get_tasks, supports_response=SupportsResponse.ONLY
     )
+    return calls
