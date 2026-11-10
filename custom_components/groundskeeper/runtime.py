@@ -147,6 +147,7 @@ def snapshot_usable(snapshot: Snapshot) -> bool:
 
 
 _CORE_KEYS = ("state", "learned", "history")
+# Changes to only these never need an awaited save (spec §14.4).
 
 # Tags are for people and their automations; any automation can call the
 # service, so at most this many are taken per minute.
@@ -154,8 +155,7 @@ TAG_RATE_LIMIT = 30
 
 
 class TagRateLimited(Exception):
-    """Too many tags in the last minute."""
-# Changes to only these never need an awaited save (spec §14.4).
+    """Too many Tags in the last minute."""
 
 
 def _only_soft_changes(old: dict[str, Any], new: dict[str, Any]) -> bool:

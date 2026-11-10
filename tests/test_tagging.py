@@ -106,11 +106,25 @@ async def test_tag_reports_not_recorded_when_recording_is_off(hass, director) ->
         {"label": "note", "minutes_ago": -1},
         {"label": "progress_check", "app_progress_pct": 101},
         {"label": "job_start", "laps": 11},
+        # Numbers that Coerce(int) or Coerce(float) alone let through or crash on.
+        {"label": "note", "minutes_ago": float("inf")},
+        {"label": "note", "minutes_ago": float("nan")},
+        {"label": "note", "minutes_ago": True},
+        {"label": "note", "minutes_ago": 2.5},
+        {"label": "job_start", "laps": True},
+        {"label": "job_start", "height_mm": True},
+        {"label": "job_start", "height_mm": float("nan")},
+        {"label": "progress_check", "app_progress_pct": float("inf")},
     ],
 )
 async def test_tag_input_is_validated(hass, director, bad) -> None:
     with pytest.raises(vol.Invalid):
         await add_tag(hass, **bad)
+
+
+async def test_a_whole_number_sent_as_a_float_is_accepted(hass, director) -> None:
+    reply = await add_tag(hass, label="job_start", laps=2.0, minutes_ago=5.0)
+    assert reply["recorded"] is True
 
 
 async def test_tag_calls_are_rate_limited(hass, director, freezer) -> None:

@@ -24,7 +24,7 @@ After this version is installed, the recording also carries:
 | `job_settings` | The running job's settings as Mammotion-HA's data holds them: `knife_height`, `edge_mode` (the perimeter laps), `zone_hashs`, path mode and angle. Written when they change. |
 | `meta.source_version` | The installed Mammotion-HA version, so a recording says which upstream produced it. |
 
-`job_settings` is read from another integration's private data (PyMammotion's `work` for Mammotion-HA v0.6.18). Whether it is filled in for a mow started from the app is **not yet verified**. After Run A below, check whether the recording has `job_settings` records. If it does, your `job_start` tags are a cross-check. If it does not, your tags are the only record of the settings, so make them accurate.
+`job_settings` is read from another integration's private data (PyMammotion's `work` for Mammotion-HA v0.6.18). Whether it is filled in for a mow started from the app is **not yet verified**. After Mow A below, check whether the recording has `job_settings` records. If it does, your `job_start` tags are a cross-check. If it does not, your tags are the only record of the settings, so make them accurate.
 
 Telemetry silences, job start and finish, recharge trips and errors need no tag: they are already in the `snapshot` and `raw_state` records.
 
@@ -46,7 +46,7 @@ Telemetry silences, job start and finish, recharge trips and errors need no tag:
      note: "test tag"
    ```
 
-   With "Return response" shown, you should see `recorded: true`. If it says `false`, the recording is off or has stopped taking records.
+   With "Return response" shown, you should see `recorded: true`. If it says `false`, the recording is off, has stopped after a write error, is paused for low disk space, or its queue is full.
 
 3. Put the tags you will use on a phone dashboard so each is one tap. A button card per tag works; this is a sketch, not exercised against a live dashboard:
 
@@ -78,7 +78,9 @@ Telemetry silences, job start and finish, recharge trips and errors need no tag:
 
 Every tag also stores Home Assistant's own view at the moment you tapped (activity, progress, battery, blade height), so "the app says 40% and Home Assistant says 12%" is answerable from one record. Keep serial numbers and locations out of `note`. At most 30 tags per minute are accepted.
 
-## Run A: edge laps on, 60 mm
+## Mow A: edge laps on, 60 mm
+
+These are mows you start in the Mammotion app, not Runs: the Schedule stays idle, so nothing here is a Run in the glossary's sense.
 
 Edge laps are on by default in your app, usually 2 laps and sometimes 3.
 
@@ -88,13 +90,13 @@ Edge laps are on by default in your app, usually 2 laps and sometimes 3.
 4. Walk away. Whenever you do look at the app, tap one of `progress_check` (with the app's number), `moving`, or `stopped`. One or two taps in the first half hour is plenty. A long gap with Home Assistant's progress frozen is where one `moving` or `stopped` tap is worth most.
 5. If you notice the perimeter laps starting or ending, tap `edge_laps_begin` or `edge_laps_end`. If you miss them, backdate the tag later with `minutes_ago`.
 
-## Run B: edge laps off, 70 mm
+## Mow B: edge laps off, 70 mm
 
-1. After Run A has finished and the job has cleared, set the same Zone to 70 mm with edge laps off.
+1. After Mow A has finished and the job has cleared, set the same Zone to 70 mm with edge laps off.
 2. Press start and tap `job_start` with `height_mm: 70`, `edge_laps: false`.
 3. Tap `progress_check` and `moving` or `stopped` whenever you look.
 
-Why 70 mm: in the first recording, mowing readbacks sat at 60 mm, and 80, 90 and 100 mm appeared as travel and charging heights. A Run at 80 mm would be hard to tell from the Mower travelling. 70 mm showed up only briefly in height ramps, so a long plateau there can only be the Run. Same Zone for both Runs, so the two differ only in the two settings under test.
+Why 70 mm: in the first recording, mowing readbacks sat at 60 mm, and 80, 90 and 100 mm appeared as travel and charging heights. A mow at 80 mm would be hard to tell from the Mower travelling. 70 mm showed up only briefly in height ramps, so a long plateau there can only be the mow. Same Zone for both mows, so the two differ only in the two settings under test.
 
 ## Pull the data
 
@@ -107,10 +109,10 @@ POD=$(k get pods -n apps --no-headers -o custom-columns=:metadata.name | grep '^
 Make a consistent copy with SQLite's online backup API. This is safe while Home Assistant is writing and needs no pause of the recording:
 
 ```
-k exec -n apps "$POD" -c home-assistant -- python3 -c "import glob,sqlite3; s=sqlite3.connect(glob.glob('/config/groundskeeper/recording_*.db')[0]); d=sqlite3.connect('/tmp/stage1b.db'); s.backup(d); d.close(); s.close()"
+k exec -n apps "$POD" -c home-assistant -- python3 -c "import glob,os,sqlite3; s=sqlite3.connect(max(glob.glob('/config/groundskeeper/recording_*.db'),key=os.path.getsize)); d=sqlite3.connect('/tmp/stage1b.db'); s.backup(d); d.close(); s.close()"
 ```
 
-Do not copy the live `.db` file directly. In WAL mode a plain copy can miss recent writes.
+The command takes the largest `recording_*.db`, because the folder can also hold a zero-byte `recording_<entry_id>.db` (a literal placeholder name, seen on the live install, origin unknown) and a bare `[0]` may pick it. Do not copy the live `.db` file directly. In WAL mode a plain copy can miss recent writes.
 
 Compress it, hash it, and copy it. `kubectl cp` has failed on large files before (`unexpected EOF`, zero retries by default), so compress and retry:
 
@@ -134,10 +136,10 @@ The recording holds real GPS data for your property (see #49), so keep the file 
 |---|---|
 | Two mows started in the app, one with edge laps, one at a different height | `job_start` tags, or `job_settings` records |
 | Zero director commands | count of `command` records over the window |
-| Progress, area and position during edge laps | `edge_laps_begin`/`edge_laps_end` tags if you made them; otherwise whatever differs between Run A and Run B |
+| Progress, area and position during edge laps | `edge_laps_begin`/`edge_laps_end` tags if you made them; otherwise whatever differs between Mow A and Mow B |
 | Telemetry freezes while the Mower works | `moving`/`stopped` tags and `progress_check` against Home Assistant's own values |
 | Lift reaches target per the readback | `blade_height` readback after each `job_start` |
-| Recording growth rate | record count and payload bytes per hour inside the two Runs |
+| Recording growth rate | record count and payload bytes per hour inside the two mows |
 
 ## The first recording
 

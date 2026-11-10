@@ -180,8 +180,12 @@ class DebugRecording:
 
     @property
     def accepting(self) -> bool:
-        """True while records are being accepted (on, and no write error)."""
-        return self.writer is not None and self.writer.enabled
+        """True while a record handed in now would be written.
+
+        False when recording is off, after a write error, while paused for low
+        disk space, and while the queue is full.
+        """
+        return self.writer is not None and self.writer.accepting
 
     def record_check(
         self,

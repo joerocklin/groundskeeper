@@ -111,6 +111,16 @@ class RecordingWriter:
         return not self._failed
 
     @property
+    def accepting(self) -> bool:
+        """True while a record handed in now would be written.
+
+        Stricter than `enabled`: it is also False while writes are paused for
+        low disk space and while the queue is full, when records are skipped
+        or dropped without recording being off.
+        """
+        return not self._failed and not self._paused and not self._queue.full()
+
+    @property
     def dropped(self) -> int:
         """Records dropped by queue overflow since start."""
         return self._dropped
@@ -133,7 +143,8 @@ class RecordingWriter:
             with self._lock:
                 if self._dropped_pending and self._queue.qsize() < self._queue_max - 1:
                     marker = {"event": "dropped", "count": self._dropped_pending}
-                    if self._put(self._row("lifecycle", json.dumps(marker), None, ts)):
+                    # Stamped now, not with a backdated record's `ts`: the drop happened now.
+                    if self._put(self._row("lifecycle", json.dumps(marker), None, None)):
                         self._dropped_pending = 0
                 if not self._put(self._row(kind, body, run_id, ts)):
                     self._dropped += 1

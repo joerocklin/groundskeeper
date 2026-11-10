@@ -161,6 +161,43 @@ def test_pauses_below_min_free_disk_and_resumes(make, tmp_path) -> None:
     assert w.enabled is True
 
 
+def test_writer_is_not_accepting_while_paused_for_disk_space(make) -> None:
+    free = {"v": 10}
+    w = make(min_free_bytes=100, free_bytes=lambda: free["v"])
+    w.start()
+    assert w.accepting is True
+    w.record("snapshot", {"i": 1})
+    w.flush()
+    assert w.enabled is True  # still on, but what it is handed is being skipped
+    assert w.accepting is False
+    free["v"] = 1000
+    w.record("snapshot", {"i": 2})
+    w.flush()
+    assert w.accepting is True
+
+
+def test_writer_is_not_accepting_when_its_queue_is_full(make) -> None:
+    w = make(queue_max=3)  # not started, so nothing drains
+    for i in range(3):
+        w.record("snapshot", {"i": i})
+    assert w.accepting is False
+
+
+def test_dropped_marker_is_stamped_now_even_when_the_record_is_backdated(make, tmp_path) -> None:
+    w = make(queue_max=5)
+    for i in range(8):  # writer not started: 3 dropped
+        w.record("snapshot", {"i": i})
+    w.start()
+    w.flush()
+    w.record("tag", {"label": "note"}, ts=1_000)  # a backdated Tag
+    w.flush()
+    got = rows(tmp_path / "rec.db")
+    [marker] = [r for r in got if r[3] == "lifecycle"]
+    [tag] = [r for r in got if r[3] == "tag"]
+    assert tag[0] == 1_000
+    assert marker[0] > 1_000_000_000_000  # milliseconds since the epoch, i.e. now
+
+
 def test_status_event_reports_size_and_free(make) -> None:
     w = make(free_bytes=lambda: 5 * 2**30, total_bytes=lambda: 10 * 2**30)
     w.start()

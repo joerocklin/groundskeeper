@@ -131,7 +131,7 @@
       "message": "More than one Mower is loaded; pass config_entry_id."
     },
     "tag_rate_limited": {
-      "message": "Too many tags in the last minute; try again shortly."
+      "message": "Too many Tags in the last minute; try again shortly."
     },
     "unknown_zone": {
       "message": "No Zone is called or has the id \"{zone}\"."
@@ -593,7 +593,7 @@
       }
     },
     "add_tag": {
-      "name": "Add tag",
+      "name": "Add Tag",
       "description": "Note something the Mower's telemetry cannot say, such as a job you started in the Mammotion app, in the debug recording. Record-only; never commands the Mower.",
       "fields": {
         "config_entry_id": {
@@ -602,7 +602,7 @@
         },
         "label": {
           "name": "What happened",
-          "description": "The kind of tag."
+          "description": "The kind of Tag."
         },
         "note": {
           "name": "Note",
@@ -610,7 +610,7 @@
         },
         "minutes_ago": {
           "name": "Minutes ago",
-          "description": "How long ago it happened, up to 24 hours. The tag is stamped with that time."
+          "description": "How long ago it happened, up to 24 hours. The Tag is stamped with that time."
         },
         "zone": {
           "name": "Zone",
