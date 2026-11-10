@@ -180,25 +180,55 @@ class MammotionCatalogue:
 
     async def list_zones(self) -> list[Zone]:
         """Zones as (native_ref, name, polygon or None)."""
-        polygons: dict[str, dict[str, Any]] = {}
-        names: dict[str, str] = {}
+        features: list[dict[str, Any]] = []
         try:
-            for feat in await self._geometry():
-                props = feat.get("properties", {})
-                if props.get("type_name") == "area":
-                    ref = str(props["hash"])
-                    polygons[ref] = feat["geometry"]
-                    # The map carries the name as the Mammotion app shows it;
-                    # the zone switch's name is "Area {name}" (issue #55).
-                    plain = props.get("Name") or props.get("title")
-                    if plain:
-                        names[ref] = plain
+            features = await self._geometry()
         except HomeAssistantError:
             pass  # geometry never blocks the Zone list (issue #11)
-        return [
-            Zone(ref, names.get(ref) or self._switch_name(entry), polygons.get(ref))
+        polygons = {
+            str(feat["properties"]["hash"]): feat["geometry"]
+            for feat in features
+            if feat.get("properties", {}).get("type_name") == "area"
+        }
+        names = self._zone_names(features)
+        return [Zone(ref, names[ref], polygons.get(ref)) for ref in names]
+
+    def _zone_names(self, features: list[dict[str, Any]]) -> dict[str, str]:
+        """Each Zone's name by native_ref, the one rule `list_zones` and the
+        current-Zone lookup share.
+
+        The map carries the name as the Mammotion app shows it (and as the
+        `work_area` sensor reports it); the Zone switch's name is "Area
+        {name}" (issue #55). A Zone the map does not carry keeps its switch
+        name.
+        """
+        plain: dict[str, str] = {}
+        for feat in features:
+            props = feat.get("properties", {})
+            if props.get("type_name") == "area":
+                name = props.get("Name") or props.get("title")
+                if name:
+                    plain[str(props["hash"])] = name
+        return {
+            ref: plain.get(ref) or self._switch_name(entry)
             for ref, entry in self._zone_switches().items()
+        }
+
+    @callback
+    def zone_ref_for_name(self, name: str) -> str | None:
+        """The native_ref of the Zone called `name`, or None (issue #82).
+
+        Synchronous and service-free: it reads only geometry already
+        fetched, because `get_geojson` starts a 5-minute report stream on the
+        Mower. Without geometry it matches the switch names exactly. A name
+        shared by two Zones is ambiguous and gives None.
+        """
+        matches = [
+            ref
+            for ref, zone_name in self._zone_names(self._features or []).items()
+            if zone_name == name
         ]
+        return matches[0] if len(matches) == 1 else None
 
     async def list_channels(self) -> list[Channel]:
         """Channels with their path; parent hash 0 is the dock."""

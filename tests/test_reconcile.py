@@ -152,6 +152,19 @@ def test_mowing_without_job_ref_falls_back_to_zone_and_flags_weaker_check():
     assert reconciled(fx)["job_check"] == "zone"
 
 
+def test_mowing_without_job_ref_and_a_matching_zone_stays_mowing():
+    """The weaker `zone` check: Mammotion has no stable job id, so a live
+    Zone that is the Run's own Zone is the Run's job (issue #82)."""
+    state = mowing_state()
+    run = state["state"]["runs"][0]
+    run["native_ref"], run["job_ref"] = FRONT, None
+    fresh_stall(state)
+    state, fx = reconcile(state, replace(LIVE, job_ref=None))
+    assert run_status(state) == ["mowing"]
+    assert commands(fx) == []
+    assert reconciled(fx)["job_check"] == "zone"
+
+
 def test_mowing_matching_job_ref_stays_mowing():
     state = mowing_state()
     state["state"]["runs"][0]["native_ref"] = FRONT
@@ -280,6 +293,27 @@ def test_on_hold_cause_persists_stays_and_expired_reminder_fires_once():
 def test_on_hold_with_a_different_live_job_is_superseded():
     state, _ = reconcile(held_state("contact_lost"), replace(LIVE, job_ref="other"))
     assert run_of(state)["reason"] == "superseded"
+
+
+def held_without_job_ref(cause="contact_lost"):
+    """A held Run whose job has no id, so only the live Zone can identify it."""
+    state = held_state(cause)
+    state["state"]["runs"][0]["job_ref"] = None
+    return state
+
+
+def test_on_hold_without_job_ref_and_a_different_live_zone_is_superseded():
+    state, fx = reconcile(held_without_job_ref(), replace(LIVE, job_ref=None, zone="99999999"))
+    assert run_of(state)["reason"] == "superseded"
+    assert commands(fx) == []
+    assert reconciled(fx)["job_check"] == "zone"
+
+
+def test_on_hold_without_job_ref_and_the_same_live_zone_is_not_superseded():
+    state, fx = reconcile(held_without_job_ref(), replace(LIVE, job_ref=None))
+    assert run_status(state) == ["mowing"]  # the cause cleared; the live job is ours
+    assert run_of(state).get("reason") != "superseded"
+    assert reconciled(fx)["job_check"] == "zone"
 
 
 # -- schedule-level rows -------------------------------------------------------------------

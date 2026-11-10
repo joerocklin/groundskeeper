@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity as A
 
 from custom_components.groundskeeper.core import (
@@ -282,6 +283,54 @@ def test_resume_warns_ahead_and_the_crossing_ends_in_the_zone() -> None:
     assert events(fx, "gate_crossing_ended")
     assert prompts(state, "gate_close")
     assert state["state"]["gate_flags"] == {"g1": False}
+
+
+# The gated Run's native_ref (ENV's "z1" Zone) and a Zone that is not it.
+GATED_ZONE = "11111111"
+OTHER_ZONE = "99999999"
+
+
+@pytest.mark.parametrize(
+    ("zone", "arrived"),
+    [(GATED_ZONE, True), (None, True), (OTHER_ZONE, False)],
+    ids=["in-the-gated-zone", "zone-unknown", "in-another-zone"],
+)
+def test_the_way_out_ends_when_mowing_in_the_gated_zone(zone, arrived) -> None:
+    """Mowing in the Run's own Zone (or in an unknown one) means the Mower
+    came through; mowing in some other Zone does not (issue #82)."""
+    env = env_for(gate())
+    state = recharging(env, battery=80)
+    state, fx = feed(state, env, (1600, snap(DOCKED, job_active=True, recharging=True,
+                                             battery=91)))
+    [warning] = expected(fx)
+    assert (warning["kind"], warning["direction"]) == ("resume", "out")
+    state, _ = answer(state, env, "opened", t=1610)
+
+    state, fx = feed(state, env, (1700, snap(battery=96, zone=zone)))
+
+    assert bool(events(fx, "gate_crossing_ended")) is arrived
+    assert bool(prompts(state, "gate_close")) is arrived
+
+
+@pytest.mark.parametrize(
+    ("zone", "warned"),
+    [(GATED_ZONE, False), (None, False), (OTHER_ZONE, True)],
+    ids=["in-the-gated-zone", "zone-unknown", "in-another-zone"],
+)
+def test_leaving_the_dock_unannounced_is_warned_unless_already_in_the_gated_zone(
+    zone, warned
+) -> None:
+    """Leaving the dock to mow before any resume warning: urgent, unless the
+    Mower is already reported in the Run's own Zone (issue #82)."""
+    env = env_for(gate())
+    state = recharging(env, battery=80)
+    state, _ = feed(state, env, (1000, snap(DOCKED, job_active=True, recharging=True,
+                                            battery=80)))
+    assert prompts(state) == []
+
+    state, fx = feed(state, env, (1100, snap(battery=82, zone=zone)))
+
+    assert bool(expected(fx, "unpredicted")) is warned
 
 
 # -- Run end ---------------------------------------------------------------------

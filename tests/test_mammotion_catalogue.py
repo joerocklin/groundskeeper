@@ -188,6 +188,47 @@ async def test_zone_without_matching_map_feature_uses_switch_name(setup) -> None
     assert by_ref[BACKYARD].name == "Backyard"
 
 
+async def test_zone_ref_for_name_uses_the_names_list_zones_reports(setup) -> None:
+    catalogue, services, *_ = setup
+    zones = await catalogue.list_zones()  # fetches the map
+
+    # Every Zone resolves from the very name `list_zones` reports for it.
+    assert {z.name: catalogue.zone_ref_for_name(z.name) for z in zones} == {
+        z.name: z.native_ref for z in zones
+    }
+    assert catalogue.zone_ref_for_name("Side yard") == SIDE
+    assert catalogue.zone_ref_for_name("Area Side yard") is None  # not the app's name
+    assert catalogue.zone_ref_for_name("Nowhere") is None
+    assert services.count("get_geojson") == 1  # the lookup itself never fetches
+
+
+async def test_zone_ref_for_name_before_any_fetch_matches_switch_names_only(setup) -> None:
+    catalogue, services, *_ = setup
+
+    assert catalogue.zone_ref_for_name("Area Side yard") == SIDE  # exact switch name
+    assert catalogue.zone_ref_for_name("Side yard") is None  # no prefix stripping
+    assert services.count("get_geojson") == 0
+
+
+async def test_zone_ref_for_name_is_none_for_a_switch_name_shared_by_two_zones(setup) -> None:
+    catalogue, _, _, entry, device = setup
+    twin = er.async_get(catalogue._hass).async_get_or_create(
+        "switch",
+        "mammotion",
+        "1000000000000000098",
+        suggested_object_id="side_yard_twin",
+        config_entry=entry,
+        device_id=device.id,
+        original_name="Area Side yard",
+    )
+    catalogue._hass.states.async_set(
+        twin.entity_id, "on", {"hash": 1000000000000000098, "friendly_name": "Area Side yard"}
+    )
+
+    assert catalogue.zone_ref_for_name("Area Side yard") is None  # ambiguous, no map yet
+    assert catalogue.zone_ref_for_name("Area Backyard") == BACKYARD
+
+
 async def test_zone_discovery_uses_unique_id_when_switch_unavailable(setup) -> None:
     catalogue, _, _, entry, device = setup
     # An unavailable switch has no `hash` attribute (research §5).
