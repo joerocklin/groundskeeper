@@ -194,6 +194,17 @@ class RecordingWriter:
             raise
         return con
 
+    def set_meta(self, meta: dict[str, str | None]) -> None:
+        """Add or replace meta rows, in queue order. Blocking; executor only."""
+        rows = [(k, v) for k, v in meta.items() if v is not None]
+
+        def _write(w: RecordingWriter) -> None:
+            assert w._con is not None
+            w._con.executemany("insert or replace into meta (key, value) values (?, ?)", rows)
+            w._con.commit()
+
+        self._call(_write)
+
     def start(self) -> None:
         """Start the writer thread."""
         self._thread = threading.Thread(

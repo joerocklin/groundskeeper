@@ -69,6 +69,31 @@ from .mammotion_catalogue import MammotionCatalogue
 
 MAMMOTION = "mammotion"
 
+# `CurrentTaskSettings` fields worth keeping (PyMammotion `data/model/work.py`):
+# the job's identity, cut height, perimeter laps (`edge_mode`), path mode and
+# angle, Zones and speed. A whitelist of scalars, so no future field can carry
+# a position into the recording.
+_JOB_SETTING_FIELDS = (
+    "job_id",
+    "job_ver",
+    "job_mode",
+    "edge_mode",
+    "knife_height",
+    "channel_width",
+    "channel_mode",
+    "toward",
+    "toward_mode",
+    "toward_included_angle",
+    "speed",
+    "zone_hashs",
+    "path_hash",
+    "reserved",
+    "ride_boundary_distance",
+    "auto_change_direction",
+)
+_SCALARS = (str, int, float, bool)
+_JOB_SETTING_TEXT_MAX = 128
+
 # Raw `activity_mode` sensor values that mean a job or its breakpoint is
 # live (pymammotion MOWING_ACTIVE_MODES, research §8).
 _ACTIVE_MODES = frozenset(
@@ -873,6 +898,40 @@ class MammotionAdapter:
     def redact(self) -> list[str]:
         """Serial-bearing strings (spec §15)."""
         return [self._name, self._name.split("-", 1)[-1]]
+
+    def job_settings(self) -> dict[str, Any] | None:
+        """The running job's settings from Mammotion-HA's coordinator data.
+
+        What the owner chose in the Mammotion app (blade height, edge laps,
+        Zones) is not an entity, but PyMammotion keeps it as `work` on the
+        reporting coordinator's data. That is another integration's private
+        runtime data, so this only reads it, defensively, for the debug
+        recording; anything missing or odd is None (research: Mammotion-HA
+        v0.6.18, PyMammotion 0.10.10 `CurrentTaskSettings`).
+        """
+        work = self._mammotion_work()
+        if work is None:
+            return None
+        settings: dict[str, Any] = {}
+        for name in _JOB_SETTING_FIELDS:
+            value = getattr(work, name, None)
+            if isinstance(value, (list, tuple)):
+                value = [item for item in value if isinstance(item, _SCALARS)]
+            elif not isinstance(value, _SCALARS):
+                continue
+            if isinstance(value, str):
+                value = value[:_JOB_SETTING_TEXT_MAX]
+            settings[name] = value
+        return settings or None
+
+    def _mammotion_work(self) -> Any | None:
+        """`MowingDevice.work` for this Mower, or None if it cannot be reached."""
+        for entry in self._hass.config_entries.async_entries(MAMMOTION):
+            for mower in getattr(getattr(entry, "runtime_data", None), "mowers", None) or ():
+                if self._name in (getattr(mower, "unique_name", None), getattr(mower, "name", None)):
+                    coordinator = getattr(mower, "reporting_coordinator", None)
+                    return getattr(getattr(coordinator, "data", None), "work", None)
+        return None
 
 
 def adapter_factory(hass: HomeAssistant, entry: ConfigEntry) -> MammotionAdapter:

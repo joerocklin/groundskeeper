@@ -196,6 +196,70 @@ dismiss_anomaly:
             - run_too_long
           translation_key: anomaly_detector
 
+add_tag:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: groundskeeper
+    label:
+      required: true
+      example: job_start
+      selector:
+        select:
+          options:
+            - job_start
+            - edge_laps_begin
+            - edge_laps_end
+            - progress_check
+            - moving
+            - stopped
+            - note
+          translation_key: tag_label
+    note:
+      required: false
+      selector:
+        text:
+    minutes_ago:
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 1440
+          unit_of_measurement: min
+    zone:
+      required: false
+      example: "Front lawn"
+      selector:
+        text:
+    height_mm:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 200
+          unit_of_measurement: mm
+    edge_laps:
+      required: false
+      selector:
+        boolean:
+    laps:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10
+          mode: box
+    app_progress_pct:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
 export_config:
   fields:
     config_entry_id:

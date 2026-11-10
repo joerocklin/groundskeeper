@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from dataclasses import asdict
@@ -146,6 +147,14 @@ def snapshot_usable(snapshot: Snapshot) -> bool:
 
 
 _CORE_KEYS = ("state", "learned", "history")
+
+# Tags are for people and their automations; any automation can call the
+# service, so at most this many are taken per minute.
+TAG_RATE_LIMIT = 30
+
+
+class TagRateLimited(Exception):
+    """Too many tags in the last minute."""
 # Changes to only these never need an awaited save (spec §14.4).
 
 
@@ -180,6 +189,7 @@ class _Sink:
 
     @callback
     def on_signal(self, signal: AdapterSignal) -> None:
+        self._director.record_signal(signal)  # the director's inputs, even with no active Run
         if self._director.frozen:
             self._director.on_frozen_signal(signal)
             return
@@ -221,6 +231,8 @@ class Director:
         self.recording: DebugRecording | None = None
         self._recording_lock = asyncio.Lock()  # one start or stop at a time
         self._last_snapshot: dict[str, Any] | None = None
+        self._last_job_settings: dict[str, Any] | None = None
+        self._tag_times: deque[float] = deque(maxlen=TAG_RATE_LIMIT)
         self._unsub_raw_state: CALLBACK_TYPE | None = None
 
     # -- read access ----------------------------------------------------------
@@ -349,6 +361,8 @@ class Director:
             return
         self._unsub_adapter = self.adapter.subscribe(_Sink(self))
         await self.adapter.async_start()
+        if self.recording is not None:
+            await self.recording.async_refresh_meta()  # the source version is known now
         self.record_snapshot(self.adapter.snapshot)
         if self.hass.is_running:
             await self._begin_wait()
@@ -1008,6 +1022,7 @@ class Director:
                     return
                 self.recording = recording
                 self._last_snapshot = None  # the first snapshot after starting is recorded
+                self._last_job_settings = None  # and so are the job settings
                 self._listen_raw_state()
                 if announce:
                     self.record("lifecycle", {"event": "recording_enabled"})
@@ -1016,15 +1031,24 @@ class Director:
                 recording, self.recording = self.recording, None
                 await recording.async_stop("recording_disabled")
 
-    def record(self, kind: str, payload: Any, run_id: str | None = None) -> None:
-        """Record on the debug recording; a no-op when it is off. Never raises."""
+    def record(
+        self,
+        kind: str,
+        payload: Any,
+        run_id: str | None = None,
+        ts: int | None = None,
+    ) -> None:
+        """Record on the debug recording; a no-op when it is off. Never raises.
+
+        `ts` (epoch ms) backdates the record; the default is now.
+        """
         if self.recording is None:
             return
         try:
             if run_id is None:
                 run = active_run(self.core_state["state"])
                 run_id = run["id"] if run else None
-            self.recording.record(kind, payload, run_id)
+            self.recording.record(kind, payload, run_id, ts)
         except Exception:  # noqa: BLE001 - no recording failure reaches the core
             _LOGGER.debug("recording failed", exc_info=True)
 
@@ -1065,8 +1089,99 @@ class Director:
                 return
             self._last_snapshot = payload
             self.record("snapshot", payload)
+            self._record_job_settings(snapshot)
         except Exception:  # noqa: BLE001
             _LOGGER.debug("snapshot recording failed", exc_info=True)
+
+    def _record_job_settings(self, snapshot: Snapshot) -> None:
+        """A `job_settings` record when the source's job settings changed.
+
+        Observation only: the app's own choices (height, edge laps, Zones) are
+        not entities, so an adapter that can read them offers `job_settings()`.
+        Checked on each recorded snapshot change, which follows every job start
+        and progress step. A source with nothing to offer returns None.
+        """
+        try:
+            peek = getattr(self.adapter, "job_settings", None)
+            settings = peek() if callable(peek) else None
+        except Exception:  # noqa: BLE001 - another integration's data never breaks us
+            _LOGGER.debug("job settings peek failed", exc_info=True)
+            return
+        if not settings or settings == self._last_job_settings:
+            return
+        self._last_job_settings = settings
+        self.record(
+            "job_settings",
+            {
+                "settings": settings,
+                "job_active": snapshot.job_active,
+                "activity": str(snapshot.activity),
+            },
+        )
+
+    def record_signal(self, signal: AdapterSignal) -> None:
+        """A `signal` record: what the adapter told the core, even with no active Run."""
+        if self.recording is None:
+            return
+        try:
+            self.record("signal", {"type": type(signal).__name__, **asdict(signal)})
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("signal recording failed", exc_info=True)
+
+    def add_tag(
+        self,
+        label: str,
+        *,
+        note: str | None = None,
+        minutes_ago: int = 0,
+        fields: dict[str, Any] | None = None,
+        source: str = "service",
+    ) -> bool:
+        """Write a `tag`: what the owner saw that telemetry cannot say.
+
+        Record-only: no reducer, no Store write, never a Mower command. The HA
+        view is a whitelist of scalars, so a tag carries no position and no
+        entity id. Returns whether the recording is taking records; raises
+        `TagRateLimited` past `TAG_RATE_LIMIT` per minute.
+        """
+        now = dt_util.utcnow()
+        stamp = now.timestamp()
+        while self._tag_times and stamp - self._tag_times[0] >= 60:
+            self._tag_times.popleft()
+        if len(self._tag_times) >= TAG_RATE_LIMIT:
+            raise TagRateLimited
+        self._tag_times.append(stamp)
+
+        accepting = self.recording is not None and self.recording.accepting
+        payload: dict[str, Any] = {
+            "label": label,
+            "source": source,
+            "logged_at": now.isoformat(),
+            "minutes_ago": minutes_ago,
+            "ha": self._ha_view(),
+        }
+        if note:
+            payload["note"] = note
+        if fields:
+            payload["fields"] = fields
+        self.record("tag", payload, ts=int(stamp * 1000) - minutes_ago * 60_000)
+        return accepting
+
+    def _ha_view(self) -> dict[str, Any]:
+        """What Home Assistant believes right now, field by field (never the whole snapshot)."""
+        try:
+            snap = self.adapter.snapshot
+            return {
+                "activity": str(snap.activity),
+                "available": snap.available,
+                "job_active": snap.job_active,
+                "recharging": snap.recharging,
+                "battery": snap.battery,
+                "progress": snap.progress,
+                "blade_height_mm": snap.blade_height_mm,
+            }
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _listen_raw_state(self) -> None:
         """`raw_state` records for entities on the Mower's own device only."""

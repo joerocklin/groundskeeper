@@ -1,62 +1,100 @@
-# Manual tagging for live trial Stage 1
+# Tagging a Stage 1 trial
 
 How to capture a debug recording that an agent can read with confidence. Used for the Stage 1 "Shadow" trial (#44), where the Mammotion app mows and the director only watches.
 
-## Why tag by hand
+You do not need to stand by the Mower. Start it from the app, tap a few **Tags** from your phone when you happen to look, and pull the recording afterwards.
 
-The debug recording holds what Home Assistant saw: `snapshot` and `raw_state` records, with no commands in Stage 1. It cannot hold what you did in the Mammotion app. It does not know when you pressed start, which Zone you picked, whether edge laps were on, or which blade height you chose. Those are exactly the labels the #44 acceptance criteria turn on:
+## Why tags
+
+The debug recording holds what Home Assistant saw. It cannot hold what you did in the Mammotion app: which Zone you picked, the blade height, whether edge laps were on, or whether the app showed the Mower moving while Home Assistant's numbers were frozen. A **Tag** is a timestamped note in the recording that says so. It is record-only: the director never reads a Tag, and a Tag never commands the Mower.
+
+The first 16-day recording had no labels, so it could not answer the #44 questions:
 
 - Do progress, area and position advance during edge laps? (tunes the stall window)
 - Does the lift reach its target height per the readback? (gates Stage 2)
-- Are job and done detection correct for app-started Runs?
+- Are job and done detection correct for mows started in the app?
 
-A 16-day recording taken without labels could not answer these, because nobody remembered what happened on which day. The fix is a timestamped log written while you mow, plus two short, deliberately different Runs.
+## What is captured without you
 
-What the first recording did show, and why the protocol below looks the way it does:
+After this version is installed, the recording also carries:
 
-- Job telemetry (`progress`, `area`, task timers) can freeze for tens of minutes while the Mower works. Step 5 of each Run catches whether that happens, by comparing the app against HA.
-- Blade height changes to or from 80 mm pass through 90 mm on the readback (for example 60 to 80 reads `65, 70, 75, 80, 85, 90, 85, 80`). Run B uses 80 mm to capture this cleanly.
-- `snapshot.movement.position`, `zone` and `job_ref` were null on every snapshot. The `device_tracker` entity in `raw_state` is where position lives today.
+| Record | What it gives |
+|---|---|
+| `signal` | Everything the adapter tells the core (job started, Zone complete or aborted, new error, rain stop), which was never recorded while the Schedule was idle. |
+| `job_settings` | The running job's settings as Mammotion-HA's data holds them: `knife_height`, `edge_mode` (the perimeter laps), `zone_hashs`, path mode and angle. Written when they change. |
+| `meta.source_version` | The installed Mammotion-HA version, so a recording says which upstream produced it. |
 
-## What you need
+`job_settings` is read from another integration's private data (PyMammotion's `work` for Mammotion-HA v0.6.18). Whether it is filled in for a mow started from the app is **not yet verified**. After Run A below, check whether the recording has `job_settings` records. If it does, your `job_start` tags are a cross-check. If it does not, your tags are the only record of the settings, so make them accurate.
 
-- A terminal you can reach while the Mower is mowing.
-- `kubectl` access to the Home Assistant pod (the commands use `k` as the alias, in namespace `apps`).
-- Somewhere outside the repo for the files, here `~/groundskeeper-data/`. The recording holds real GPS data for your property (see #49 and the README's section on sharing your map), so it must not be committed or attached anywhere.
+Telemetry silences, job start and finish, recharge trips and errors need no tag: they are already in the `snapshot` and `raw_state` records.
 
-## Once, before you start
+## What only you can say
 
-1. Define the logger. Every line gets a UTC timestamp to the second:
+- The settings you chose in the app, if `job_settings` turns out to be empty.
+- Whether the Mower was really moving in the app while Home Assistant's progress sat still. In the first recording, job telemetry went silent for 10 to 56 minutes while the Mower was mowing, and Home Assistant's data looks the same whether the Mower stopped or the numbers froze.
+- Anything else worth remembering: a gate opened, an obstruction, the app being closed.
 
+## Setup, once
+
+1. Install the version of the integration that has the `groundskeeper.add_tag` action and reload it. Confirm the Schedule is `idle` and debug recording is on (the toggle in the setup banner). Do not reload the integration during the trial.
+2. Try the action in **Developer Tools → Actions** (YAML mode):
+
+   ```yaml
+   action: groundskeeper.add_tag
+   data:
+     label: note
+     note: "test tag"
    ```
-   mkdir -p ~/groundskeeper-data
-   mowlog() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> ~/groundskeeper-data/mowlog.txt; }
+
+   With "Return response" shown, you should see `recorded: true`. If it says `false`, the recording is off or has stopped taking records.
+
+3. Put the tags you will use on a phone dashboard so each is one tap. A button card per tag works; this is a sketch, not exercised against a live dashboard:
+
+   ```yaml
+   type: button
+   name: Started in the app (edge laps on, 60 mm)
+   icon: mdi:play
+   tap_action:
+     action: perform-action
+     perform_action: groundskeeper.add_tag
+     data:
+       label: job_start
+       edge_laps: true
+       laps: 2
+       height_mm: 60
    ```
 
-   A phone notes app works too, if each line carries a time to the second and the timezone.
+   Make similar buttons for `moving`, `stopped` and `progress_check`. A tag's `minutes_ago` backdates it, up to 24 hours, so a tag entered later still lands at the right time. Use Developer Tools when you need a backdated or custom one.
 
-2. Compare clocks. Run `date -u` locally and `k exec -n apps "$POD" -c home-assistant -- date -u` (see "Pull the data" for `POD`). If they differ by more than about 5 seconds, run `mowlog "clock offset: HA is +Ns"`.
+## The tags
 
-3. In the panel, confirm the Schedule is `idle` and debug recording is on (the toggle in the setup banner).
+| `label` | Meaning | Useful fields |
+|---|---|---|
+| `job_start` | You started a mow in the app | `zone`, `height_mm`, `edge_laps`, `laps` |
+| `edge_laps_begin`, `edge_laps_end` | The Mower started or finished its perimeter laps | |
+| `progress_check` | You looked at the app | `app_progress_pct` |
+| `moving`, `stopped` | The app shows the Mower moving or stopped | |
+| `note` | Anything else | `note` (up to 200 characters) |
 
-4. Do not reload or restart the integration during the test. If you must, run `mowlog "reloaded integration"`; each reload shows up in the recording as `unload`, `start` and `reconciled` lifecycle records.
+Every tag also stores Home Assistant's own view at the moment you tapped (activity, progress, battery, blade height), so "the app says 40% and Home Assistant says 12%" is answerable from one record. Keep serial numbers and locations out of `note`. At most 30 tags per minute are accepted.
 
 ## Run A: edge laps on, 60 mm
 
-1. Dock the Mower with battery at 80% or more and nothing running. Run `mowlog "A prep: battery NN%, blade readback XX mm"`.
-2. In the Mammotion app, pick one Zone. Set blade height to 60 mm and turn edge laps on. Run `mowlog "A settings: zone=<name> height=60 edge_laps=ON"`.
-3. Press start in the app and run `mowlog "A START"`.
-4. Watch the start of the Run. When the Mower begins the perimeter, run `mowlog "A edge laps began"`. When it switches to stripes, run `mowlog "A edge laps ended"`. Accuracy to about a minute is enough.
-5. About every 10 minutes for the first half hour, compare the app's progress with HA's progress entity and run `mowlog "A app=NN% HA=NN%"`. If HA stays put while the app moves, that is the telemetry freeze, and it is the most useful thing to catch.
-6. Do not pause, skip, or change the height mid-Run. Log anything unusual in one line: a recharge trip, an obstruction, the app being opened or closed, a gate being opened. When the Mower docks, run `mowlog "A finished"`.
+Edge laps are on by default in your app, usually 2 laps and sometimes 3.
 
-## Run B: edge laps off, 80 mm
+1. Dock the Mower with the battery at 80% or more and nothing running.
+2. In the app, pick one Zone and use your usual settings: 60 mm, edge laps on.
+3. Press start, then tap `job_start` (with `zone` and `laps` if the button does not carry them).
+4. Walk away. Whenever you do look at the app, tap one of `progress_check` (with the app's number), `moving`, or `stopped`. One or two taps in the first half hour is plenty. A long gap with Home Assistant's progress frozen is where one `moving` or `stopped` tap is worth most.
+5. If you notice the perimeter laps starting or ending, tap `edge_laps_begin` or `edge_laps_end`. If you miss them, backdate the tag later with `minutes_ago`.
 
-1. Wait for Run A to finish and the job to clear. Run `mowlog "B prep: readback XX mm"`.
-2. In the app, set the same Zone to 80 mm with edge laps off. Run `mowlog "B settings: zone=<same name> height=80 edge_laps=OFF"`.
-3. Press start and run `mowlog "B START"`. Repeat the 10-minute progress checks from Run A. Run `mowlog "B finished"` when it docks.
+## Run B: edge laps off, 70 mm
 
-Run B changes the height from the previous Run (satisfying the #44 criterion) and runs without edge laps, so the two Runs differ in only the two settings under test.
+1. After Run A has finished and the job has cleared, set the same Zone to 70 mm with edge laps off.
+2. Press start and tap `job_start` with `height_mm: 70`, `edge_laps: false`.
+3. Tap `progress_check` and `moving` or `stopped` whenever you look.
+
+Why 70 mm: in the first recording, mowing readbacks sat at 60 mm, and 80, 90 and 100 mm appeared as travel and charging heights. A Run at 80 mm would be hard to tell from the Mower travelling. 70 mm showed up only briefly in height ramps, so a long plateau there can only be the Run. Same Zone for both Runs, so the two differ only in the two settings under test.
 
 ## Pull the data
 
@@ -66,7 +104,7 @@ Look the pod up each time, since it changes on restart:
 POD=$(k get pods -n apps --no-headers -o custom-columns=:metadata.name | grep '^home-assistant-')
 ```
 
-Make a consistent copy with SQLite's online backup API. This is safe while HA is writing, and it needs no pause of the recording:
+Make a consistent copy with SQLite's online backup API. This is safe while Home Assistant is writing and needs no pause of the recording:
 
 ```
 k exec -n apps "$POD" -c home-assistant -- python3 -c "import glob,sqlite3; s=sqlite3.connect(glob.glob('/config/groundskeeper/recording_*.db')[0]); d=sqlite3.connect('/tmp/stage1b.db'); s.backup(d); d.close(); s.close()"
@@ -88,30 +126,24 @@ The two hashes must match. Then clean up the pod, because `/tmp` counts against 
 k exec -n apps "$POD" -c home-assistant -- rm -f /tmp/stage1b.db /tmp/stage1b.db.gz
 ```
 
-## What to hand over
-
-Two files, both outside the repo:
-
-- `~/groundskeeper-data/stage1b.db`
-- `~/groundskeeper-data/mowlog.txt`
-
-An agent can then open the database read-only (`sqlite3 "file:stage1b.db?immutable=1"`, which creates no `-wal` or `-shm` files) and answer the #44 criteria against your timestamps. Agents never command the Mower in this stage.
+The recording holds real GPS data for your property (see #49), so keep the file outside the repo, `~/groundskeeper-data/`, and do not attach it anywhere. Open it read-only with `sqlite3 "file:stage1b.db?immutable=1"`, which creates no `-wal` or `-shm` files.
 
 ## What the labels answer
 
 | #44 criterion | Answered by |
 |---|---|
-| Two app-started Runs, one with edge laps, one at a different height | `A settings` and `B settings` lines |
+| Two mows started in the app, one with edge laps, one at a different height | `job_start` tags, or `job_settings` records |
 | Zero director commands | count of `command` records over the window |
-| Progress, area and position during edge laps | records between `A edge laps began` and `A edge laps ended`, against the same measures in stripes |
-| Telemetry freezes while the Mower works | the `app=NN% HA=NN%` lines against HA's own values |
-| Lift reaches target per the readback | `blade_height` readback after each `settings` line and each START |
+| Progress, area and position during edge laps | `edge_laps_begin`/`edge_laps_end` tags if you made them; otherwise whatever differs between Run A and Run B |
+| Telemetry freezes while the Mower works | `moving`/`stopped` tags and `progress_check` against Home Assistant's own values |
+| Lift reaches target per the readback | `blade_height` readback after each `job_start` |
 | Recording growth rate | record count and payload bytes per hour inside the two Runs |
 
-## Recordings from before this protocol
+## The first recording
 
-The first recording (2026-10-24 to 2026-11-09) is unlabeled. It supports facts that need no labels, such as zero commands and the size of the lift ramps. It does not support conclusions about edge laps or any specific Run, and none should be drawn from it.
+The 2026-10-24 to 2026-11-09 recording is unlabeled. It supports facts that need no labels, such as zero commands and the size of the lift ramps. Edge laps are on by default, so each fresh start there opens with them, but telemetry freezes overlap the same minutes. Use it for hints, not for tuning the stall window.
 
 ## Known issues that touch this trial
 
-- #80: the recording leaks the device serial in lowercase entity IDs. Do not attach a recording to a public issue until this is fixed, and the position data is a separate reason (#49).
+- #80: the recording leaks the device serial in lowercase entity IDs. Do not attach a recording to a public issue until it is fixed. Free-text notes pass through the same case-sensitive redaction, so keep them free of identifiers.
+- #49: the recording and diagnostics carry real GPS position, which is a separate reason not to share one.

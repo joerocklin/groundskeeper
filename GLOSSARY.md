@@ -75,3 +75,7 @@ _Avoid_: Fault, issue
 **Prompt**:
 A question the director puts to the user that waits for an answer; it stays pending until answered or superseded, and no clock answers it. Plain notices, such as a finished Schedule, are not Prompts.
 _Avoid_: Alert, notification (the delivery, not the question)
+
+**Tag**:
+A timestamped note the owner writes into the debug recording to say what telemetry cannot, such as the settings of a mow started in the Mammotion app. A Tag is record-only: the director never reads one, and it never commands the Mower.
+_Avoid_: Prompt (a question the director waits on), Anomaly, Check, annotation

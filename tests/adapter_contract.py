@@ -211,6 +211,16 @@ class _AdapterContract:
         assert isinstance(mower.redact, list)
         assert all(isinstance(item, str) for item in mower.redact)
 
+    async def test_job_settings_are_none_or_plain_json(self, mower: MowerAdapter) -> None:
+        """Job settings feed the recording only: JSON scalars, no objects."""
+        await mower.async_start()
+        settings = mower.job_settings()
+        await mower.async_close()
+        assert settings is None or isinstance(settings, dict)
+        for value in (settings or {}).values():
+            items = value if isinstance(value, list) else [value]
+            assert all(item is None or isinstance(item, (str, int, float, bool)) for item in items)
+
 
 def _run_settings(mower: MowerAdapter) -> RunSettings:
     """A RunSettings valid for this adapter's declared extras."""
