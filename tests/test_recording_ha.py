@@ -43,12 +43,15 @@ async def flush(hass, entry) -> None:
     await hass.async_add_executor_job(async_get_recording(hass, entry.entry_id).writer.flush)
 
 
-async def read(hass, entry, sql="select kind, run_id, payload from records order by seq"):
+ALL_RECORDS = "select kind, run_id, payload from records order by seq"
+
+
+async def read(hass, entry, sql=ALL_RECORDS):
     await flush(hass, entry)
     return await read_file(hass, entry, sql)
 
 
-async def read_file(hass, entry, sql="select kind, run_id, payload from records order by seq"):
+async def read_file(hass, entry, sql=ALL_RECORDS):
     """Read the recording file itself, for when no live recording is left to flush."""
 
     def _read():
@@ -294,7 +297,7 @@ async def test_unload_stops_writer_and_reload_appends_to_same_file(hass, directo
 
 # HA's one-shot listener is already gone by the time the stop handler runs, so a second
 # remove of it is logged by core as this ERROR (#88).
-UNKNOWN_LISTENER = "Unable to remove unknown job listener"
+UNKNOWN_LISTENER_ERROR = "Unable to remove unknown job listener"
 
 
 async def test_ha_stop_closes_recording_without_logging_an_error(hass, director, caplog) -> None:
@@ -303,7 +306,7 @@ async def test_ha_stop_closes_recording_without_logging_an_error(hass, director,
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
     await hass.async_block_till_done()
 
-    assert UNKNOWN_LISTENER not in caplog.text
+    assert UNKNOWN_LISTENER_ERROR not in caplog.text
     assert async_get_recording(hass, entry.entry_id) is None
     lifecycle = of_kind(await read_file(hass, entry), "lifecycle")
     assert lifecycle[-1] == {"event": "unload"}
