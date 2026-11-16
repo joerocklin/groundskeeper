@@ -4,6 +4,7 @@
 simulated `mobile_app_notification_action` events. Nothing real is called.
 """
 
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -13,14 +14,20 @@ from pytest_homeassistant_custom_component.common import (
     async_mock_service,
 )
 
+from homeassistant.config_entries import SOURCE_USER
+from homeassistant.const import CONF_DEVICE
+
+from custom_components.groundskeeper import adapters
 from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
 from custom_components.groundskeeper.runtime import async_get_director
+from tests.conftest import make_mammotion_mower
 from tests.test_prompts import fail_a_run, list_prompts, types  # noqa: F401
 from tests.test_on_hold_ha import hold_run  # noqa: F401
 from tests.test_tracer_bullet import (  # noqa: F401
     MOWING,
     add_plan,
     advance,
+    RecordingMower,
     director,
     state_of,
 )
@@ -124,7 +131,7 @@ async def test_failure_prompt_goes_to_every_target_with_actions(
         assert note["title"] == "Example Mower: Run failed"
         assert note["message"].splitlines()[0] == "Zone: Front Lawn"
         data = note["data"]
-        assert data["tag"] == f"mowdir_{entry.entry_id}_run_failed"
+        assert re.fullmatch(r"mowdir_[0-9a-f]{10}_run_failed", data["tag"])
         assert [a["action"] for a in data["actions"]] == [
             f"MOWDIR_{prompt['prompt_id']}_RETRY",
             f"MOWDIR_{prompt['prompt_id']}_SKIP_PLAN",
@@ -166,6 +173,8 @@ async def test_first_tap_decides_and_every_copy_is_cleared_by_tag(
     for calls in phones.values():
         [clear] = cleared(calls)
         assert clear["data"] == {"tag": prompt["tag"]}
+        [pushed] = sent(calls)
+        assert clear["data"]["tag"] == pushed["data"]["tag"]  # clears what it sent
 
 
 async def test_duplicate_and_stale_taps_are_ignored_and_send_nothing(
@@ -283,7 +292,7 @@ async def test_check_wait_notice_respects_its_toggle(
     await d.notifier.async_notice("check_waits", "check_timeout", "Check timed out",
                                   ["Wet grass has been failing for 12 h."], subject="wet_grass")
     [note] = sent(phones[PIXEL])
-    assert note["data"]["tag"] == f"mowdir_{entry.entry_id}_check_timeout_wet_grass"
+    assert re.fullmatch(r"mowdir_[0-9a-f]{10}_check_timeout_wet_grass", note["data"]["tag"])
     await ws_call(hass, hass_ws_client, "set_notify_settings", entry_id=entry.entry_id,
                   categories={"check_waits": False})
     await d.notifier.async_notice("check_waits", "check_timeout", "Check timed out", ["x"])
@@ -382,7 +391,7 @@ async def test_check_timeout_event_becomes_a_check_wait_notice(
     [note] = sent(phones[PIXEL])
     assert note["title"] == "Example Mower: Check timed out"
     assert note["message"] == "Wet grass is blocking the Schedule: rain_detected"
-    assert note["data"]["tag"] == f"mowdir_{entry.entry_id}_check_timeout_wet_grass"
+    assert re.fullmatch(r"mowdir_[0-9a-f]{10}_check_timeout_wet_grass", note["data"]["tag"])
 
 
 async def test_gate_urgent_resend_is_time_sensitive_but_the_first_warning_is_not(
@@ -403,3 +412,99 @@ async def test_gate_urgent_resend_is_time_sensitive_but_the_first_warning_is_not
     assert second["data"]["priority"] == "high"
     assert "come back through this Gate" in second["message"]
     assert first["data"]["tag"] == second["data"]["tag"]  # replaces the earlier one
+
+
+# -- push tags (#89) -----------------------------------------------------------------
+
+REAL_ID = "01M5QSXDJJG7AWR520WCC3Z314"  # a 26-character ULID, like real Gate, Run and Check ids
+
+
+async def test_every_push_tag_fits_the_64_character_limit(
+    hass, director, phones, freezer, hass_ws_client
+) -> None:
+    """Gate Prompts and the Run notices went out with 65 to 72 character tags and never
+    arrived on a real phone: measured live, 64 arrives and 65 does not. Fixtures with
+    short ids like "g1" hid it, so every kind is sent here with real-length ids."""
+    from custom_components.groundskeeper.core import RaisePrompt
+
+    entry, mower, _ = director
+    assert len(entry.entry_id) == 26  # a real-length entry id
+    d = async_get_director(hass, entry.entry_id)
+    msg = await ws_call(hass, hass_ws_client, "set_notify_settings", entry_id=entry.entry_id,
+                        categories={"run_started": True, "run_done": True})
+    assert msg["success"]
+
+    await run_to_done(hass, mower, freezer)  # run started, run done, schedule completed
+    await d.notifier.async_handle(
+        "check_timeout",
+        {"check_id": REAL_ID, "name": "Custom", "policy": "notify", "reasons": ["x"]},
+    )
+    for kind, actions in (
+        ("gate", ("opened", "closed")),
+        ("gate_close", ("closed",)),
+        ("run_failed", ("retry", "skip_plan", "abort")),
+        ("run_on_hold", ("resume", "end_run")),
+        ("is_raining", ("no", "yes")),
+        ("anomaly", ("dismiss",)),
+    ):
+        await d.dispatch(lambda now, k=kind, a=actions: RaisePrompt(
+            now, k, REAL_ID, list(a), {"gate_name": "Fence gate", "crossing": "out"}))
+        await hass.async_block_till_done()
+
+    titles = [n["title"] for n in sent(phones[PIXEL])]
+    assert len(titles) == 10, titles  # 3 run notices, 1 check wait, 6 prompts
+    too_long = {n["title"]: len(n["data"]["tag"]) for n in sent(phones[PIXEL])
+                if len(n["data"]["tag"]) > 64}
+    assert too_long == {}
+
+
+@pytest.fixture
+async def two_directors(hass, hass_storage, monkeypatch):
+    """Two loaded Mowers, each driven by its own RecordingMower."""
+    mowers = {}
+    monkeypatch.setitem(
+        adapters.ADAPTER_REGISTRY, "mammotion", lambda h, e: mowers[e.data[CONF_DEVICE]]
+    )
+    entries = []
+    for name, nick in (("Luba-A", "First"), ("Luba-B", "Second")):
+        _, device, _ = await make_mammotion_mower(hass, name=name, nick=nick)
+        holder = {}
+        mowers[device.id] = RecordingMower(hass_storage, lambda h=holder: h["key"])
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_DEVICE: device.id})
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        entry = result["result"]
+        holder["key"] = f"groundskeeper.{entry.entry_id}"
+        entries.append(entry)
+    await hass.async_block_till_done()
+    return entries
+
+
+async def test_a_tap_on_a_gone_prompt_reaches_its_own_mower_by_tag(hass, two_directors) -> None:
+    """With two Mowers, a tap on a Prompt that no longer exists is routed by the tag
+    the phone sends back: the quiet `prompt_ignored` event carries that Mower's entry."""
+    from custom_components.groundskeeper.core import RaisePrompt
+
+    first, second = two_directors
+    tags = {}
+    for entry in (first, second):
+        d = async_get_director(hass, entry.entry_id)
+        await d.dispatch(lambda now: RaisePrompt(
+            now, "run_failed", None, ["retry", "skip_plan", "abort"], {"reason": "error"}))
+        [prompt] = d.state["prompts"]
+        tags[entry.entry_id] = prompt["tag"]
+    assert tags[first.entry_id] != tags[second.entry_id]
+
+    events = async_capture_events(hass, EVENT_TYPE)
+    for entry in (second, first):  # the later Mower first, so list order cannot explain it
+        hass.bus.async_fire("mobile_app_notification_action", {
+            "action": "MOWDIR_01NOSUCHPROMPT_RETRY", "tag": tags[entry.entry_id]})
+        await hass.async_block_till_done()
+        assert types(events, "prompt_ignored")[-1]["config_entry_id"] == entry.entry_id
+
+    # a tag that belongs to neither Mower finds no owner
+    hass.bus.async_fire("mobile_app_notification_action", {
+        "action": "MOWDIR_01NOSUCHPROMPT_RETRY", "tag": "mowdir_nobody_run_failed"})
+    await hass.async_block_till_done()
+    assert "config_entry_id" not in types(events, "prompt_ignored")[-1]
