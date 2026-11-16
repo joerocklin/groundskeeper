@@ -51,6 +51,7 @@ from .checks import (
     work_window_start,
 )
 from .history import prune_runs, trim_samples
+from .push_tags import notification_tag
 from .crossings import (
     RUN_END_PROGRESS_PCT,
     SLOPE_WINDOW,
@@ -2122,7 +2123,7 @@ class _Machine:
             for p in self.s["prompts"]
             if not (p["kind"] == kind and p["subject"] == subject)
         ]
-        tag = f"mowdir_{self.env.entry_id}_{kind}" + (f"_{subject}" if subject else "")
+        tag = notification_tag(self.env.entry_id, kind, subject)
         prompt = {
             "prompt_id": self.env.new_id(),
             "kind": kind,

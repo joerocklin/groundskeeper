@@ -1,5 +1,7 @@
 """HA integration tests for the Prompt model (spec §12, §13.2, §13.4, ticket #17)."""
 
+import re
+
 import pytest
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import async_capture_events
@@ -46,7 +48,7 @@ async def test_run_failure_raises_failure_prompt_visible_everywhere(
     [prompt] = await list_prompts(hass, hass_ws_client, entry)
     assert sent["prompt_id"] == prompt["prompt_id"]
     assert prompt["kind"] == "run_failed"
-    assert prompt["tag"] == f"mowdir_{entry.entry_id}_run_failed"
+    assert re.fullmatch(r"mowdir_[0-9a-f]{10}_run_failed", prompt["tag"])
     assert prompt["actions"] == ["retry", "skip_plan", "abort"]
     assert prompt["status"] == "pending"
     assert prompt["next_reminder_at"] is not None

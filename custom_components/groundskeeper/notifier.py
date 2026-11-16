@@ -19,6 +19,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import EVENT_TYPE, PANEL_URL_PATH
 from .prompts import async_prompt_strings, render_content
+from .push_tags import notification_tag, tag_prefix
 
 if TYPE_CHECKING:
     from .runtime import Director
@@ -200,7 +201,7 @@ class Notifier:
             return
         strings = await async_prompt_strings(self._hass)
         entry = self._director.entry
-        tag = f"mowdir_{entry.entry_id}_{kind}" + (f"_{subject}" if subject else "")
+        tag = notification_tag(entry.entry_id, kind, subject)
         data = self._data(category, tag, self._panel_url("now"), strings, urgent=False)
         await self._broadcast(
             {"title": f"{entry.title}: {headline}", "message": "\n".join(lines), "data": data}
@@ -294,7 +295,7 @@ async def async_handle_action_event(hass: HomeAssistant, event: Event) -> None:
             return
     tag = str(event.data.get("tag", ""))
     owner = next(
-        (d for d in directors if tag.startswith(f"mowdir_{d.entry.entry_id}_")),
+        (d for d in directors if tag.startswith(tag_prefix(d.entry.entry_id))),
         directors[0] if len(directors) == 1 else None,
     )
     if owner is not None:
