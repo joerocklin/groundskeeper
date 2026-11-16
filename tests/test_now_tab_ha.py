@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 
+import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
 from custom_components.groundskeeper.adapter import Refused
@@ -65,6 +66,31 @@ async def test_running_view_shows_current_run_battery_and_height_check(
     assert "height_check" in cur and "angle_deg" in cur
     assert cur["zone_id"] == view["current_zone_id"]
     assert set(view["controls"]) == {"pause", "stop_now", "done_today"}
+
+
+async def test_running_view_carries_the_mowers_reported_progress(
+    hass, hass_ws_client, director, freezer
+) -> None:
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    mower.emit_snapshot(replace(MOWING, progress=45))
+    await hass.async_block_till_done()
+    view = await now(hass, hass_ws_client, entry)
+    assert view["current_run"]["progress"] == 45
+
+
+@pytest.mark.parametrize("reported", [0, None])
+async def test_running_view_keeps_zero_progress_distinct_from_none_reported(
+    hass, hass_ws_client, director, freezer, reported
+) -> None:
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    mower.emit_snapshot(replace(MOWING, progress=reported))
+    await hass.async_block_till_done()
+    view = await now(hass, hass_ws_client, entry)
+    assert view["current_run"]["progress"] == reported
 
 
 async def test_waiting_view_lists_failing_checks_with_reasons(

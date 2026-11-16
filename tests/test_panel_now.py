@@ -73,6 +73,36 @@ def test_status_card_shows_the_current_run_and_running_controls() -> None:
     assert 'data-ctl="retry"' not in html
 
 
+def test_status_card_shows_the_runs_percent_complete_apart_from_its_plan_position() -> None:
+    html = call("statusCardHtml", view(status="running", current_run=current(progress=45)), "km")
+    assert "<dt>Complete</dt><dd>45 %</dd>" in html
+    assert "<dt>Progress</dt><dd>Run 2 of 3</dd>" in html  # Plan position keeps its own row
+
+
+def test_status_card_shows_zero_percent_complete_rather_than_hiding_it() -> None:
+    html = call("statusCardHtml", view(status="running", current_run=current(progress=0)), "km")
+    assert "<dt>Complete</dt><dd>0 %</dd>" in html
+
+
+def test_status_card_omits_percent_complete_when_the_mower_reports_none() -> None:
+    html = call("statusCardHtml", view(status="running", current_run=current(progress=None)), "km")
+    assert "<dt>Complete</dt>" not in html
+    assert "Run 2 of 3" in html  # the rest of the card is unchanged
+    assert "64 %" in html
+
+
+def test_status_card_shows_no_percent_complete_without_an_active_run() -> None:
+    html = call("statusCardHtml", view(status="idle", current_run=None), "km")
+    assert "<dt>Complete</dt>" not in html
+
+
+def test_status_card_keeps_the_last_percent_beside_the_on_hold_notice() -> None:
+    html = call("statusCardHtml", view(status="running", current_run=current(
+        status="on_hold", on_hold_reason="external_pause", progress=62)), "km")
+    assert "<dt>Complete</dt><dd>62 %</dd>" in html
+    assert "On hold" in html
+
+
 def test_status_card_notes_a_requested_pause() -> None:
     html = call("statusCardHtml", view(status="running", current_run=current(),
                                        pause_requested=True, controls=["stop_now"]), "km")

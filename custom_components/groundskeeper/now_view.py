@@ -84,6 +84,7 @@ def now_view(director: Director) -> dict[str, Any]:
     current = None
     if active is not None:
         current = {**_run_row(active), "status": active["status"], "battery": battery,
+                   "progress": snap.get("progress"),
                    "height_check": active.get("height_check"),
                    "on_hold_reason": active.get("on_hold_reason")}
 
