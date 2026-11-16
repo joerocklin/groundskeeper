@@ -59,6 +59,7 @@ from .crossings import (
     should_warn,
 )
 from .gates import believed_open
+from .heights import round_to_grid
 from .adapter import (
     AdapterSignal,
     CommandKind,
@@ -88,7 +89,7 @@ DEADLINE_DONE_STABLE = "done_stable"
 DEADLINE_STOPPED_STABLE = "stopped_stable"
 DEADLINE_STALL = "stall"
 DEADLINE_HEIGHT_VERIFY = "height_verify"  # spec §7.6: window per `mowing` segment
-DEADLINE_HEIGHT_STABLE = "height_stable"  # spec §7.6: 60 s in tolerance
+DEADLINE_HEIGHT_STABLE = "height_stable"  # spec §7.6: 60 s on the rounded target
 DEFAULT_HEIGHT_VERIFY_WINDOW = timedelta(minutes=10)  # spec §7.6, §19
 DEFAULT_STALL_WINDOW = timedelta(minutes=60)  # spec §7.3, §19
 DEADLINE_PAUSE_STABLE = "pause_stable"
@@ -1718,6 +1719,23 @@ class _Machine:
         self._cancel_deadline(DEADLINE_HEIGHT_STABLE)
 
     def _evaluate_height(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        """Decide `height_check` from the readback (spec §7.6).
+
+        A readback is in tolerance only when it equals the Run's target
+        rounded onto the readback grid (`round_to_grid`, the rule the adapter
+        applies to the sensor), never when it is merely within a step of it:
+        the 80 mm resting height and 90 mm travel height must not verify a
+        76 or 87 mm target. Known residual: a target that itself rounds onto
+        80, 90 or 100 mm (79, 89, ...) cannot be told from a stuck lift by
+        height alone; that error of at most ~2 mm is accepted.
+
+        Accepted risk (owner decision, #86): this assumes the Mower rounds a
+        commanded height to the nearest readback step. Only two data points
+        support it (76 commanded, 75 read back; 79 commanded, 80 read back).
+        If it rounds differently a good Run fails `height_not_reached` and
+        pauses the Schedule: loud and recoverable, so there is deliberately no
+        fallback tolerance.
+        """
         verify = self.s["height_verify"]
         resolution = self.env.height_readback_resolution_mm
         if run.get("height_check") is not None or verify is None or resolution is None:
@@ -1740,7 +1758,7 @@ class _Machine:
         if usable:
             verify["seen"] = True
             target = run["settings"]["blade_height_mm"]
-            in_tolerance = abs(snapshot.blade_height_mm - target) <= resolution
+            in_tolerance = snapshot.blade_height_mm == round_to_grid(target, resolution)
         if self._stable(DEADLINE_HEIGHT_STABLE, in_tolerance):
             run["height_check"] = "verified"
             run["height_readback_mm"] = snapshot.blade_height_mm
