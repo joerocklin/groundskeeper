@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from homeassistant.components import persistent_notification
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -44,6 +45,11 @@ async def flush(hass, entry) -> None:
 
 async def read(hass, entry, sql="select kind, run_id, payload from records order by seq"):
     await flush(hass, entry)
+    return await read_file(hass, entry, sql)
+
+
+async def read_file(hass, entry, sql="select kind, run_id, payload from records order by seq"):
+    """Read the recording file itself, for when no live recording is left to flush."""
 
     def _read():
         con = sqlite3.connect(db_path(hass, entry))
@@ -284,3 +290,43 @@ async def test_unload_stops_writer_and_reload_appends_to_same_file(hass, directo
     await hass.async_block_till_done()
     events = [p["event"] for p in of_kind(await read(hass, entry), "lifecycle")]
     assert events.count("start") == 2 and "unload" in events
+
+
+# HA's one-shot listener is already gone by the time the stop handler runs, so a second
+# remove of it is logged by core as this ERROR (#88).
+UNKNOWN_LISTENER = "Unable to remove unknown job listener"
+
+
+async def test_ha_stop_closes_recording_without_logging_an_error(hass, director, caplog) -> None:
+    entry, _, _ = director
+
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+
+    assert UNKNOWN_LISTENER not in caplog.text
+    assert async_get_recording(hass, entry.entry_id) is None
+    lifecycle = of_kind(await read_file(hass, entry), "lifecycle")
+    assert lifecycle[-1] == {"event": "unload"}
+
+
+def stop_listeners(hass) -> int:
+    return hass.bus.async_listeners().get(EVENT_HOMEASSISTANT_STOP, 0)
+
+
+async def test_unloading_the_entry_removes_the_stop_listener(hass, director) -> None:
+    entry, _, _ = director
+    before = stop_listeners(hass)
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert stop_listeners(hass) == before - 1
+
+
+async def test_disabling_the_recording_removes_the_stop_listener(hass, director) -> None:
+    entry, _, _ = director
+    before = stop_listeners(hass)
+
+    await async_get_director(hass, entry.entry_id).async_set_recording(False)
+
+    assert stop_listeners(hass) == before - 1

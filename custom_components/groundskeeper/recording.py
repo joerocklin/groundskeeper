@@ -141,6 +141,9 @@ class DebugRecording:
             _LOGGER.debug("recording meta refresh failed", exc_info=True)
 
     async def _on_stop(self, _event: Event) -> None:
+        # HA's one-shot wrapper removed this listener before calling it, so there is
+        # nothing left to unsubscribe; calling the handle again logs an ERROR (#88).
+        self._unsub_stop = None
         await self.async_stop()
 
     async def async_stop(self, event: str = "unload") -> None:
