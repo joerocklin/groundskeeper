@@ -11,6 +11,7 @@ from custom_components.groundskeeper.heights import (
     derive_heights,
     from_display,
     height_input,
+    round_to_grid,
     to_display,
 )
 
@@ -161,3 +162,30 @@ def test_height_input_outside_limits_rejected():
 def test_unknown_system_rejected():
     with pytest.raises(ValueError):
         to_display("height", 79, "furlongs")
+
+
+@pytest.mark.parametrize(
+    "mm,expected",
+    [
+        (70, 70),  # on the grid
+        (76, 75),
+        (79, 80),
+        (87, 85),
+        (88, 90),
+        (96, 95),
+        (99.9, 100),
+        (79.99984, 80),  # 3.1496 in, the 10-18 readback, converted to mm
+        (62.5, 60),  # tie: exactly between 60 and 65, goes to the even multiple (60 = 12 x 5)
+        (67.5, 70),  # tie: to the even multiple (70 = 14 x 5)
+    ],
+)
+def test_round_to_grid_5mm(mm, expected):
+    assert round_to_grid(mm, 5) == expected
+    assert isinstance(round_to_grid(mm, 5), int)
+
+
+def test_round_to_grid_is_the_nearest_multiple_of_any_resolution():
+    assert round_to_grid(7, 2) == 8  # 3.5 steps: tie goes to the even step count (4)
+    assert round_to_grid(5, 2) == 4  # 2.5 steps: tie goes to the even step count (2)
+    assert round_to_grid(14, 3) == 15
+    assert round_to_grid(13, 3) == 12

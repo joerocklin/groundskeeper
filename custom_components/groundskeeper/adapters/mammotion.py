@@ -64,7 +64,7 @@ from ..adapter import (
     ZoneTaskAborted,
     ZoneTaskComplete,
 )
-from ..heights import from_display
+from ..heights import from_display, round_to_grid
 from .mammotion_catalogue import MammotionCatalogue
 
 MAMMOTION = "mammotion"
@@ -120,6 +120,8 @@ _INCH_UNITS = frozenset({"in", "inches", '"'})
 _RAIN_STOP_CODE = 1003
 
 # Readback granularity of the height sensor, mm (spec §3.6, live-verified).
+# The core rounds a Run's target onto the same grid (`heights.round_to_grid`)
+# before comparing it with the readback.
 _HEIGHT_READBACK_MM = 5
 
 # The app and the device both refuse a start below 15 % (error 2700).
@@ -445,7 +447,7 @@ class MammotionAdapter:
         unit = str(state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) or "").lower()
         if unit in _INCH_UNITS:
             mm = from_display("height", value, "us_customary")
-            return int(round(mm / _HEIGHT_READBACK_MM) * _HEIGHT_READBACK_MM)
+            return round_to_grid(mm, _HEIGHT_READBACK_MM)
         return int(round(value))
 
     # -- observing (decision A1) --------------------------------------------

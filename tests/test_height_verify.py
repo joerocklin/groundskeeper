@@ -75,10 +75,56 @@ def test_in_tolerance_for_60s_verifies_and_records_readback():
     assert run_status(state) == ["mowing"]
 
 
-def test_one_resolution_step_off_is_still_in_tolerance():
+def test_one_resolution_step_off_is_not_in_tolerance_but_an_exact_match_is():
+    # The readback must equal the target rounded onto the readback grid; being
+    # one resolution step away is not good enough (issue #86).
     state, _ = enter_mowing(80)
-    state, _ = feed(state, [(100, 75, True), (161, 65, True)])
+    state, _ = feed(state, [(100, 75, True), (161, 75, True), (200, 65, True), (261, 65, True)])
+    assert run_of(state).get("height_check") is None  # 70 mm target, 75 and 65 held
+    state, _ = feed(state, [(300, 70, True), (361, 70, True)])
     assert run_of(state)["height_check"] == "verified"
+
+
+def set_target(state, mm):
+    state["state"]["runs"][0]["settings"]["blade_height_mm"] = mm
+    return state
+
+
+# (target mm, steady readback mm, verifies): the 5 mm grid from issue #86.
+# The Mower rests at 80 (docked/paused), travels at 90 and parks at 100.
+GRID_CASES = [
+    (76, 75, True),   # 76 rounds to 75
+    (76, 80, False),  # the resting height must not pass for 76
+    (87, 85, True),   # 87 rounds to 85
+    (87, 90, False),  # travel height must not pass for 87
+    (96, 95, True),   # 96 rounds to 95
+    (96, 100, False),  # resting height must not pass for 96
+    (79, 80, True),   # 79 rounds to 80: the 10-18 Run stays verified
+    (70, 70, True),   # on the grid: only the exact readback
+    (70, 65, False),
+    (70, 75, False),
+]
+
+
+@pytest.mark.parametrize("target,readback,verifies", GRID_CASES)
+def test_steady_readback_verifies_only_on_the_rounded_target(target, readback, verifies):
+    state = set_target(starting_state(), target)
+    state, _ = step(state, SnapshotReceived(at(70), reading(readback)), HENV)
+    state, _ = feed(state, [(100, readback, True), (161, readback, True)])
+    assert run_of(state).get("height_check") == ("verified" if verifies else None)
+
+
+@pytest.mark.parametrize(
+    "target,readback", [(t, r) for t, r, verifies in GRID_CASES if not verifies]
+)
+def test_a_stuck_lift_off_the_rounded_target_fails_height_not_reached(target, readback):
+    state = set_target(starting_state(), target)
+    state, _ = step(state, SnapshotReceived(at(70), reading(readback)), HENV)
+    state, fx = feed(state, [(100, readback, True), (400, readback, True), (671, readback, True)])
+    run = run_of(state)
+    assert run["status"] == "failed" and run["reason"] == "height_not_reached"
+    assert run["height_check"] == "not_reached"
+    assert any(type(e).__name__ == "AbortRunEffect" for e in fx)
 
 
 def test_not_held_60s_is_not_verified_and_leaving_tolerance_resets():
@@ -146,8 +192,9 @@ def test_2748_swing_80_100_fails_height_not_reached():
     assert any(type(e).__name__ == "AbortRunEffect" for e in fx)
 
 
-def test_10_18_readback_stuck_at_80_for_a_79_command_is_within_one_step():
-    # 79 mm commanded on 10-18; readback sat at 80 mm (3.1496 in).
+def test_10_18_readback_stuck_at_80_for_a_79_command_verifies():
+    # 79 mm commanded on 10-18; readback sat at 80 mm (3.1496 in). 79 rounds
+    # to 80 on the 5 mm grid, so this stays verified.
     state = starting_state()
     state["state"]["runs"][0]["settings"]["blade_height_mm"] = 79
     state, _ = step(state, SnapshotReceived(at(70), reading(80)), HENV)

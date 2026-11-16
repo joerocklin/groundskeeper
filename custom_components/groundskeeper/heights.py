@@ -66,6 +66,22 @@ def round_to_step(mm: float, limits: HeightLimits) -> float:
     return _num(round(limits.min_mm + n * limits.step_mm, 6))
 
 
+def round_to_grid(mm: float, resolution: int) -> int:
+    """Nearest multiple of `resolution` mm: the readback grid (spec §3.6, §7.6).
+
+    The one definition of the grid: the adapter rounds the sensor's readback
+    with it, and the reducer rounds a Run's target with it before comparing,
+    so a readback verifies a Run only when it equals the rounded target.
+
+    The grid is anchored at 0 mm (unlike `round_to_step`, which anchors at the
+    Mower's minimum height). A value exactly halfway between two multiples
+    goes to the even multiple-count (Python `round`): 62.5 -> 60, 67.5 -> 70
+    at 5 mm. Integer mm targets never tie at 5 mm, so this only shows for
+    other resolutions.
+    """
+    return round(mm / resolution) * resolution
+
+
 def _check_limits(name: str, mm: float, limits: HeightLimits) -> None:
     if not (limits.min_mm - _EPS <= mm <= limits.max_mm + _EPS):
         raise HeightError(
