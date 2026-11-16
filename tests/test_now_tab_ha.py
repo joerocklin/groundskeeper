@@ -67,6 +67,18 @@ async def test_running_view_shows_current_run_battery_and_height_check(
     assert set(view["controls"]) == {"pause", "stop_now", "done_today"}
 
 
+async def test_running_view_carries_the_mowers_reported_progress(
+    hass, hass_ws_client, director, freezer
+) -> None:
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    mower.emit_snapshot(replace(MOWING, progress=45))
+    await hass.async_block_till_done()
+    view = await now(hass, hass_ws_client, entry)
+    assert view["current_run"]["progress"] == 45
+
+
 async def test_waiting_view_lists_failing_checks_with_reasons(
     hass, hass_ws_client, director
 ) -> None:

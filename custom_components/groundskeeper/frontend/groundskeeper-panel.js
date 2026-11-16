@@ -609,6 +609,7 @@ function statusCardHtml(view, lengthUnit) {
       <dt>Height</dt><dd>${fmtHeight(c.height_mm, lengthUnit)}</dd>
       <dt>Angle</dt><dd>${fmtDeg(c.angle_deg)}</dd>
       <dt>Progress</dt><dd>Run ${esc(c.n)} of ${esc(c.of)}</dd>
+      ${c.progress == null ? '' : `<dt>Complete</dt><dd>${esc(c.progress)} %</dd>`}
       <dt>Battery</dt><dd>${c.battery == null ? 'unknown' : `${esc(c.battery)} %`}</dd>
       <dt>Height check</dt><dd>${esc(String(c.height_check || 'pending').replace(/_/g, ' '))}</dd></dl>`;
     if (c.status === 'on_hold') {
