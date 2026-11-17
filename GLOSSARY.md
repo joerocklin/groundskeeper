@@ -12,6 +12,14 @@ _Avoid_: Device, robot
 A mowable area known to the Mower.
 _Avoid_: Area, yard, region
 
+**No-go area**:
+A region inside one Zone that the Mower avoids, as drawn in the Mower's own map.
+_Avoid_: No-go zone (a Zone is a mowable area), obstacle (Mammotion's term), exclusion
+
+**No-go laps**:
+The laps a Mower makes around each No-go area of a Zone, a Run setting; on a Zone with no No-go areas it has no effect.
+_Avoid_: No-go perimeter, obstacle laps (Mammotion's name for it), perimeter laps (laps around the Zone's own edge)
+
 **Zone bearing**:
 The compass bearing of a Zone's long axis, against which Run path angles are expressed.
 _Avoid_: Orientation, heading
