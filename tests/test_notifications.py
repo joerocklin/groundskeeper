@@ -482,6 +482,10 @@ async def test_the_close_prompt_of_a_manual_gate_has_a_left_open_button_that_ans
 ) -> None:
     from custom_components.groundskeeper.core import RaisePrompt
 
+    from custom_components.groundskeeper.prompts import async_prompt_strings
+
+    # The button falls back to a capitalised action name, so check the real string.
+    assert (await async_prompt_strings(hass))["prompt_action_left_open"] == "Left open"
     entry, _, _ = director
     d = async_get_director(hass, entry.entry_id)
     ctx = {"gate_id": "g1", "gate_name": "Fence gate"}
