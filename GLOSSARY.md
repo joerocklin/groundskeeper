@@ -25,7 +25,7 @@ A physical barrier on one or more Channels that must be open for the Mower to pa
 _Avoid_: Door, passage, fence
 
 **Run**:
-One full mow of a Zone at a specific blade height, path angle (relative to the Zone bearing), speed, and other mow settings; it carries its own status: pending, on hold, done, failed, skipped, or cancelled.
+One full mow of a Zone at a specific blade height, path angle (relative to the Zone bearing), Spacing, speed, and other mow settings; it carries its own status: pending, on hold, done, failed, skipped, or cancelled.
 _Avoid_: Pass, job, task, attempt
 
 **On hold**:
@@ -55,6 +55,10 @@ _Avoid_: Angle window, angle limits
 **Crossing angle**:
 The minimum angle between the paths of one Run and the next, so successive Runs cut across each other's tracks.
 _Avoid_: Included angle, double-grid angle (Mammotion's second-pass angle within one Run)
+
+**Spacing**:
+The distance between adjacent parallel paths within a Run, a Run setting the Mower limits to a range.
+_Avoid_: Path width (the cutting width of the physical Mower, which Spacing is not), channel width (Mammotion's name for it)
 
 **Schedule**:
 The order in which a Mower performs Runs, possibly interleaving Runs from several Plans; Runs within a Plan always keep the Plan's order. A Schedule says what comes next, never when.
