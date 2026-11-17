@@ -116,7 +116,7 @@ async def test_resume_after_stop_now_mows_the_same_run_again(hass, director, fre
 
 
 @pytest.mark.parametrize(
-    "service", ["pause", "stop_now", "resume", "retry_run", "skip_plan"]
+    "service", ["pause", "stop_now", "resume", "retry_run", "skip_plan", "start_now"]
 )
 async def test_controls_raise_when_they_do_not_apply(hass, director, service) -> None:
     with pytest.raises(ServiceValidationError):
@@ -174,7 +174,7 @@ async def test_skip_plan_without_pause_requested_waits_for_next_plan(
 
 async def test_buttons_exist_and_drive_the_schedule(hass, director, freezer) -> None:
     _, mower, _ = director
-    for name in ("start", "pause", "resume", "stop_now", "cancel"):
+    for name in ("start", "start_now", "pause", "resume", "stop_now", "cancel"):
         assert state_of(hass, f"button.example_mower_{name}") is not None
     await add_plan(hass)
     await press(hass, "start")

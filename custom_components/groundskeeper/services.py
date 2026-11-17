@@ -254,6 +254,7 @@ def async_register_services(hass: HomeAssistant) -> None:
     )
     for name, action in (
         ("start", controls.async_start),
+        ("start_now", controls.async_start_now),
         ("pause", controls.async_pause),
         ("stop_now", controls.async_stop_now),
         ("resume", controls.async_resume),

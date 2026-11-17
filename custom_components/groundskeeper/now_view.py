@@ -7,7 +7,10 @@ call, so the panel can never disagree with them about semantics.
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+from homeassistant.util import dt as dt_util
 
 from . import controls
 from .core import (
@@ -17,10 +20,12 @@ from .core import (
     active_run,
     move_blocker,
     pending_runs,
+    stability_window_ends,
 )
 from .runtime import Director
 
 CONTROLS = {
+    "start_now": controls.async_start_now,  # skip the rest of the settling wait
     "pause": controls.async_pause,  # Pause after Run
     "resume": controls.async_resume,
     "stop_now": controls.async_stop_now,
@@ -46,9 +51,24 @@ def _run_row(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _starting_in_s(director: Director) -> int | None:
+    """Whole seconds left of the open settling window, or None when none is open.
+
+    Sent as a duration, not a deadline, so the panel counts down from the
+    moment it receives the view and never compares its clock with the server's.
+    """
+    ends = stability_window_ends(director.state)
+    if ends is None:
+        return None
+    return max(0, math.ceil((ends - dt_util.utcnow()).total_seconds()))
+
+
 def _available_controls(director: Director, status: str, failed: bool,
-                        active: dict[str, Any] | None) -> list[str]:
+                        active: dict[str, Any] | None,
+                        window_open: bool = False) -> list[str]:
     out: list[str] = []
+    if window_open:
+        out.append("start_now")
     if status in (ScheduleStatus.WAITING, ScheduleStatus.RUNNING):
         out.append("pause")
     if active is not None:
@@ -102,8 +122,10 @@ def now_view(director: Director) -> dict[str, Any]:
             "can_down": i < len(pending) - 1 and move_blocker(state, run["id"], i + 1) is None,
         })
 
+    starting_in_s = _starting_in_s(director)
     return {
         "status": status,
+        "starting_in_s": starting_in_s,
         "pause_requested": bool(state["schedule"].get("pause_requested")),
         "paused_reason": state["schedule"]["reason"] if status == ScheduleStatus.PAUSED else None,
         "battery": battery,
@@ -120,5 +142,7 @@ def now_view(director: Director) -> dict[str, Any]:
                        else "ok" if status == ScheduleStatus.WAITING else "idle")}
             for c in director.checks if c["enabled"]
         ],
-        "controls": _available_controls(director, status, failed_run is not None, active),
+        "controls": _available_controls(
+            director, status, failed_run is not None, active,
+            window_open=starting_in_s is not None),
     }

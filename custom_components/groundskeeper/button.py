@@ -1,4 +1,4 @@
-"""Start, Pause, Resume, Stop now and Cancel buttons (spec §13.5)."""
+"""Start, Start now, Pause, Resume, Stop now and Cancel buttons (spec §13.5)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from .runtime import Director, async_get_director
 
 BUTTONS: dict[str, Callable[[Director], Awaitable[None]]] = {
     "start": controls.async_start,
+    "start_now": controls.async_start_now,
     "pause": controls.async_pause,
     "resume": controls.async_resume,
     "stop_now": controls.async_stop_now,
@@ -26,7 +27,7 @@ BUTTONS: dict[str, Callable[[Director], Awaitable[None]]] = {
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Add the five Schedule control buttons for one Mower."""
+    """Add the six Schedule control buttons for one Mower."""
     director = async_get_director(hass, entry.entry_id)
     if director is None:
         return

@@ -12,7 +12,7 @@ from homeassistant.const import ATTR_CONFIG_ENTRY_ID  # noqa: F401 - re-export f
 from homeassistant.exceptions import ServiceValidationError
 
 from .const import DOMAIN
-from .core import RunStatus, ScheduleStatus, active_run, next_run
+from .core import RunStatus, ScheduleStatus, active_run, next_run, stability_window_ends
 from .runtime import Director
 
 
@@ -44,6 +44,38 @@ async def async_start(director: Director) -> None:
         raise fail("schedule_already_active")
     _check_can_leave_paused(director)
     await director.async_start()
+
+
+def _start_now_refusal(director: Director) -> ServiceValidationError | None:
+    """Why Start now cannot apply right now, or None (issue #99).
+
+    It only skips the settling wait: a failing Check (a closed Gate and the
+    Work hours are Checks) still holds the Run, so it is named, never skipped.
+    """
+    if _status(director) != ScheduleStatus.WAITING:
+        return fail("start_now_not_waiting")
+    failing = director.state["waiting_on"]
+    if failing:
+        names = {c["id"]: c["name"] for c in director.checks}
+        why = "; ".join(
+            f"{names.get(w['check'], w['check'])} ({str(w['reason']).replace('_', ' ')})"
+            for w in failing
+        )
+        return fail("start_now_checks_failing", checks=why)
+    if stability_window_ends(director.state) is None:
+        return fail("start_now_window_closed")
+    return None
+
+
+async def async_start_now(director: Director) -> None:
+    """Skip what is left of the settling wait and start the head Run."""
+    if (refusal := _start_now_refusal(director)) is not None:
+        raise refusal
+    await director.async_start_now()
+    # The reducer reads the Checks again at this moment. Still waiting means
+    # one of them failed since the last evaluation: say which.
+    if _status(director) == ScheduleStatus.WAITING:
+        raise _start_now_refusal(director) or fail("start_now_window_closed")
 
 
 async def async_resume(director: Director) -> None:

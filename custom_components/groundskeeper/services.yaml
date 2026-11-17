@@ -90,6 +90,14 @@ start:
         config_entry:
           integration: groundskeeper
 
+start_now:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: groundskeeper
+
 cancel:
   fields:
     config_entry_id:
