@@ -108,6 +108,71 @@ async def test_waiting_view_lists_failing_checks_with_reasons(
     assert "pause" in view["controls"]
 
 
+async def test_open_window_reports_the_seconds_left_and_offers_start_now(
+    hass, hass_ws_client, director, freezer
+) -> None:
+    entry, _, _ = director
+    await add_plan(hass, start=True)
+    view = await now(hass, hass_ws_client, entry)
+    assert view["status"] == "waiting" and view["waiting_on"] == []
+    assert view["starting_in_s"] == 60
+    assert "start_now" in view["controls"]
+    await advance(hass, freezer, 21.5)
+    view = await now(hass, hass_ws_client, entry)
+    assert view["starting_in_s"] == 39  # whole seconds, rounded up from 38.5
+    assert "start_now" in view["controls"]
+
+
+async def test_no_countdown_and_no_start_now_while_a_check_fails(
+    hass, hass_ws_client, director
+) -> None:
+    entry, mower, _ = director
+    mower.emit_snapshot(replace(mower.snapshot, battery=1))
+    await add_plan(hass, start=True)
+    view = await now(hass, hass_ws_client, entry)
+    assert view["waiting_on"]
+    assert view["starting_in_s"] is None
+    assert "start_now" not in view["controls"]
+
+
+async def test_no_countdown_and_no_start_now_outside_the_waiting_status(
+    hass, hass_ws_client, director, freezer
+) -> None:
+    entry, mower, _ = director
+    idle = await now(hass, hass_ws_client, entry)
+    assert idle["starting_in_s"] is None and "start_now" not in idle["controls"]
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    mower.emit_snapshot(MOWING)
+    await hass.async_block_till_done()
+    running = await now(hass, hass_ws_client, entry)
+    assert running["status"] == "running"
+    assert running["starting_in_s"] is None and "start_now" not in running["controls"]
+
+
+async def test_run_control_start_now_starts_the_run_once(
+    hass, hass_ws_client, director
+) -> None:
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    msg = await ws(hass, hass_ws_client, entry, "run_control", action="start_now")
+    assert msg["success"], msg
+    assert [c[0] for c in mower.commands] == ["start_run"]
+    assert state_of(hass, "sensor.example_mower_schedule").state == "running"
+
+
+async def test_run_control_start_now_is_refused_with_the_reason_while_a_check_fails(
+    hass, hass_ws_client, director
+) -> None:
+    entry, mower, _ = director
+    mower.emit_snapshot(replace(mower.snapshot, battery=1))
+    await add_plan(hass, start=True)
+    msg = await ws(hass, hass_ws_client, entry, "run_control", action="start_now")
+    assert not msg["success"] and msg["error"]["code"] == "start_now_checks_failing"
+    assert "Mower ready" in msg["error"]["message"]
+    assert mower.commands == []
+
+
 async def test_failed_run_offers_retry_skip_plan_and_abort(
     hass, hass_ws_client, director, freezer
 ) -> None:

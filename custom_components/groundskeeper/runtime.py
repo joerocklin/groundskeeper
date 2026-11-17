@@ -104,6 +104,7 @@ from .core import (
     SignalReceived,
     SnapshotReceived,
     StartRunEffect,
+    StartNow,
     StartSchedule,
     TimerFired,
     WetGrassDoneToday,
@@ -1428,6 +1429,9 @@ class Director:
 
     async def async_start(self) -> None:
         await self.dispatch(StartSchedule)
+
+    async def async_start_now(self) -> None:
+        await self.dispatch(StartNow)
 
     async def async_cancel(self) -> None:
         await self.dispatch(CancelSchedule)

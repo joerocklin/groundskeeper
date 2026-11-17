@@ -569,7 +569,7 @@ const errMessage = (err) => {
 
 const STATUS_LABEL = { idle: 'Idle', waiting: 'Waiting', running: 'Running', paused: 'Paused' };
 const CTL_LABEL = {
-  pause: 'Pause after Run', stop_now: 'Stop now', done_today: 'Done for today',
+  start_now: 'Start now', pause: 'Pause after Run', stop_now: 'Stop now', done_today: 'Done for today',
   resume: 'Resume', retry: 'Retry', skip_plan: 'Skip Plan', abort: 'Abort',
   resume_run: 'Resume Run', end_run: 'End Run',
 };
@@ -600,7 +600,18 @@ function nowMapOpts(view, highlightRunId) {
 const ctlButton = (ctl, extra = '') =>
   `<button data-ctl="${ctl}"${extra}${ctl === 'abort' || ctl === 'stop_now' ? ' class="danger"' : ''}>${CTL_LABEL[ctl]}</button>`;
 
-function statusCardHtml(view, lengthUnit) {
+// Whole seconds left of the settling window `elapsedS` seconds after the view
+// arrived, or null when no window is open. The view carries a duration, not a
+// deadline, so the browser's clock is never compared with the server's.
+function secondsLeft(view, elapsedS) {
+  if (view.starting_in_s == null) return null;
+  return Math.max(0, Math.ceil(view.starting_in_s - (elapsedS || 0)));
+}
+
+const startingText = (left) => (left > 0
+  ? `All Checks passing. Starting in ${left} s.` : 'All Checks passing. Starting now.');
+
+function statusCardHtml(view, lengthUnit, elapsedS = 0) {
   const c = view.current_run;
   const has = (ctl) => (view.controls || []).includes(ctl);
   let body = '';
@@ -618,9 +629,14 @@ function statusCardHtml(view, lengthUnit) {
   }
   if (view.status === 'waiting') {
     const w = view.waiting_on || [];
-    body += w.length
-      ? `<p>Waiting for:</p><ul class="waiting">${w.map((x) => `<li><strong>${esc(x.name)}</strong>: ${esc(reasonText(x.reason))}</li>`).join('')}</ul>`
-      : '<p>Waiting for the Mower to settle before starting.</p>';
+    const left = secondsLeft(view, elapsedS);
+    if (w.length) {
+      body += `<p>Waiting for:</p><ul class="waiting">${w.map((x) => `<li><strong>${esc(x.name)}</strong>: ${esc(reasonText(x.reason))}</li>`).join('')}</ul>`;
+    } else if (left != null) {
+      body += `<p id="starting">${startingText(left)}</p>`;
+    } else {
+      body += '<p>Waiting for the Mower to report its state.</p>';
+    }
   }
   if (view.status === 'paused' && view.failure) {
     const f = view.failure;
@@ -629,7 +645,7 @@ function statusCardHtml(view, lengthUnit) {
     body += `<p>Paused: ${esc(reasonText(view.paused_reason))}.</p>`;
   }
   if (view.pause_requested && view.status !== 'paused') body += '<p class="hint">Pausing after this Run.</p>';
-  const order = ['pause', 'stop_now', 'resume_run', 'end_run', 'retry', 'skip_plan', 'resume', 'abort', 'done_today'];
+  const order = ['start_now', 'pause', 'stop_now', 'resume_run', 'end_run', 'retry', 'skip_plan', 'resume', 'abort', 'done_today'];
   const btns = order.filter(has).map((ctl) => ctlButton(ctl)).join('');
   return `<div class="now-status"><div class="state">${esc(STATUS_LABEL[view.status] || view.status)}</div>${body}
     ${btns ? `<div class="btns">${btns}</div>` : ''}</div>`;
@@ -1057,6 +1073,8 @@ class GroundskeeperPanel extends HTMLElement {
     this._started = false;
     // Now tab state (spec §16.2)
     this._now = null; // latest subscribe_now view
+    this._nowAt = 0; // Date.now() when that view arrived: the countdown runs from here
+    this._countdownTimer = null; // ticks the settling countdown in place
     this._prompts = []; // latest subscribe_prompts list
     this._unsubNow = null;
     this._unsubPrompts = null;
@@ -1077,7 +1095,7 @@ class GroundskeeperPanel extends HTMLElement {
   set panel(v) { this._panel = v; }
 
   connectedCallback() { this._render(); if (this._hass) this._start(); }
-  disconnectedCallback() { this._unsubscribe(); this._started = false; }
+  disconnectedCallback() { this._unsubscribe(); this._stopCountdown(); this._started = false; }
 
   async _start() {
     if (this._started) return;
@@ -1505,6 +1523,7 @@ class GroundskeeperPanel extends HTMLElement {
     const conn = this._hass.connection;
     this._unsubNow = await conn.subscribeMessage((view) => {
       this._now = view;
+      this._nowAt = Date.now();
       // The map needs Gate states: refresh Zones at most every 10 s of pushes.
       if (this._tab === 'now' && Date.now() - this._nowZonesAt > 10000) {
         this._nowZonesAt = Date.now();
@@ -1516,6 +1535,28 @@ class GroundskeeperPanel extends HTMLElement {
       this._prompts = ev.prompts || [];
       this._render();
     }, { type: 'groundskeeper/subscribe_prompts', entry_id: this._entryId });
+  }
+
+  // The settling countdown ticks by rewriting its own line, never by re-rendering:
+  // a re-render each second would drop focus and half-typed input elsewhere.
+  _elapsedS() { return (Date.now() - this._nowAt) / 1000; }
+
+  _tickCountdown() {
+    const el = this.shadowRoot.querySelector('#starting');
+    if (el && this._now) el.textContent = startingText(secondsLeft(this._now, this._elapsedS()));
+  }
+
+  _syncCountdown() {
+    const open = this._tab === 'now' && this._now && this._now.starting_in_s != null;
+    if (open && !this._countdownTimer) {
+      this._countdownTimer = setInterval(() => this._tickCountdown(), 1000);
+    } else if (!open) {
+      this._stopCountdown();
+    }
+  }
+
+  _stopCountdown() {
+    if (this._countdownTimer) { clearInterval(this._countdownTimer); this._countdownTimer = null; }
   }
 
   _lengthUnit() {
@@ -1545,7 +1586,7 @@ class GroundskeeperPanel extends HTMLElement {
     const map = renderMap(zones, channels, { gates: this._zoneView.gates || [], ...nowMapOpts(view, this._runId) });
     return `<section class="card"><h2>Map</h2>${map}</section>
       <div><section class="card"><h2>Status</h2>${this._notice ? `<p class="warn" id="notice">${esc(this._notice)}</p>` : ''}
-        ${statusCardHtml(view, unit)}</section>
+        ${statusCardHtml(view, unit, this._elapsedS())}</section>
       ${this._prompts.length ? `<section class="card"><h2>Needs your answer</h2>${promptCardsHtml(this._prompts)}</section>` : ''}
       <section class="card"><h2>Up next</h2>${upNextHtml(view, unit, this._runId)}</section>
       <section class="card"><h2>Checks</h2>${checkPillsHtml(view.checks)}</section></div>
@@ -1748,6 +1789,7 @@ class GroundskeeperPanel extends HTMLElement {
     if (this._tab === 'schedule') this._wireSchedule(this.shadowRoot);
     if (this._tab === 'checks') this._wireChecks(this.shadowRoot);
     if (this._tab === 'settings') this._wireSettings(this.shadowRoot);
+    this._syncCountdown();
   }
 }
 

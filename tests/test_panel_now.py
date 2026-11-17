@@ -119,6 +119,50 @@ def test_waiting_status_lists_failing_checks_with_readable_reasons() -> None:
     assert "Work hours" in html and "outside work hours" in html.lower()
 
 
+def window_view(**kw):
+    return view(status="waiting", next_run=run(), up_next=[run()], starting_in_s=38,
+                controls=["start_now", "pause"], **kw)
+
+
+def test_open_window_says_all_checks_pass_and_counts_down_to_the_start() -> None:
+    html = call("statusCardHtml", window_view(), "km")
+    assert 'id="starting">All Checks passing. Starting in 38 s.</p>' in html
+    assert "settle" not in html
+    assert "Waiting for:" not in html
+
+
+def test_the_countdown_runs_from_when_the_view_arrived_and_never_goes_below_zero() -> None:
+    assert "Starting in 28 s." in call("statusCardHtml", window_view(), "km", 10)
+    assert "Starting in 38 s." in call("statusCardHtml", window_view(), "km", 0.4)
+    late = call("statusCardHtml", window_view(), "km", 61)
+    assert "All Checks passing. Starting now." in late and "Starting in" not in late
+    assert call("secondsLeft", {"starting_in_s": 38}, 10) == 28
+    assert call("secondsLeft", {"starting_in_s": 38}, 99) == 0
+    assert call("secondsLeft", {"starting_in_s": None}, 0) is None
+    assert call("secondsLeft", {}, 0) is None
+
+
+def test_start_now_button_shows_only_when_the_view_offers_it() -> None:
+    html = call("statusCardHtml", window_view(), "km")
+    assert 'data-ctl="start_now"' in html and "Start now" in html
+    without = call("statusCardHtml", view(status="waiting", starting_in_s=38, controls=["pause"]), "km")
+    assert 'data-ctl="start_now"' not in without
+
+
+def test_failing_checks_keep_their_reasons_and_offer_no_start_now() -> None:
+    v = view(status="waiting", next_run=run(), up_next=[run()], controls=["pause"],
+             starting_in_s=None,
+             waiting_on=[{"check": "gate_open", "name": "Gate open", "reason": "gate_closed"}])
+    html = call("statusCardHtml", v, "km")
+    assert "Waiting for:" in html and "Gate open" in html
+    assert "All Checks passing" not in html and 'data-ctl="start_now"' not in html
+
+
+def test_waiting_without_a_window_or_failing_checks_does_not_claim_checks_pass() -> None:
+    html = call("statusCardHtml", view(status="waiting", starting_in_s=None, controls=["pause"]), "km")
+    assert "All Checks passing" not in html and "Waiting for" in html
+
+
 def test_failed_run_shows_retry_skip_plan_and_abort() -> None:
     v = view(status="paused", paused_reason="start_failed",
              failure={**run(), "reason": "start_failed"},
@@ -235,3 +279,22 @@ def test_panel_renders_the_now_tab_from_a_view() -> None:
     assert "Example Mower: Run failed" in out and "Up next" in out and "Checks" in out
     assert 'role="dialog"' in out  # edit sheet open
     assert 'aria-selected="true">Now' in out
+
+
+def test_the_countdown_ticks_in_place_and_stops_when_the_window_closes() -> None:
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from tests.test_panel_zones import SRC
+
+    out = json.loads(subprocess.run(
+        ["node", str(Path(__file__).with_name("panel_countdown_smoke.js")), str(SRC)],
+        check=True, capture_output=True, text=True).stdout)
+    assert out["rendered"] is True
+    assert out["timersWhileOpen"] == 1 and out["timersAfterRepush"] == 1  # one timer, not one per push
+    assert out["afterTenSeconds"] == "All Checks passing. Starting in 28 s."
+    assert out["afterTheWindow"] == "All Checks passing. Starting now."
+    assert out["timersWhileFailing"] == 0  # a failing Check closes the window
+    assert out["timersOnAnotherTab"] == 0
+    assert out["timersAfterDisconnect"] == 0

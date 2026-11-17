@@ -181,6 +181,15 @@
     "nothing_to_start": {
       "message": "There are no pending Runs to start."
     },
+    "start_now_not_waiting": {
+      "message": "The Schedule is not waiting to start a Run, so there is nothing to start now."
+    },
+    "start_now_checks_failing": {
+      "message": "Not starting now: these Checks are not passing: {checks}. Start now only skips the settling wait, never a failing Check."
+    },
+    "start_now_window_closed": {
+      "message": "Not starting now: the Mower has not been checked yet, so there is no settling wait to skip. Try again in a moment."
+    },
     "nothing_to_cancel": {
       "message": "The Schedule is already idle and empty."
     },
@@ -449,6 +458,9 @@
       "start": {
         "name": "Start"
       },
+      "start_now": {
+        "name": "Start now"
+      },
       "pause": {
         "name": "Pause"
       },
@@ -567,6 +579,16 @@
     "start": {
       "name": "Start",
       "description": "Start an idle or paused Schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Mower",
+          "description": "Which Mower; defaults to the only loaded one."
+        }
+      }
+    },
+    "start_now": {
+      "name": "Start now",
+      "description": "Skip what is left of the settling wait and start the next Run. Refused while any Check is failing, including a closed Gate or the Work hours.",
       "fields": {
         "config_entry_id": {
           "name": "Mower",

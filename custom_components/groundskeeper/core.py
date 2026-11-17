@@ -298,6 +298,17 @@ class ResumeSchedule:
     now: datetime
 
 
+@dataclass(frozen=True)
+class StartNow:
+    """`start_now` service / button / panel action (issue #99): skip what is
+    left of the stability window and start the head Run.
+
+    It only ever shortens the wait. The Checks are read again at `now`, so a
+    failing Check, a closed Gate or the Work hours still hold the Run.
+    """
+
+    now: datetime
+
 
 @dataclass(frozen=True)
 class CancelSchedule:
@@ -469,6 +480,7 @@ type CoreInput = (
     | PauseSchedule
     | StopNow
     | ResumeSchedule
+    | StartNow
     | CancelSchedule
     | RetryRun
     | SkipPlan
@@ -792,6 +804,23 @@ def next_run(state: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def stability_window_ends(state: Mapping[str, Any]) -> datetime | None:
+    """When the open stability window ends, or None when no window is open.
+
+    A window is open while the Schedule is `waiting`, no Check failed at the
+    last evaluation, and the persisted `stability` deadline is armed (issue
+    #99). The Now tab counts down to it; Start now needs it.
+    """
+    raw = state["deadlines"].get(DEADLINE_STABILITY)
+    if (
+        raw is None
+        or state["schedule"]["status"] != ScheduleStatus.WAITING
+        or state["waiting_on"]
+    ):
+        return None
+    return parse(raw)
+
+
 def pending_runs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Every `pending` Run, in Schedule order."""
     return [r for r in state["runs"] if r["status"] == RunStatus.PENDING]
@@ -957,6 +986,8 @@ class _Machine:
                 self._stop_now()
             case ResumeSchedule():
                 self._start_schedule("user_resume")
+            case StartNow():
+                self._start_now()
             case CancelSchedule():
                 self._cancel()
             case RetryRun():
@@ -1523,6 +1554,28 @@ class _Machine:
             wet_reasons=self._wet_reasons(),
             gate_reasons=self._gate_reasons(run),
         )
+
+    def _start_now(self) -> None:
+        """Skip the rest of the stability window (issue #99).
+
+        Only an open window can be skipped: `waiting`, a Run to start, a
+        snapshot, and no failing Check at the last evaluation. The window is
+        then made due and the ordinary evaluation decides, so the Checks are
+        read again at this moment. A Check that now fails closes the window
+        as it always would, and the Run starts through `_start_run` or not at
+        all: the same write-ahead intent and the one `start_run` command.
+        """
+        if (
+            stability_window_ends(self.s) is None
+            or self._snapshot() is None
+            or next_run(self.s) is None
+        ):
+            return
+        # Written directly, not through `_arm`: the timer is about to be
+        # cancelled (a start) or the deadline dropped (a failing Check), so a
+        # new ArmTimer would only be noise.
+        self.s["deadlines"][DEADLINE_STABILITY] = iso(self.now)
+        self._evaluate()
 
     def _tick(self) -> None:
         """The 60 s Check tick: armed when absent or due, never slid by events."""
