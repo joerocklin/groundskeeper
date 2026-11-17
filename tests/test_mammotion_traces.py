@@ -23,7 +23,7 @@ from custom_components.groundskeeper.adapter import (
     Snapshot,
 )
 from custom_components.groundskeeper.adapters.mammotion import MammotionAdapter
-from tests.mammotion_states import install_baseline, set_entity
+from tests.mammotion_states import install_baseline, set_entity, settle_errors
 
 from .test_mammotion_adapter import NAME, make_adapter, make_director_entry
 
@@ -68,7 +68,7 @@ async def _replay(hass: HomeAssistant, trace: dict[str, Any]) -> tuple[Mammotion
     for step in trace["steps"]:
         for key, (state, attributes) in step["states"].items():
             set_entity(hass, entry, mower, NAME, key, state, attributes)
-        await hass.async_block_till_done()
+        await settle_errors(hass)
     return adapter, recorder
 
 

@@ -14,12 +14,17 @@ registry.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+from custom_components.groundskeeper.adapters.mammotion import ERROR_SETTLE_S
 
 ZONE_JSON = Path(__file__).parents[1] / "tests/fixtures/zone.json"
 
@@ -101,6 +106,12 @@ def set_entity(
         entity_id = created.entity_id
     hass.states.async_set(entity_id, state, attributes or {})
     return entity_id
+
+
+async def settle_errors(hass: HomeAssistant) -> None:
+    """Let the adapter's error settle period pass, firing its timer."""
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=ERROR_SETTLE_S * 2))
+    await hass.async_block_till_done()
 
 
 def install_states(

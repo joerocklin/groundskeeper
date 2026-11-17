@@ -38,6 +38,7 @@ from tests.mammotion_states import (
     install_zone_switches,
     register_fake_mammotion_services,
     set_entity,
+    settle_errors,
 )
 
 NAME = "Luba-SERIAL1"
@@ -93,7 +94,7 @@ class TestMammotionAdapterContract(_AdapterContract):
             "sensor:error_1_time",
             error.time.isoformat(),
         )
-        await self._hass.async_block_till_done()
+        await settle_errors(self._hass)
 
     async def inject_rain_stop(self, mower: MowerAdapter) -> None:
         """Fire the cloud `mammotion_event` with code 1003 (research §7)."""

@@ -677,6 +677,15 @@ def test_replayed_error_older_than_persisted_does_not_fail_run():
     assert run_status(state) == ["mowing"]
 
 
+def test_error_reemitted_after_restart_with_the_same_time_does_not_fail_run():
+    """The adapter reports the fault the Mower's log still holds again
+    after a restart: the very same time is not a new error (issue #95)."""
+    state = mowing_state()
+    state["state"]["last_error_time"] = at(600).isoformat()
+    state, _ = step(state, SignalReceived(at(700), NewError("1", "again", at(600))))
+    assert run_status(state) == ["mowing"]
+
+
 def test_zone_task_aborted_fails_run_externally_aborted_no_command():
     state = mowing_state()
     state, fx = step(state, SignalReceived(at(500), ZoneTaskAborted("11111111")))
