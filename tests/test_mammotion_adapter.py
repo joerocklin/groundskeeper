@@ -41,6 +41,7 @@ from tests.mammotion_states import (
     install_zone_switches,
     register_fake_mammotion_services,
     set_entity,
+    settle_errors,
     zone_geojson,
 )
 
@@ -230,8 +231,9 @@ async def _adapter_with_sink(hass: HomeAssistant) -> tuple[object, _Recorder, ob
 
 
 async def test_new_error_from_error_sensors(hass: HomeAssistant) -> None:
-    """A new (code, time) pair with code != 0 emits NewError; the same
-    pair again does not (works over BLE, no mammotion_event)."""
+    """A new (code, time) pair with code != 0 emits NewError once the
+    sensors settle; the same pair again does not (works over BLE, no
+    mammotion_event)."""
     _, recorder, entry, mower = await _adapter_with_sink(hass)
 
     set_entity(
@@ -239,7 +241,7 @@ async def test_new_error_from_error_sensors(hass: HomeAssistant) -> None:
     )
     set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Angle position sensor of lift motor disconnected", {})
     set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-19T18:59:58+00:00", {})
-    await hass.async_block_till_done()
+    await settle_errors(hass)
 
     assert recorder.signals == [
         NewError(
@@ -252,14 +254,180 @@ async def test_new_error_from_error_sensors(hass: HomeAssistant) -> None:
     # Same pair again: no re-emit (rolling log re-reads are common).
     set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
     set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "changed wording", {})
-    await hass.async_block_till_done()
+    await settle_errors(hass)
     assert len(recorder.signals) == 1
 
-    # A recurrence gets a new time: it is a new error.
+    # A recurrence gets a new time: it is a new error. Only the time
+    # sensor changed: code and message are read again as they stand.
     set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-20T06:30:00+00:00", {})
+    await settle_errors(hass)
+    assert recorder.signals[1:] == [
+        NewError(
+            code="2748",
+            message="changed wording",
+            time=datetime(2026, 10, 20, 6, 30, tzinfo=UTC),
+        )
+    ]
+
+
+async def test_error_sensors_updating_one_by_one_report_the_new_error(
+    hass: HomeAssistant,
+) -> None:
+    """Stage 3 (2026-11-16): the Mower's sensors update one after another,
+    the time sensor first and code and message about 2 ms later. The
+    signal must carry the new error, not the previous one's code and
+    message under the new time (issue #95)."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    # The stale error from the day before sits in the log.
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+    await settle_errors(hass)
+    recorder.signals.clear()
+
+    # The real fault: time first, then code, then message.
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-16T21:07:58+00:00", {})
     await hass.async_block_till_done()
-    assert len(recorder.signals) == 2
-    assert recorder.signals[1].time == datetime(2026, 10, 20, 6, 30, tzinfo=UTC)
+    assert recorder.signals == []  # the time alone is not a new error yet
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "11132", {})
+    await hass.async_block_till_done()
+    set_entity(
+        hass,
+        entry,
+        mower,
+        NAME,
+        "sensor:error_1_message",
+        "navigation: Blade stopped: wheel slip detected while reversing",
+        {},
+    )
+    await hass.async_block_till_done()
+    assert recorder.signals == []
+
+    await settle_errors(hass)
+    assert recorder.signals == [
+        NewError(
+            code="11132",
+            message="navigation: Blade stopped: wheel slip detected while reversing",
+            time=datetime(2026, 11, 16, 21, 7, 58, tzinfo=UTC),
+        )
+    ]
+
+
+async def test_same_code_recurring_with_a_new_time_is_a_new_error(
+    hass: HomeAssistant,
+) -> None:
+    """The same code can recur, so the time stays the dedupe key: the
+    firmware writes the new time first and then the unchanged code and
+    message, and the recurrence is one more NewError with the new time."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "lift motor", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-19T18:59:58+00:00", {})
+    await settle_errors(hass)
+    assert len(recorder.signals) == 1
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-19T19:30:00+00:00", {})
+    await hass.async_block_till_done()
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "lift motor", {})
+    await settle_errors(hass)
+
+    assert recorder.signals[1:] == [
+        NewError(
+            code="2748",
+            message="lift motor",
+            time=datetime(2026, 10, 19, 19, 30, tzinfo=UTC),
+        )
+    ]
+
+
+async def test_a_later_reading_of_the_same_time_is_not_a_new_error(
+    hass: HomeAssistant,
+) -> None:
+    """The late code and message of an error already reported (same time)
+    are not a second error."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+    await settle_errors(hass)
+    recorder.signals.clear()
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "11132", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "wheel slip", {})
+    await settle_errors(hass)
+
+    assert recorder.signals == []
+
+
+async def test_unknown_time_holds_a_new_fault_until_it_is_stamped(
+    hass: HomeAssistant,
+) -> None:
+    """With the log already holding an older fault, a new code and message
+    under an `unknown` time are held across the settle period, then
+    reported once with the real time and the new code and message."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+    await settle_errors(hass)
+    recorder.signals.clear()
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "unknown", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "11132", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "wheel slip", {})
+    await settle_errors(hass)
+    assert recorder.signals == []
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-16T21:07:58+00:00", {})
+    await settle_errors(hass)
+    assert recorder.signals == [
+        NewError(
+            code="11132",
+            message="wheel slip",
+            time=datetime(2026, 11, 16, 21, 7, 58, tzinfo=UTC),
+        )
+    ]
+
+
+async def test_restart_reports_the_fault_the_log_still_carries(hass: HomeAssistant) -> None:
+    """A restarted adapter has no memory of what it reported, so it reports
+    the fault the rolling log still holds again, at once (nothing is in
+    flight to settle). The core dedupes that re-emit by time."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "lift motor", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-15T21:46:00+00:00", {})
+
+    reported = []
+    for _ in range(2):
+        adapter = make_adapter(hass, entry)
+        recorder = _Recorder()
+        adapter.subscribe(recorder)
+        await adapter.async_start()
+        await hass.async_block_till_done()
+        reported.append(recorder.signals)
+        await adapter.async_close()
+
+    expected = NewError(
+        code="2748", message="lift motor", time=datetime(2026, 10, 15, 21, 46, tzinfo=UTC)
+    )
+    assert reported == [[expected], [expected]]
+
+
+async def test_closing_the_adapter_drops_a_pending_error(hass: HomeAssistant) -> None:
+    """Close cancels the settle timer: nothing is emitted afterwards."""
+    adapter, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "2748", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "lift motor", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-19T18:59:58+00:00", {})
+    await hass.async_block_till_done()
+
+    await adapter.async_close()
+    await settle_errors(hass)
+
+    assert recorder.signals == []
 
 
 async def test_error_without_time_waits_for_the_stamp(hass: HomeAssistant) -> None:
@@ -270,18 +438,18 @@ async def test_error_without_time_waits_for_the_stamp(hass: HomeAssistant) -> No
 
     set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "5004", {})
     set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "some fault", {})
-    await hass.async_block_till_done()
+    await settle_errors(hass)
     assert recorder.signals == []
 
     set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-10-20T06:00:00+00:00", {})
-    await hass.async_block_till_done()
+    await settle_errors(hass)
     errors = [s for s in recorder.signals if isinstance(s, NewError)]
     assert errors == [
         NewError(code="5004", message="some fault", time=datetime(2026, 10, 20, 6, tzinfo=UTC))
     ]
 
     set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "same fault", {})
-    await hass.async_block_till_done()
+    await settle_errors(hass)
     assert len([s for s in recorder.signals if isinstance(s, NewError)]) == 1
 
 
