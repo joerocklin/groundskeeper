@@ -133,6 +133,11 @@ ACTION_GATE_OPENED = "opened"
 ACTION_GATE_CLOSED = "closed"
 DEADLINE_GATE_VERIFY = "gate_verify:"  # + Gate id: open action verified by state
 GATE_OPEN_VERIFY = timedelta(minutes=2)  # spec §10
+# Issue #97: the way out ends when the Zone reads as the Run's Zone. When it
+# never does (an adapter without Zone readings), it ends this long after the
+# Mower was first seen mowing with a live job. The transit from the dock took
+# 64 to 70 s in the Stage 3 trial; the limit leaves four times that.
+OUT_CROSSING_FALLBACK = timedelta(minutes=5)
 PROMPT_ANOMALY = "anomaly"  # spec §11.6: Dismiss
 ACTION_DISMISS = "dismiss"
 
@@ -1267,6 +1272,7 @@ class _Machine:
         self.s["runs"].insert(0, run)
         self.effects.append(AbortRunEffect("stop_now"))
         self._set_schedule(ScheduleStatus.PAUSED, "stop_now")
+        self._gate_drop_stale()  # an outbound crossing may still be open
 
 
     # -- Restart reconciliation (spec §8) ------------------------------------
@@ -1640,7 +1646,10 @@ class _Machine:
             run["mow_mark"] = iso(self.now)
             run["job_ref"] = snapshot.job_ref
             self._set_run(run, RunStatus.MOWING)
-            self._gate_crossing_ended(run)
+            # The Mower is on its way, not through the Gate: the way out ends
+            # when the Zone says so (issue #97).
+            self._crossings_restart_clock(run)
+            self._crossings_end(run, snapshot)
             self._watch(run)["prev"] = LawnMowerActivity.MOWING.value
             self._arm_stall(snapshot)
             self._begin_height_verify(run, snapshot)
@@ -1843,6 +1852,7 @@ class _Machine:
             self._cancel_deadline(name)
         self._end_height_verify()
         self._accrue_mowing()
+        self._crossings_restart_clock(run)
         run["mow_mark"] = None
         run["on_hold_reason"] = cause
         self._set_run(run, RunStatus.ON_HOLD, cause)
@@ -2128,7 +2138,8 @@ class _Machine:
         self._clear_run_deadlines()
         run["finished_at"] = iso(self.now)
         run["mow_mark"] = None
-        self._gate_crossing_ended(run, "back")  # the Run ended: it is home
+        # The Run ended: it is home, and an outbound crossing still open is over.
+        self._gate_crossing_ended(run)
         self.s["crossing_watch"] = {}
         self._set_run(run, RunStatus.DONE)
         self._add_duration_sample(run)
@@ -2180,6 +2191,7 @@ class _Machine:
         if abort:
             self.effects.append(AbortRunEffect(reason))
         self._set_schedule(ScheduleStatus.PAUSED, reason)
+        self._gate_drop_stale()  # an outbound crossing may still be open
         self._raise_prompt(
             PROMPT_RUN_FAILED,
             None,
@@ -2505,7 +2517,7 @@ class _Machine:
         gates = self._gate_ids(run)
         if gates:
             self._gate_service(run)
-            self._crossings_end(run, snapshot, prev)
+            self._crossings_end(run, snapshot)
             self._crossings_urgent(run, gates, snapshot, watch, prev)
             self._crossings_predict(run, gates, snapshot, watch)
         if activity is not None:
@@ -2593,18 +2605,53 @@ class _Machine:
             warned.append("end")
             self._expect_crossings(run, gates, "end", "back")
 
+    @staticmethod
+    def _mowing_live(snapshot: Snapshot) -> bool:
+        return snapshot.activity is LawnMowerActivity.MOWING and snapshot.job_active
+
     def _out_arrived(self, snapshot: Snapshot, run: Mapping[str, Any]) -> bool:
-        """Mowing in the gated Zone (an unknown or matching zone counts)."""
+        """Mowing in the gated Zone: the Zone reads as the Run's own. An unknown
+        Zone is the transit from the dock and another Zone a stray reading near
+        the Gate, so neither means the Mower is through (issues #82, #97)."""
+        native_ref = run.get("native_ref")
         return (
-            snapshot.activity is LawnMowerActivity.MOWING
-            and snapshot.job_active
-            and (snapshot.zone is None or snapshot.zone == run.get("native_ref"))
+            self._mowing_live(snapshot) and native_ref is not None and snapshot.zone == native_ref
         )
 
-    def _crossings_end(self, run: dict[str, Any], snapshot: Snapshot, prev: str | None) -> None:
+    def _out_fallback_due(self, run: Mapping[str, Any], snapshot: Snapshot) -> bool:
+        """Fallback for a Mower whose Zone is never reported: an outbound
+        crossing is over `OUT_CROSSING_FALLBACK` after the Mower was first seen
+        mowing with a live job. The clock lives on the crossing (`mowing_since`),
+        so it is kept here, on the snapshots that arrive; there is no timer."""
+        if not self._mowing_live(snapshot):
+            self._crossings_restart_clock(run)
+            return False
+        overdue = False
+        for crossing in self._crossings_of(run, "out"):
+            if "mowing_since" not in crossing:
+                crossing["mowing_since"] = iso(self.now)
+            elif self.now - parse(crossing["mowing_since"]) >= OUT_CROSSING_FALLBACK:
+                overdue = True
+        return overdue
+
+    def _crossings_of(self, run: Mapping[str, Any], direction: str) -> list[dict[str, Any]]:
+        return [
+            c
+            for c in self.s["gate_crossings"].values()
+            if c["run_id"] == run["id"] and c.get("direction", "out") == direction
+        ]
+
+    def _crossings_restart_clock(self, run: Mapping[str, Any]) -> None:
+        """The Mower is not on its way out (docked, paused, on hold, Run
+        restarted): the fallback counts from the next time it is."""
+        for crossing in self._crossings_of(run, "out"):
+            crossing.pop("mowing_since", None)
+
+    def _crossings_end(self, run: dict[str, Any], snapshot: Snapshot) -> None:
+        fallback_due = self._out_fallback_due(run, snapshot)
         if snapshot.activity is LawnMowerActivity.DOCKED:
             self._gate_crossing_ended(run, "back")
-        elif self._out_arrived(snapshot, run):
+        elif self._out_arrived(snapshot, run) or fallback_due:
             self._gate_crossing_ended(run, "out")
 
     def _crossings_urgent(
@@ -3131,3 +3178,4 @@ class _Machine:
         self.s["schedule"]["pause_requested"] = False
         if self.status != ScheduleStatus.IDLE:
             self._set_schedule(ScheduleStatus.IDLE, "cancelled")
+        self._gate_drop_stale()  # an outbound crossing may still be open
