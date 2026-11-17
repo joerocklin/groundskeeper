@@ -87,6 +87,19 @@ async def test_a_failing_check_refuses_with_the_reason_and_sends_nothing(
     assert schedule(hass).state == "waiting"
 
 
+async def test_a_closed_gate_is_named_with_its_own_name_intact(hass, director) -> None:
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    d = hass.data[DOMAIN]["director"][entry.entry_id]
+    d.state["waiting_on"] = [{"check": "gate_open", "reason": "gate_closed:Fence_gate"}]
+    with pytest.raises(ServiceValidationError) as raised:
+        await call(hass, "start_now")
+    assert raised.value.translation_key == "start_now_checks_failing"
+    assert raised.value.translation_placeholders["checks"] == (
+        "Gate open (gate closed: Fence_gate)")
+    assert commands(mower) == []
+
+
 async def test_a_check_that_failed_since_the_last_evaluation_still_refuses(
     hass, director
 ) -> None:

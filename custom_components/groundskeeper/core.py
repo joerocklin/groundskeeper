@@ -1571,6 +1571,9 @@ class _Machine:
             or next_run(self.s) is None
         ):
             return
+        # Written directly, not through `_arm`: the timer is about to be
+        # cancelled (a start) or the deadline dropped (a failing Check), so a
+        # new ArmTimer would only be noise.
         self.s["deadlines"][DEADLINE_STABILITY] = iso(self.now)
         self._evaluate()
 

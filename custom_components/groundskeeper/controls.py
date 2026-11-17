@@ -46,6 +46,12 @@ async def async_start(director: Director) -> None:
     await director.async_start()
 
 
+def _reason_text(reason: str) -> str:
+    """A Check's reason key as words; a detail after the colon (a Gate's name) is kept as is."""
+    key, colon, detail = str(reason).partition(":")
+    return key.replace("_", " ") + (f": {detail}" if colon else "")
+
+
 def _start_now_refusal(director: Director) -> ServiceValidationError | None:
     """Why Start now cannot apply right now, or None (issue #99).
 
@@ -58,7 +64,7 @@ def _start_now_refusal(director: Director) -> ServiceValidationError | None:
     if failing:
         names = {c["id"]: c["name"] for c in director.checks}
         why = "; ".join(
-            f"{names.get(w['check'], w['check'])} ({str(w['reason']).replace('_', ' ')})"
+            f"{names.get(w['check'], w['check'])} ({_reason_text(w['reason'])})"
             for w in failing
         )
         return fail("start_now_checks_failing", checks=why)

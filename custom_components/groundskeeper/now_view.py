@@ -1,8 +1,9 @@
 """The Now tab's view of one Mower (spec §16.2) and its control actions.
 
-`now_view` is a pure read of the Director's state; `CONTROLS` maps the panel's
-run-control actions to the same `controls` functions the services and buttons
-call, so the panel can never disagree with them about semantics.
+`now_view` is a read of the Director's state (and the clock, for the settling
+countdown); it changes nothing. `CONTROLS` maps the panel's run-control actions
+to the same `controls` functions the services and buttons call, so the panel
+can never disagree with them about semantics.
 """
 
 from __future__ import annotations
@@ -64,8 +65,7 @@ def _starting_in_s(director: Director) -> int | None:
 
 
 def _available_controls(director: Director, status: str, failed: bool,
-                        active: dict[str, Any] | None,
-                        window_open: bool = False) -> list[str]:
+                        active: dict[str, Any] | None, window_open: bool) -> list[str]:
     out: list[str] = []
     if window_open:
         out.append("start_now")
