@@ -512,6 +512,7 @@ function gateListHtml(view, selectedId) {
   const rows = gates.map((g) => `<li data-gate="${esc(g.id)}" class="${g.id === selectedId ? 'selected' : ''}">
       <span class="name">${esc(g.name)}</span>
       <span class="tag">${g.open ? 'open' : 'closed'}</span>
+      ${g.state_entity ? '' : `<button data-act="set-gate-flag" data-gate="${esc(g.id)}" data-open="${g.open ? 0 : 1}">${g.open ? 'Mark closed' : 'Mark open'}</button>`}
       <button data-act="edit-gate" data-gate="${esc(g.id)}">Edit</button>
       <div class="behind">Zones behind this Gate: ${g.zone_ids && g.zone_ids.length ? names(g.zone_ids) : 'none'}.
         Check that this matches your fence.</div></li>`).join('');
@@ -576,7 +577,7 @@ const CTL_LABEL = {
 const ACTION_LABEL = {
   retry: 'Retry', skip_plan: 'Skip Plan', abort: 'Abort', resume: 'Resume', end_run: 'End Run',
   no: 'No', yes: 'Yes', yes_done_today: 'Yes, done for today', opened: 'I opened it',
-  closed: 'Closed', dismiss: 'Dismiss',
+  closed: 'Closed', left_open: 'Left open', dismiss: 'Dismiss',
 };
 const actionLabel = (a) => ACTION_LABEL[a] || String(a).replace(/_/g, ' ');
 
@@ -1480,6 +1481,9 @@ class GroundskeeperPanel extends HTMLElement {
             this._gateDraft = gateDraft((this._zoneView.gates || []).find((g) => g.id === el.dataset.gate));
             this._render(); break;
           case 'cancel-gate': this._gateDraft = null; this._render(); break;
+          case 'set-gate-flag':
+            this._zoneCmd('set_gate_flag', { gate_id: el.dataset.gate, open: el.dataset.open === '1' });
+            break;
           case 'save-gate': this._saveGate(root); break;
           case 'delete-gate': {
             const gate_id = this._gateDraft && this._gateDraft.id;

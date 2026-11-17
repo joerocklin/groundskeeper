@@ -64,6 +64,34 @@ def test_gate_list_shows_state_and_derived_gated_zones_for_confirmation() -> Non
     assert 'data-act="edit-gate"' in html and 'data-act="new-gate"' in html
 
 
+def gate_list(*gates):
+    view = {"zones": ZONES, "channels": CHANNELS, "gates": list(gates), "gated_zones": [],
+            "unrouted_zones": []}
+    return call("gateListHtml", view, None)
+
+
+def test_gate_list_lets_a_manual_gate_be_marked_closed_when_it_was_left_open() -> None:
+    html = gate_list(gate(open=True))
+    assert 'data-act="set-gate-flag" data-gate="g1" data-open="0"' in html
+    assert "Mark closed" in html and "Mark open" not in html
+
+
+def test_gate_list_lets_a_closed_manual_gate_be_marked_open() -> None:
+    html = gate_list(gate(open=False))
+    assert 'data-act="set-gate-flag" data-gate="g1" data-open="1"' in html
+    assert "Mark open" in html and "Mark closed" not in html
+
+
+def test_gate_list_offers_no_flag_for_a_gate_with_a_state_entity() -> None:
+    html = gate_list(gate(open=True, state_entity="reg-id", state_entity_id="cover.fence"))
+    assert "set-gate-flag" not in html
+
+
+def test_prompt_action_label_for_left_open() -> None:
+    assert call("actionLabel", "left_open") == "Left open"
+    assert call("actionLabel", "closed") == "Closed"
+
+
 def test_gate_list_flags_zones_with_no_route_to_the_dock() -> None:
     view = {"zones": ZONES, "channels": CHANNELS, "gates": [], "gated_zones": [],
             "unrouted_zones": [{"id": "z2", "name": "Back"}]}

@@ -245,7 +245,7 @@ def test_docking_ends_the_back_crossing_and_asks_to_close() -> None:
     assert state["state"]["gate_crossings"] == {}
     assert state["state"]["gate_flags"] == {"g1": False}
     [close] = prompts(state, "gate_close")
-    assert close["actions"] == ["closed"]
+    assert close["actions"] == ["closed", "left_open"]
 
 
 def test_close_action_runs_after_the_back_crossing() -> None:
@@ -449,3 +449,66 @@ def test_the_director_never_commands_the_mower_for_a_gate() -> None:
         (400, snap(activity=A.RETURNING, battery=19)),
     )
     assert not [e for e in fx if isinstance(e, (AbortRunEffect, ResumeRunEffect))]
+
+
+# -- a Gate left open raises no "open" Prompt (issue #98) ---------------------------
+
+
+def left_open(state, env, t):
+    [close] = prompts(state, "gate_close")
+    assert close["actions"] == ["closed", "left_open"]
+    state, _ = step(state, AnswerPrompt(at(t), close["prompt_id"], "left_open"), env)
+    assert state["state"]["gate_flags"] == {"g1": True}
+    return state
+
+
+def test_a_gate_left_open_raises_no_prompt_at_the_predicted_return() -> None:
+    env = env_for(gate())
+    state = left_open(mowing_through(env, battery=45), env, 105)
+    state, fx = feed(state, env, (110, snap(battery=20)))
+    assert [w["kind"] for w in expected(fx)] == ["return"]  # the crossing is still expected
+    assert prompts(state) == [] and prompts(state, "gate_close") == []
+    # The Mower heads back: nothing to re-send either, urgent or not.
+    state, fx = feed(state, env, (200, snap(activity=A.RETURNING, battery=19)))
+    assert prompts(state) == [] and not events(fx, "prompt_sent")
+    assert state["state"]["gate_flags"] == {"g1": True}
+
+
+def test_a_gate_left_open_raises_no_urgent_prompt_at_an_unpredicted_return() -> None:
+    env = env_for(gate())
+    state = left_open(mowing_through(env, battery=80), env, 105)
+    state, fx = feed(state, env, (200, snap(activity=A.RETURNING, battery=79)))
+    assert prompts(state) == [] and not events(fx, "prompt_sent")
+
+
+def test_a_gate_left_open_is_asked_about_again_once_the_mower_is_home() -> None:
+    """The flag is reset by the crossing it was left open for, as before."""
+    env = env_for(gate())
+    state = left_open(mowing_through(env, battery=45), env, 105)
+    state, _ = feed(state, env, (110, snap(battery=20)),
+                    (200, snap(activity=A.RETURNING, battery=19)))
+    state, _ = feed(state, env,
+                    (300, snap(DOCKED, job_active=True, recharging=True, battery=19)))
+    assert state["state"]["gate_flags"] == {"g1": False}
+    [close] = prompts(state, "gate_close")
+    assert close["actions"] == ["closed", "left_open"]
+
+
+def test_a_gate_left_open_at_the_dock_raises_no_prompt_for_the_resume() -> None:
+    env = env_for(gate())
+    state = mowing_through(env, battery=45)
+    state, _ = feed(state, env, (101, snap(battery=20)))
+    state, _ = answer(state, env, "opened", t=105)
+    state, _ = feed(
+        state, env,
+        (200, snap(activity=A.RETURNING, battery=19)),
+        (300, snap(DOCKED, job_active=True, recharging=True, battery=80)),
+    )
+    state = left_open(state, env, 310)
+    state, fx = feed(state, env, (1600, snap(DOCKED, job_active=True, recharging=True,
+                                             battery=91)))
+    assert [w["kind"] for w in expected(fx)] == ["resume"]
+    assert prompts(state) == []
+    leaving = snap(activity=A.MOWING, battery=93, zone="elsewhere")
+    state, fx = feed(state, env, (1700, leaving))
+    assert prompts(state) == [] and not events(fx, "prompt_sent")

@@ -128,9 +128,10 @@ ACTION_RAIN_YES = "yes"
 ACTION_RAIN_DONE_TODAY = "yes_done_today"
 
 PROMPT_GATE = "gate"  # spec §10: I opened it / Closed / Skip Plan (at Run start)
-PROMPT_GATE_CLOSE = "gate_close"  # spec §10: through, close <Gate>
+PROMPT_GATE_CLOSE = "gate_close"  # spec §10: through, close <Gate> / Left open (#98)
 ACTION_GATE_OPENED = "opened"
 ACTION_GATE_CLOSED = "closed"
+ACTION_GATE_LEFT_OPEN = "left_open"  # the Gate stays believed open; manual-flag Gates only
 DEADLINE_GATE_VERIFY = "gate_verify:"  # + Gate id: open action verified by state
 GATE_OPEN_VERIFY = timedelta(minutes=2)  # spec §10
 # Issue #97: the way out ends when the Zone reads as the Run's Zone. When it
@@ -1025,6 +1026,7 @@ class _Machine:
                 self._evaluate()
             case SetGateFlag():
                 self.s["gate_flags"][event.gate_id] = event.open
+                self._gate_flag_answers_close_prompt(event.gate_id, event.open)
                 self._evaluate()
             case WetGrassDoneToday():
                 self._wet_done_today()
@@ -2348,6 +2350,8 @@ class _Machine:
             self._wet_answer(event.action)
         elif prompt["kind"] == PROMPT_GATE:
             self._gate_answer(prompt, event.action)
+        elif prompt["kind"] == PROMPT_GATE_CLOSE:
+            self._gate_close_answer(prompt, event.action)
         elif prompt["kind"] == PROMPT_ANOMALY:
             self._dismiss_anomaly(prompt["subject"])
         elif prompt["kind"] == PROMPT_RUN_FAILED:
@@ -2360,7 +2364,9 @@ class _Machine:
                 self._cancel()
         if prompt in self.s["prompts"]:  # no dedicated side effect applied
             self._settle_prompt(prompt, event.action)
-        if prompt["kind"] in (PROMPT_IS_RAINING, PROMPT_GATE):
+        if prompt["kind"] in (PROMPT_IS_RAINING, PROMPT_GATE) or (
+            prompt["kind"] == PROMPT_GATE_CLOSE and event.action == ACTION_GATE_LEFT_OPEN
+        ):
             self._evaluate()  # the answer changes what a Check reads at once
 
     # -- Gates (spec §4.7, §9.2, §10) --------------------------------------------
@@ -2430,12 +2436,28 @@ class _Machine:
         for gate_id in self._gate_ids(run):
             gate = records[gate_id]
             if self._gate_is_open(gate):
-                self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
-                for prompt in self._gate_prompts(gate_id):
-                    self._settle_prompt(prompt, "gate_open")
+                self._settle_open_gate(gate)
             else:
                 reasons.append(f"gate_closed:{gate['name']}")
         return reasons
+
+    def _settle_open_gate(self, gate: Mapping[str, Any]) -> None:
+        """The Gate reads open: settle its Prompt and stop waiting for it. A
+        manual-flag Gate can be closed again by hand before the Mower is through
+        (the Open switch, issue #98), so its crossing forgets having asked and
+        asks again if that happens."""
+        gate_id = gate["id"]
+        self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+        for prompt in self._gate_prompts(gate_id):
+            self._settle_prompt(prompt, "gate_open")
+        crossing = self.s["gate_crossings"].get(gate_id)
+        if crossing is not None and self._gate_is_manual(gate):
+            crossing.pop("prompted", None)
+
+    @staticmethod
+    def _gate_is_manual(gate: Mapping[str, Any]) -> bool:
+        """A Gate with no state entity: the owner's word (the flag) is all there is."""
+        return not gate.get("state_entity")
 
     def _gate_act(self, run: dict[str, Any]) -> None:
         """Every other Check passes: expect the crossing, then run the open
@@ -2543,9 +2565,13 @@ class _Machine:
             if gate.get("close_action"):
                 self.effects.append(GateActionEffect(gate_id, "close", run["id"]))
             elif gate.get("notify"):
+                # A Gate with a state entity reports reality, so "left open" is
+                # only a question for a manual-flag Gate (issue #98).
+                actions = [ACTION_GATE_CLOSED]
+                if self._gate_is_manual(gate):
+                    actions.append(ACTION_GATE_LEFT_OPEN)
                 self._raise_prompt(
-                    PROMPT_GATE_CLOSE, gate_id, [ACTION_GATE_CLOSED],
-                    self._gate_context(gate, run),
+                    PROMPT_GATE_CLOSE, gate_id, actions, self._gate_context(gate, run),
                 )
 
     # -- Gate crossings during a Run (spec §10) -----------------------------------
@@ -2768,9 +2794,7 @@ class _Machine:
             if gate is None or crossing["run_id"] != run["id"]:
                 continue
             if self._gate_is_open(gate):
-                self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
-                for prompt in self._gate_prompts(gate_id):
-                    self._settle_prompt(prompt, "gate_open")
+                self._settle_open_gate(gate)
             else:
                 self._gate_closed(gate, crossing, run)
 
@@ -2782,6 +2806,29 @@ class _Machine:
             self.s["gate_flags"][gate_id] = False
         elif action == ACTION_SKIP_PLAN:
             self._skip_waiting_plan()
+
+    def _gate_flag_answers_close_prompt(self, gate_id: str, is_open: bool) -> None:
+        """The owner who sets the Open switch has said what a pending "Through,
+        close" Prompt asks, so it settles rather than going stale in the tray."""
+        gate = self._gate_records().get(gate_id)
+        if gate is None or not self._gate_is_manual(gate):
+            return
+        for prompt in self._gate_prompts(gate_id, PROMPT_GATE_CLOSE):
+            self._settle_prompt(
+                prompt, ACTION_GATE_LEFT_OPEN if is_open else ACTION_GATE_CLOSED
+            )
+
+    def _gate_close_answer(self, prompt: Mapping[str, Any], action: str) -> None:
+        """The Prompt after a crossing. "Closed" only settles it (the Gate is
+        already presumed closed); "Left open" keeps the Gate believed open until
+        the next crossing or the Open switch says otherwise (issue #98). Nothing
+        is sent to the Mower or to the Gate. The Gate may have been edited or
+        deleted since the Prompt was raised: then there is no flag to keep."""
+        if action != ACTION_GATE_LEFT_OPEN:
+            return
+        gate = self._gate_records().get(prompt["subject"])
+        if gate is not None and self._gate_is_manual(gate):
+            self.s["gate_flags"][gate["id"]] = True
 
     def _skip_waiting_plan(self) -> None:
         """Gate Prompt Skip Plan: the head Run's Plan is skipped (spec §6.3)."""

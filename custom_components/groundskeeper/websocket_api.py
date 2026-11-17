@@ -92,7 +92,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_list_mowers)
     websocket_api.async_register_command(hass, ws_get_state)
     for command in (ws_list_checks, ws_create_check, ws_update_check, ws_delete_check,
-                    ws_list_gates, ws_create_gate, ws_update_gate, ws_delete_gate):
+                    ws_list_gates, ws_create_gate, ws_update_gate, ws_delete_gate,
+                    ws_set_gate_flag):
         websocket_api.async_register_command(hass, command)
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_set_setup_step)
@@ -1084,6 +1085,32 @@ async def ws_update_gate(hass, connection, msg) -> None:
 async def ws_delete_gate(hass, connection, msg) -> None:
     async def call(director):
         await director.async_delete_gate(msg["gate_id"])
+        return {}
+
+    await _gates_call(hass, connection, msg, call)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/set_gate_flag",
+        vol.Required("entry_id"): str,
+        vol.Required("gate_id"): str,
+        vol.Required("open"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_gate_flag(hass, connection, msg) -> None:
+    """Say a Gate without a state entity is open or closed (the Open switch, from
+    the Zones & Gates list); a Gate with one reports its own state (issue #98)."""
+
+    async def call(director):
+        gate = next((g for g in director.gates if g["id"] == msg["gate_id"]), None)
+        if gate is None:
+            raise KeyError(msg["gate_id"])
+        if gate["state_entity"]:
+            raise ValueError("A Gate with a state entity reports its own state")
+        await director.async_set_gate_flag(gate["id"], msg["open"])
         return {}
 
     await _gates_call(hass, connection, msg, call)
