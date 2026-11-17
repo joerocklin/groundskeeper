@@ -1,8 +1,7 @@
 """Notifier: Prompts and notices to phones (spec §12, ticket #24).
 
 The reducer decides *what happened* (`prompt_sent`, `prompt_reminder`,
-`prompt_answered`, `run_status_changed`, `schedule_completed`,
-`check_timeout`, `error_tolerated`); this module
+`prompt_answered`, `run_status_changed`, `schedule_completed`); this module
 turns those effect events into `notify.mobile_app_*` calls, `clear_notification`
 by tag, and a `persistent_notification` fallback when no phone is configured.
 It reads the Director's state but never changes it; a failed delivery is
@@ -249,9 +248,12 @@ class Notifier:
         )
 
     async def _error_tolerated(self, payload: dict[str, Any]) -> None:
-        """The Mower logged an error but is still mowing: a plain notice, never a
-        Prompt (issue #96). It has no toggle: it is rare and tells the owner why
-        the Run was not failed. One notice per Run (a later error replaces it)."""
+        """The Mower logged an error but is still mowing (issue #96).
+
+        A plain notice, never a Prompt. It has no toggle: it is rare and tells
+        the owner why the Run was not failed. One notice per Run (a later
+        error replaces it).
+        """
         strings = await async_prompt_strings(self._hass)
         await self.async_notice(
             "error_tolerated",

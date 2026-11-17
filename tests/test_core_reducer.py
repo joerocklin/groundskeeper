@@ -806,6 +806,24 @@ def test_tolerated_error_then_error_flicker_keeps_the_run_mowing():
     assert run_status(state) == ["mowing"]
 
 
+def test_error_tolerated_in_an_earlier_attempt_does_not_arm_the_error_rule_after_retry():
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(481), NewError("11132", "slip", at(480))))
+    state, _ = step(state, SnapshotReceived(at(1000), IDLE_OFF_JOB))
+    state, _ = step(state, TimerFired(at(1061)))
+    failed_with(state, "stopped_off_dock")
+    state, _ = step(state, RetryRun(at(1100)))
+    state, _ = step(state, SnapshotReceived(at(1100), DOCKED))
+    state, _ = step(state, TimerFired(at(1161)))
+    state, _ = step(state, SnapshotReceived(at(1180), MOWING))
+    assert run_status(state) == ["mowing"]
+    locked = replace(MOWING, activity=LawnMowerActivity.ERROR)
+    state, _ = step(state, SnapshotReceived(at(1200), locked))
+    assert "error_stable" not in state["state"]["deadlines"]
+    state, _ = step(state, TimerFired(at(1300)))
+    assert run_status(state) == ["mowing"]
+
+
 def test_error_activity_without_any_error_is_left_to_the_other_rules():
     state = mowing_state()
     state, _ = step(state, SnapshotReceived(at(500), replace(MOWING, activity=LawnMowerActivity.ERROR)))

@@ -1680,7 +1680,7 @@ class _Machine:
         if self._stable(DEADLINE_STOPPED_STABLE, stopped):
             self._fail_run(run, "stopped_off_dock", abort=False)
             return
-        if self._error_after_tolerance(run, snapshot):
+        if self._fail_if_errored_after_tolerance(run, snapshot):
             return
         if self._external_pause(snapshot):
             self._enter_hold(run, HOLD_EXTERNAL_PAUSE)
@@ -1694,15 +1694,23 @@ class _Machine:
         if run["status"] == RunStatus.MOWING and not (off_job or stopped):
             self._evaluate_stall(run, snapshot)
 
-    def _error_after_tolerance(self, run: dict[str, Any], snapshot: Snapshot) -> bool:
-        """A tolerated error, then the Mower reads `error` for 60 s (issue #96).
+    def _fail_if_errored_after_tolerance(
+        self, run: dict[str, Any], snapshot: Snapshot
+    ) -> bool:
+        """Fail the Run when the Mower reads `error` for 60 s after a tolerated error.
 
-        The error signal can arrive just before the snapshot catches up; the
-        stall rule holds its clock on `error` activity, so without this a
+        The error signal can arrive just before the snapshot catches up, and
+        the stall rule holds its clock on `error` activity, so without this a
         locked Mower would keep its Run `mowing`. The Run fails as it would
-        have on the error itself, with that error. Returns True when it failed.
+        have on the error itself. Only an error tolerated during this attempt
+        counts (a Retry starts a new one). Returns True when the Run failed.
         """
-        tolerated = run.get("tolerated_errors")
+        started = parse(run["started_at"]) if run.get("started_at") else None
+        tolerated = [
+            note
+            for note in run.get("tolerated_errors", [])
+            if started is None or parse(note["seen_at"]) >= started
+        ]
         errored = bool(tolerated) and snapshot.activity is LawnMowerActivity.ERROR
         if not self._stable(DEADLINE_ERROR_STABLE, errored):
             return False
@@ -2006,15 +2014,13 @@ class _Machine:
             }
             run = self._mowing_run()
             if run is not None:
-                # An error is evidence, not a verdict (issue #96). The Mower
-                # can log an error, recover by itself and keep mowing, and
-                # failing the Run then offers Retry on a Mower that is still
-                # on the job. So no code is special: what decides is the
-                # snapshot. Still `mowing` with a live job: record it and let
-                # the stop rules (`stopped_off_dock`, `stalled`) end the Run
-                # if the Mower really stops. Anything else is a stopped Mower
-                # (usually locked in `error`): fail the Run, no command
-                # (spec §7.3).
+                # An error is evidence, not a verdict (issue #96): a Mower can
+                # log one, recover and keep mowing, and failing the Run then
+                # offers Retry on a Mower still on the job. No code is special;
+                # the snapshot decides. Mowing on a live job: record it, and
+                # the stop rules end the Run if the Mower really stops.
+                # Anything else is a stopped Mower (usually locked in `error`):
+                # fail the Run, no command (spec §7.3).
                 if self._mowing_with_live_job():
                     self._tolerate_error(run, error)
                 else:
@@ -2045,8 +2051,11 @@ class _Machine:
         )
 
     def _tolerate_error(self, run: dict[str, Any], error: dict[str, Any]) -> None:
-        """Keep the Run `mowing` and record the error: a note on the Run (so
-        the archived history shows it) and an `error_tolerated` event."""
+        """Keep the Run `mowing` and record the error.
+
+        A note on the Run (so the archived history shows it) and an
+        `error_tolerated` event.
+        """
         run.setdefault("tolerated_errors", []).append({**error, "seen_at": iso(self.now)})
         self._emit(
             "error_tolerated",

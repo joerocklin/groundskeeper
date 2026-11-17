@@ -136,9 +136,10 @@ def test_mowing_newer_error_while_live_mower_is_still_mowing_is_tolerated():
         replace(LIVE, activity=LawnMowerActivity.ERROR),
         replace(LIVE, job_active=False),
         replace(LIVE, activity=LawnMowerActivity.PAUSED),
+        replace(LIVE, available=False),
         None,
     ],
-    ids=["activity_error", "no_live_job", "paused", "no_snapshot"],
+    ids=["activity_error", "no_live_job", "paused", "unavailable", "no_snapshot"],
 )
 def test_mowing_newer_error_fails_without_command_unless_the_mower_is_mowing(snapshot):
     state = fresh_stall(mowing_state())
