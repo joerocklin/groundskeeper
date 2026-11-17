@@ -8,6 +8,10 @@ A Home Assistant integration that directs a robot mower through multi-height ste
 One physical robot mower, with its own Zones, device-wide settings, and Schedule.
 _Avoid_: Device, robot
 
+**Mower position**:
+Where the Mower is and which way it faces, as the Mower itself reports it. It is only shown, never acted on: no Check, Anomaly or Run rule reads it.
+_Avoid_: Location, telemetry, heading (a Zone bearing is a Zone's axis, not which way the Mower faces)
+
 **Zone**:
 A mowable area known to the Mower.
 _Avoid_: Area, yard, region
