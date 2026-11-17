@@ -68,6 +68,10 @@ _Avoid_: Recurring schedule, repeat, cron
 A condition that must hold before the next Run may start, such as sufficient battery, work hours, or dry grass.
 _Avoid_: Gate (a physical barrier), precondition, self-check (the Mower's own diagnostic)
 
+**Mower error**:
+An error code the Mower itself reports. It is evidence, not a verdict: whether it stops a Run or holds the Schedule depends on what the Mower does next, and it stops nothing once the Mower is working again.
+_Avoid_: Fault, Anomaly (a fingerprint the director detects, not a code the Mower reports)
+
 **Anomaly**:
 A detected fault fingerprint in Mower behaviour or telemetry. An Anomaly only alerts the user (or asks the Schedule to pause after the current Run); it never fails a Run or commands the Mower.
 _Avoid_: Fault, issue
