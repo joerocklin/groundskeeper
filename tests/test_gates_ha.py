@@ -201,7 +201,84 @@ async def test_run_start_holds_for_the_gate_until_the_user_opens_it(
     assert "gate_crossing_expected" in kinds and "gate_crossing_ended" in kinds
     [close] = await list_prompts(hass, hass_ws_client, entry)
     assert close["kind"] == "gate_close" and close["title"] == "Example Mower: Through, close Fence gate"
-    assert close["actions"] == ["closed"]
+    assert close["actions"] == ["closed", "left_open"]
+
+
+async def through_the_gate(hass, hass_ws_client, entry, mower, freezer):
+    """A Run held for the Gate, let through, with the Mower now in its Zone: the
+    "Through, close" Prompt is up and the Gate is presumed closed again."""
+    gate = await make_gate(hass, hass_ws_client, entry)
+    await add_plan(hass)
+    await hass.async_block_till_done()
+    [prompt] = await list_prompts(hass, hass_ws_client, entry)
+    await hass.services.async_call(
+        DOMAIN, "answer_prompt", {"prompt_id": prompt["prompt_id"], "action": "opened"},
+        blocking=True)
+    await advance(hass, freezer, 61)
+    await advance(hass, freezer, 61)
+    assert [c[0] for c in mower.commands] == ["start_run"]
+    mower.emit_snapshot(IN_ZONE)
+    await hass.async_block_till_done()
+    [close] = await list_prompts(hass, hass_ws_client, entry)
+    assert close["kind"] == "gate_close"
+    return gate, close
+
+
+async def test_left_open_keeps_the_gate_open_until_the_switch_says_it_is_closed(
+    hass, hass_ws_client, setup, freezer
+) -> None:
+    entry, mower = setup
+    gate, close = await through_the_gate(hass, hass_ws_client, entry, mower, freezer)
+    flag = eid(hass, "switch", entry, gate, "open_flag")
+    believed = eid(hass, "binary_sensor", entry, gate, "open")
+    assert hass.states.get(flag).state == "off"
+    await hass.services.async_call(
+        DOMAIN, "answer_prompt", {"prompt_id": close["prompt_id"], "action": "left_open"},
+        blocking=True)
+    await hass.async_block_till_done()
+    assert await list_prompts(hass, hass_ws_client, entry) == []  # settled, no reminder
+    assert hass.states.get(flag).state == "on"
+    assert hass.states.get(believed).state == "on"
+    # Closing it later needs no Prompt: the Gate's own Open switch records it.
+    await hass.services.async_call("switch", "turn_off", {"entity_id": flag}, blocking=True)
+    assert hass.states.get(flag).state == "off"
+    assert hass.states.get(believed).state == "off"
+    assert async_get_director(hass, entry.entry_id).state["gate_flags"][gate["id"]] is False
+
+
+async def test_setting_a_gate_open_or_closed_from_the_panel_list_records_it(
+    hass, hass_ws_client, setup
+) -> None:
+    entry, _ = setup
+    gate = await make_gate(hass, hass_ws_client, entry)
+    flag = eid(hass, "switch", entry, gate, "open_flag")
+    msg = await ws(hass, hass_ws_client, entry, "set_gate_flag", gate_id=gate["id"], open=True)
+    assert msg["success"], msg
+    await hass.async_block_till_done()
+    assert hass.states.get(flag).state == "on"
+    msg = await ws(hass, hass_ws_client, entry, "list_gates")
+    assert [g["open"] for g in msg["result"]["gates"]] == [True]
+    msg = await ws(hass, hass_ws_client, entry, "set_gate_flag", gate_id=gate["id"], open=False)
+    assert msg["success"], msg
+    await hass.async_block_till_done()
+    assert hass.states.get(flag).state == "off"
+    msg = await ws(hass, hass_ws_client, entry, "list_gates")
+    assert [g["open"] for g in msg["result"]["gates"]] == [False]
+
+
+async def test_a_gate_with_a_state_entity_has_no_flag_to_set(
+    hass, hass_ws_client, setup
+) -> None:
+    entry, _ = setup
+    er.async_get(hass).async_get_or_create("binary_sensor", "t", "contact",
+                                           suggested_object_id="contact")
+    hass.states.async_set("binary_sensor.contact", "off")
+    gate = await make_gate(hass, hass_ws_client, entry, state_entity="binary_sensor.contact")
+    msg = await ws(hass, hass_ws_client, entry, "set_gate_flag", gate_id=gate["id"], open=True)
+    assert not msg["success"]
+    assert async_get_director(hass, entry.entry_id).state["gate_flags"].get(gate["id"]) is None
+    msg = await ws(hass, hass_ws_client, entry, "set_gate_flag", gate_id="nope", open=True)
+    assert not msg["success"] and msg["error"]["code"] == "not_found"
 
 
 async def test_skip_plan_answer_empties_the_schedule(hass, hass_ws_client, setup) -> None:

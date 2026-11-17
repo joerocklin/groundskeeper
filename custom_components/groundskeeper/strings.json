@@ -301,6 +301,9 @@
     "prompt_action_closed": {
       "message": "Closed"
     },
+    "prompt_action_left_open": {
+      "message": "Left open"
+    },
     "prompt_action_dismiss": {
       "message": "Dismiss"
     },

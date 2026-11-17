@@ -477,6 +477,31 @@ async def test_gate_urgent_resend_is_time_sensitive_but_the_first_warning_is_not
     assert first["data"]["tag"] == second["data"]["tag"]  # replaces the earlier one
 
 
+async def test_the_close_prompt_of_a_manual_gate_has_a_left_open_button_that_answers_it(
+    hass, director, phones
+) -> None:
+    from custom_components.groundskeeper.core import RaisePrompt
+
+    entry, _, _ = director
+    d = async_get_director(hass, entry.entry_id)
+    ctx = {"gate_id": "g1", "gate_name": "Fence gate"}
+    await d.dispatch(lambda now: RaisePrompt(now, "gate_close", "g1", ["closed", "left_open"], ctx))
+    await hass.async_block_till_done()
+    [note] = sent(phones[PIXEL])
+    assert note["title"] == "Example Mower: Through, close Fence gate"
+    [prompt] = d.state["prompts"]
+    assert [a["title"] for a in note["data"]["actions"]] == ["Closed", "Left open"]
+    assert [a["action"] for a in note["data"]["actions"]] == [
+        f"MOWDIR_{prompt['prompt_id']}_CLOSED", f"MOWDIR_{prompt['prompt_id']}_LEFT_OPEN"]
+    events = async_capture_events(hass, EVENT_TYPE)
+    tap(hass, prompt["prompt_id"], "left_open")
+    await hass.async_block_till_done()
+    [answered] = types(events, "prompt_answered")
+    assert answered["action"] == "left_open"
+    assert d.state["prompts"] == []
+    assert [c["data"]["tag"] for c in cleared(phones[PIXEL])] == [prompt["tag"]]
+
+
 # -- push tags (#89) -----------------------------------------------------------------
 
 REAL_ID = "01M5QSXDJJG7AWR520WCC3Z314"  # a 26-character ULID, like real Gate, Run and Check ids

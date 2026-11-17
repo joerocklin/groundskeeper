@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.groundskeeper.adapter import RainStop, SelfCheckReason
+from custom_components.groundskeeper.adapter import RainStop, SelfCheckReason, ZoneTaskComplete
 from custom_components.groundskeeper.core import (
     OUT_CROSSING_FALLBACK,
     AddPlan,
@@ -157,7 +157,7 @@ def test_crossing_ends_when_mowing_in_the_zone_closes_the_flag_and_prompts_to_cl
     assert state["state"]["gate_flags"] == {"g1": False}
     assert state["state"]["gate_crossings"] == {}
     [close] = prompts(state, "gate_close")
-    assert close["actions"] == ["closed"] and close["subject"] == "g1"
+    assert close["actions"] == ["closed", "left_open"] and close["subject"] == "g1"
     state, _ = step(state, AnswerPrompt(at(110), close["prompt_id"], "closed"), env)
     assert prompts(state, "gate_close") == []
 
@@ -509,3 +509,152 @@ def test_the_gate_is_only_asked_about_once_nothing_else_holds_the_run() -> None:
     assert not events(fx, "gate_crossing_expected")
     state, fx = step(state, SnapshotReceived(at(10), DOCKED), env)
     assert len(prompts(state)) == 1 and events(fx, "gate_crossing_expected")
+
+
+# -- a Gate left open (issue #98) ----------------------------------------------------
+
+
+def through(env):
+    """A gated Run let through: the Mower is in its Zone and the close Prompt is up."""
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), IN_ZONE), env)
+    return state
+
+
+def answer_close(state, env, action, t=110):
+    [close] = prompts(state, "gate_close")
+    return step(state, AnswerPrompt(at(t), close["prompt_id"], action), env)
+
+
+def two_runs_through(env):
+    """Run 1 is through and its close Prompt answered; Run 2 waits behind it on
+    the same Zone, so the Gate matters again when Run 1 is home."""
+    state = through(env)
+    state, _ = step(state, AddPlan(at(105), *make_plan("p2")), env)
+    state, _ = answer_close(state, env, "closed")
+    return state
+
+
+def run_one_home(env, state):
+    """Run 1 is nearly done and asks for the Gate (the way back), then finishes:
+    the Mower is home, its back crossing is over and the Gate is presumed closed."""
+    state, _ = step(state, SnapshotReceived(at(800), replace(IN_ZONE, progress=96)), env)
+    state, _ = answer(state, env, "opened", t=810)
+    state, fx = step(state, SignalReceived(at(900), ZoneTaskComplete(GATED_ZONE)), env)
+    state, _ = step(state, SnapshotReceived(at(905), DOCKED), env)
+    return state, fx
+
+
+def test_a_manual_gates_close_prompt_offers_left_open() -> None:
+    state = through(env_for(gate()))
+    [close] = prompts(state, "gate_close")
+    assert close["actions"] == ["closed", "left_open"]
+
+
+def test_a_gate_with_a_state_entity_is_not_offered_left_open() -> None:
+    env = env_for(gate(state_entity="cover.fence"), entity_states={"g1": "open"})
+    state, _ = begin(env)
+    state = start_through(env, state)  # the Gate reads open: nothing to ask
+    state, _ = step(state, SnapshotReceived(at(100), IN_ZONE), env)
+    [close] = prompts(state, "gate_close")
+    assert close["actions"] == ["closed"]
+    state, fx = step(state, AnswerPrompt(at(110), close["prompt_id"], "left_open"), env)
+    assert prompts(state, "gate_close") == [close]  # a stale action: nothing happens
+    assert not events(fx, "prompt_answered")
+    assert state["state"]["gate_flags"] == {"g1": False}
+
+
+def test_left_open_keeps_the_gate_believed_open_and_settles_the_prompt() -> None:
+    env = env_for(gate())
+    state = through(env)
+    assert state["state"]["gate_flags"] == {"g1": False}  # presumed closed until told
+    state, fx = answer_close(state, env, "left_open")
+    assert state["state"]["gate_flags"] == {"g1": True}
+    assert prompts(state, "gate_close") == [] and prompts(state) == []
+    [answered] = events(fx, "prompt_answered")
+    assert (answered.payload["kind"], answered.payload["action"]) == ("gate_close", "left_open")
+    assert not [e for e in fx if isinstance(e, GateActionEffect)]
+    assert not events(fx, "prompt_sent")  # no close reminder, no new Prompt of any kind
+    state, fx = step(state, SnapshotReceived(at(130), IN_ZONE), env)  # time passes
+    assert prompts(state, "gate_close") == [] and not events(fx, "prompt_sent")
+    assert state["state"]["gate_flags"] == {"g1": True}
+
+
+def test_closed_still_leaves_the_gate_presumed_closed() -> None:
+    env = env_for(gate())
+    state, fx = answer_close(through(env), env, "closed")
+    assert state["state"]["gate_flags"] == {"g1": False}
+    assert prompts(state, "gate_close") == []
+    assert [e.payload["action"] for e in events(fx, "prompt_answered")] == ["closed"]
+
+
+def test_the_next_run_starts_without_an_open_prompt_when_the_gate_was_left_open() -> None:
+    env = env_for(gate())
+    state = two_runs_through(env)
+    state, _ = run_one_home(env, state)
+    [close] = prompts(state, "gate_close")  # the Mower is home: close behind it
+    state, _ = step(state, AnswerPrompt(at(910), close["prompt_id"], "left_open"), env)
+    assert failing(state) == [] and prompts(state) == []
+    state, _ = step(state, TimerFired(at(920)), env)  # stability window opens
+    state, fx = step(state, TimerFired(at(990)), env)
+    assert prompts(state) == []
+    assert [e.run_id for e in fx if isinstance(e, StartRunEffect)] == ["p2-r1"]
+
+
+def test_without_left_open_the_next_run_asks_for_the_gate_again() -> None:
+    env = env_for(gate())
+    state, _ = run_one_home(env, two_runs_through(env))
+    [close] = prompts(state, "gate_close")
+    state, _ = step(state, AnswerPrompt(at(910), close["prompt_id"], "closed"), env)
+    assert failing(state) == [("gate_open", "gate_closed:Fence gate")]
+    [prompt] = prompts(state)
+    assert prompt["actions"] == ["opened", "closed", "skip_plan"]
+
+
+def test_left_open_settles_an_open_prompt_already_waiting_for_the_same_gate() -> None:
+    """The close Prompt and the next Run's open Prompt can be up together: the
+    owner who says it was left open has also said the Gate is open."""
+    env = env_for(gate())
+    state, _ = run_one_home(env, two_runs_through(env))
+    [open_prompt] = prompts(state)
+    state, fx = answer_close(state, env, "left_open", t=910)
+    assert prompts(state) == [] and prompts(state, "gate_close") == []
+    assert [e.payload["action"] for e in events(fx, "prompt_answered")
+            if e.payload["kind"] == "gate"] == ["gate_open"]
+    assert failing(state) == [] and open_prompt["kind"] == "gate"
+
+
+def test_left_open_does_not_outlive_the_next_crossing() -> None:
+    """The Mower going through again resets the flag, as it always did, and the
+    close Prompt is back: the Gate is only believed open until it is crossed."""
+    env = env_for(gate())
+    state, _ = run_one_home(env, two_runs_through(env))
+    state, _ = answer_close(state, env, "left_open", t=910)
+    state, _ = step(state, TimerFired(at(920)), env)
+    state, fx = step(state, TimerFired(at(990)), env)
+    assert [e for e in fx if isinstance(e, StartRunEffect)]
+    state, fx = step(state, SnapshotReceived(at(1100), IN_ZONE), env)
+    assert events(fx, "gate_crossing_ended")
+    assert state["state"]["gate_flags"] == {"g1": False}
+    [close] = prompts(state, "gate_close")
+    assert close["actions"] == ["closed", "left_open"]
+
+
+def test_turning_the_open_switch_off_records_the_gate_closed_for_the_next_crossing() -> None:
+    env = env_for(gate())
+    state, _ = run_one_home(env, two_runs_through(env))
+    state, _ = answer_close(state, env, "left_open", t=910)
+    assert failing(state) == [] and prompts(state) == []
+    state, _ = step(state, SetGateFlag(at(930), "g1", False), env)  # the owner closed it
+    assert state["state"]["gate_flags"] == {"g1": False}
+    assert failing(state) == [("gate_open", "gate_closed:Fence gate")]
+    [prompt] = prompts(state)
+    assert prompt["kind"] == "gate" and prompt["actions"] == ["opened", "closed", "skip_plan"]
+
+
+def test_turning_the_open_switch_on_after_the_close_prompt_stops_the_open_prompt() -> None:
+    env = env_for(gate())
+    state, _ = run_one_home(env, two_runs_through(env))
+    assert len(prompts(state)) == 1 and len(prompts(state, "gate_close")) == 1
+    state, _ = step(state, SetGateFlag(at(930), "g1", True), env)
+    assert failing(state) == [] and prompts(state) == []
