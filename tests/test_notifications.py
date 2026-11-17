@@ -5,9 +5,11 @@ simulated `mobile_app_notification_action` events. Nothing real is called.
 """
 
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from homeassistant.components.lawn_mower import LawnMowerActivity
 from homeassistant.core import ServiceCall
 from pytest_homeassistant_custom_component.common import (
     async_capture_events,
@@ -31,7 +33,7 @@ from tests.test_tracer_bullet import (  # noqa: F401
     director,
     state_of,
 )
-from custom_components.groundskeeper.adapter import ZoneTaskComplete
+from custom_components.groundskeeper.adapter import NewError, ZoneTaskComplete
 
 from homeassistant.components import persistent_notification
 
@@ -392,6 +394,67 @@ async def test_check_timeout_event_becomes_a_check_wait_notice(
     assert note["title"] == "Example Mower: Check timed out"
     assert note["message"] == "Wet grass is blocking the Schedule: rain_detected"
     assert re.fullmatch(r"mowdir_[0-9a-f]{10}_check_timeout_wet_grass", note["data"]["tag"])
+
+
+async def test_error_while_still_mowing_is_a_plain_notice_and_the_run_goes_on(
+    hass, director, phones, freezer
+) -> None:
+    """Issue #96: the Mower logged an error and kept mowing (Stage 3, 2026-11-16)."""
+    entry, mower, _ = director
+    events = async_capture_events(hass, EVENT_TYPE)
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    mower.emit_snapshot(MOWING)
+    await hass.async_block_till_done()
+    when = datetime(2026, 11, 16, 21, 7, 58, tzinfo=timezone.utc)
+    mower.emit_signal(NewError("11132", "Blade stopped: wheel slip detected while reversing", when))
+    await hass.async_block_till_done()
+
+    d = async_get_director(hass, entry.entry_id)
+    assert [r["status"] for r in d.data["state"]["runs"]] == ["mowing"]
+    assert d.state["prompts"] == []
+    [tolerated] = [e.data for e in events if e.data["type"] == "error_tolerated"]
+    assert tolerated["code"] == "11132"
+    assert tolerated["zone_name"] == "Front Lawn"
+    assert tolerated["time"] == when.isoformat()
+    for calls in phones.values():
+        [note] = sent(calls)
+        assert note["title"] == "Example Mower: Mower reported an error"
+        assert note["message"].splitlines() == [
+            "Zone: Front Lawn",
+            "Error 11132: Blade stopped: wheel slip detected while reversing",
+            "The Mower is still mowing, so the Run goes on.",
+        ]
+        assert "actions" not in note["data"]  # a notice, never a Prompt
+        assert "push" not in note["data"]
+        assert re.fullmatch(r"mowdir_[0-9a-f]{10}_error_tolerated_[0-9a-f]{10}", note["data"]["tag"])
+
+
+async def test_error_after_the_mower_stopped_still_fails_the_run_with_a_prompt(
+    hass, director, phones, freezer
+) -> None:
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    await advance(hass, freezer, 61)
+    mower.emit_snapshot(MOWING)
+    await hass.async_block_till_done()
+    mower.emit_snapshot(replace(MOWING, activity=LawnMowerActivity.ERROR))
+    await hass.async_block_till_done()
+    mower.emit_signal(NewError("1008", "Robot is locked", datetime(2026, 11, 16, 21, 0, tzinfo=timezone.utc)))
+    await hass.async_block_till_done()
+    d = async_get_director(hass, entry.entry_id)
+    assert [r["status"] for r in d.data["state"]["runs"]] == ["failed"]
+    assert [p["kind"] for p in d.state["prompts"]] == ["run_failed"]
+    [note] = sent(phones[PIXEL])
+    assert note["title"] == "Example Mower: Run failed"
+
+
+def test_logbook_describes_a_tolerated_error() -> None:
+    from custom_components.groundskeeper.logbook import describe
+
+    text = describe({"type": "error_tolerated", "code": "11132", "message": "wheel slip",
+                     "zone_name": "Front Lawn"})
+    assert text == "Mower reported error 11132 (wheel slip) but is still mowing Front Lawn"
 
 
 async def test_gate_urgent_resend_is_time_sensitive_but_the_first_warning_is_not(

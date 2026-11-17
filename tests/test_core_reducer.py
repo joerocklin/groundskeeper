@@ -13,6 +13,7 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 from custom_components.groundskeeper.adapter import (
     Accepted,
     JobStarted,
+    Movement,
     NewError,
     Refused,
     SelfCheckReason,
@@ -38,6 +39,7 @@ from custom_components.groundskeeper.core import (
     initial_core_state,
     plan_status,
     reduce,
+    snapshot_to_dict,
 )
 from tests.fake_mower import DEFAULT_SNAPSHOT
 
@@ -661,13 +663,162 @@ def no_abort(fx):
     assert not [e for e in fx if isinstance(e, AbortRunEffect)]
 
 
+# A NewError is evidence, not a verdict (issue #96): while the snapshot still
+# reads `mowing` with a live job the Mower is working through it, so the Run
+# stays `mowing`. Any other snapshot fails the Run as before.
+NOT_MOWING_WITH_A_JOB = [
+    pytest.param(replace(MOWING, activity=LawnMowerActivity.ERROR), id="activity_error"),
+    pytest.param(replace(MOWING, activity=LawnMowerActivity.PAUSED), id="paused"),
+    pytest.param(replace(MOWING, activity=LawnMowerActivity.RETURNING), id="returning"),
+    pytest.param(replace(MOWING, job_active=False), id="no_live_job"),
+    pytest.param(replace(MOWING, available=False), id="unavailable"),
+    pytest.param(replace(MOWING, activity=None), id="activity_unknown"),
+    pytest.param(replace(DOCKED, activity=LawnMowerActivity.IDLE), id="idle"),
+    pytest.param(DOCKED, id="docked"),
+]
+
+
 @pytest.mark.parametrize("code", ["2741", "1003", "9999", "unknown"])
-def test_new_error_while_mowing_fails_run_with_no_command(code):
+@pytest.mark.parametrize("snapshot", NOT_MOWING_WITH_A_JOB)
+def test_new_error_while_mower_not_mowing_with_a_job_fails_run_with_no_command(
+    code, snapshot
+):
     state = mowing_state()
+    state["state"]["snapshot"] = snapshot_to_dict(snapshot)  # the latest evidence
     state, fx = step(state, SignalReceived(at(500), NewError(code, "boom", at(499))))
     failed_with(state, "error")
     no_abort(fx)
     assert state["state"]["last_error_time"] == at(499).isoformat()
+    assert state["state"]["runs"][0]["error"]["code"] == code
+    assert not events(fx, "error_tolerated")
+
+
+def test_new_error_with_no_snapshot_fails_run():
+    state = mowing_state()
+    state["state"]["snapshot"] = None
+    state, fx = step(state, SignalReceived(at(500), NewError("1003", "boom", at(499))))
+    failed_with(state, "error")
+    no_abort(fx)
+
+
+STAGE_3 = replace(MOWING, progress=38, movement=Movement(progress_pct=38))
+
+
+def test_new_error_while_still_mowing_is_tolerated_and_recorded():
+    """Stage 3 (2026-11-16): the error was stamped 21:07:58 and Home Assistant
+    saw it at 21:10:19, when the Mower read `mowing`, job active, progress 38."""
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(480), STAGE_3))
+    error = NewError("11132", "Blade stopped: wheel slip detected while reversing", at(340))
+    state, fx = step(state, SignalReceived(at(481), error))
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert state["state"]["active_run_id"] == "p1-r1"
+    assert state["state"]["prompts"] == []
+    assert not [e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect))]
+    assert not events(fx, "prompt_sent")
+    assert not events(fx, "run_status_changed")
+    assert state["state"]["last_error_time"] == at(340).isoformat()  # still deduped
+    [event] = events(fx, "error_tolerated")
+    assert event.payload == {
+        "run_id": "p1-r1",
+        "zone_name": "Front Lawn",
+        "code": "11132",
+        "message": "Blade stopped: wheel slip detected while reversing",
+        "time": at(340).isoformat(),
+    }
+    [note] = state["state"]["runs"][0]["tolerated_errors"]
+    assert note == {
+        "code": "11132",
+        "message": "Blade stopped: wheel slip detected while reversing",
+        "time": at(340).isoformat(),
+        "seen_at": at(481).isoformat(),
+    }
+    assert "error" not in state["state"]["runs"][0]  # nothing failed the Run
+
+
+def test_tolerated_error_is_replayed_neither_as_event_nor_note():
+    state = mowing_state()
+    error = NewError("11132", "slip", at(340))
+    state, _ = step(state, SignalReceived(at(481), error))
+    again, fx = step(state, SignalReceived(at(482), error))
+    assert again == state
+    assert not events(fx)
+
+
+def test_each_tolerated_error_adds_a_note():
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(481), NewError("11132", "slip", at(340))))
+    state, fx = step(state, SignalReceived(at(900), NewError("2741", "bump", at(899))))
+    assert run_status(state) == ["mowing"]
+    assert [n["code"] for n in state["state"]["runs"][0]["tolerated_errors"]] == [
+        "11132",
+        "2741",
+    ]
+    assert len(events(fx, "error_tolerated")) == 1
+
+
+def test_tolerated_error_note_survives_in_the_archived_run():
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(481), NewError("11132", "slip", at(340))))
+    state, _ = step(state, SignalReceived(at(500), ZoneTaskComplete("11111111")))
+    [archived] = state["history"]["runs"]
+    assert archived["status"] == "done"
+    assert archived["tolerated_errors"][0]["code"] == "11132"
+
+
+def test_tolerated_error_then_idle_without_job_still_fails_stopped_off_dock():
+    """The existing rules end the Run once the Mower stops."""
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(481), NewError("11132", "slip", at(340))))
+    state, _ = step(state, SnapshotReceived(at(1000), IDLE_OFF_JOB))
+    state, fx = step(state, TimerFired(at(1030)))
+    assert run_status(state) == ["mowing"]
+    state, fx = step(state, TimerFired(at(1061)))
+    failed_with(state, "stopped_off_dock")
+    no_abort(fx)
+
+
+def test_tolerated_error_then_mower_reads_error_fails_run_after_the_window():
+    """The error arrived just before the snapshot caught up: a Mower that then
+    reads `error` for 60 s is stopped, and the Run fails with the error."""
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(481), NewError("1008", "Robot is locked", at(480))))
+    locked = replace(MOWING, activity=LawnMowerActivity.ERROR)
+    state, _ = step(state, SnapshotReceived(at(500), locked))
+    assert state["state"]["deadlines"]["error_stable"] == at(560).isoformat()
+    state, fx = step(state, TimerFired(at(530)))
+    assert run_status(state) == ["mowing"]
+    state, fx = step(state, TimerFired(at(561)))
+    failed_with(state, "error")
+    no_abort(fx)
+    assert state["state"]["runs"][0]["error"]["code"] == "1008"
+    assert "error_stable" not in state["state"]["deadlines"]
+
+
+def test_tolerated_error_then_error_flicker_keeps_the_run_mowing():
+    state = mowing_state()
+    state, _ = step(state, SignalReceived(at(481), NewError("11132", "slip", at(480))))
+    state, _ = step(state, SnapshotReceived(at(500), replace(MOWING, activity=LawnMowerActivity.ERROR)))
+    state, _ = step(state, SnapshotReceived(at(520), MOWING))
+    assert "error_stable" not in state["state"]["deadlines"]
+    state, _ = step(state, TimerFired(at(600)))
+    assert run_status(state) == ["mowing"]
+
+
+def test_error_activity_without_any_error_is_left_to_the_other_rules():
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(500), replace(MOWING, activity=LawnMowerActivity.ERROR)))
+    assert "error_stable" not in state["state"]["deadlines"]
+    state, _ = step(state, TimerFired(at(600)))
+    assert run_status(state) == ["mowing"]
+
+
+def test_error_while_waiting_still_blocks_the_schedule_even_if_the_snapshot_reads_mowing():
+    state = waiting_state(snapshot=replace(DOCKED, activity=LawnMowerActivity.MOWING, job_active=True))
+    state, fx = step(state, SignalReceived(at(1), NewError("2748", "blocked", at(0))))
+    assert state["state"]["blocking_error"]["code"] == "2748"
+    assert not events(fx, "error_tolerated")
 
 
 def test_replayed_error_older_than_persisted_does_not_fail_run():
@@ -770,7 +921,7 @@ def test_idle_with_job_active_is_not_stopped_off_dock():
 
 
 def moving(progress=None, area=None, lat=None, activity=LawnMowerActivity.MOWING):
-    from custom_components.groundskeeper.adapter import Movement, Position
+    from custom_components.groundskeeper.adapter import Position
 
     pos = Position(lat, 0.0) if lat is not None else None
     return replace(MOWING, activity=activity, movement=Movement(progress, area, pos))

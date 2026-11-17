@@ -1,7 +1,8 @@
 """Notifier: Prompts and notices to phones (spec §12, ticket #24).
 
 The reducer decides *what happened* (`prompt_sent`, `prompt_reminder`,
-`prompt_answered`, `run_status_changed`, `schedule_completed`); this module
+`prompt_answered`, `run_status_changed`, `schedule_completed`,
+`check_timeout`, `error_tolerated`); this module
 turns those effect events into `notify.mobile_app_*` calls, `clear_notification`
 by tag, and a `persistent_notification` fallback when no phone is configured.
 It reads the Director's state but never changes it; a failed delivery is
@@ -128,6 +129,8 @@ class Notifier:
                 await self._schedule_completed(payload)
             case "check_timeout":
                 await self._check_timeout(payload)
+            case "error_tolerated":
+                await self._error_tolerated(payload)
 
     # -- Prompts ----------------------------------------------------------------------
 
@@ -243,6 +246,25 @@ class Notifier:
                 )
             ],
             subject=payload["check_id"],
+        )
+
+    async def _error_tolerated(self, payload: dict[str, Any]) -> None:
+        """The Mower logged an error but is still mowing: a plain notice, never a
+        Prompt (issue #96). It has no toggle: it is rare and tells the owner why
+        the Run was not failed. One notice per Run (a later error replaces it)."""
+        strings = await async_prompt_strings(self._hass)
+        await self.async_notice(
+            "error_tolerated",
+            "error_tolerated",
+            strings["prompt_headline_error_tolerated"],
+            [
+                strings["prompt_zone"].format(zone=payload.get("zone_name")),
+                strings["prompt_error_tolerated"].format(
+                    code=payload.get("code"), message=payload.get("message")
+                ),
+                strings["prompt_error_tolerated_still_mowing"],
+            ],
+            subject=payload["run_id"],
         )
 
     def _find_run(self, run_id: str) -> dict[str, Any] | None:
