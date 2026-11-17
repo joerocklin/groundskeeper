@@ -6,6 +6,7 @@ import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity as A
 
 from custom_components.groundskeeper.core import (
+    OUT_CROSSING_FALLBACK,
     AnswerPrompt,
     GateActionEffect,
     SnapshotReceived,
@@ -14,7 +15,9 @@ from custom_components.groundskeeper.core import (
 from tests.test_core_reducer import DOCKED, MOWING, at, events, step
 from tests.test_gates_reducer import (
     CLOSE_ACTION,
+    GATED_ZONE,
     OPEN_ACTION,
+    OTHER_ZONE,
     answer,
     begin,
     env_for,
@@ -29,13 +32,16 @@ def snap(base=MOWING, **kw):
 
 
 def mowing_through(env, battery=80, start_env=None):
-    """A gated Run that has been let through and is mowing; the Gate is closed
-    behind it again. `start_env` is what the Gate looked like at Run start."""
+    """A gated Run that has been let through and is mowing in its Zone; the Gate
+    is closed behind it again. `start_env` is what the Gate looked like at Run
+    start."""
     state, _ = begin(start_env or env)
     if prompts(state):
         state, _ = answer(state, start_env or env, "opened")
     state = start_through(start_env or env, state)
-    state, _ = step(state, SnapshotReceived(at(100), snap(battery=battery)), env)
+    state, _ = step(
+        state, SnapshotReceived(at(100), snap(battery=battery, zone=GATED_ZONE)), env
+    )
     assert state["state"]["gate_crossings"] == {}
     return state
 
@@ -82,7 +88,7 @@ def step_run(env):
     state, _ = step(state, SnapshotReceived(at(0), DOCKED), env)
     state, _ = step(state, TimerFired(at(10)), env)
     state, _ = step(state, TimerFired(at(80)), env)
-    state, _ = step(state, SnapshotReceived(at(100), snap(battery=40)), env)
+    state, _ = step(state, SnapshotReceived(at(100), snap(battery=40, zone=GATED_ZONE)), env)
     return state, None
 
 
@@ -279,25 +285,26 @@ def test_resume_warns_ahead_and_the_crossing_ends_in_the_zone() -> None:
     [warning] = expected(fx)
     assert (warning["kind"], warning["direction"]) == ("resume", "out")
     state, _ = answer(state, env, "opened", t=1610)
+    # Leaving the dock the Zone reads None: not through the Gate yet (issue #97).
     state, fx = feed(state, env, (1700, snap(battery=96)))
+    assert not events(fx, "gate_crossing_ended")
+    assert prompts(state, "gate_close") == []
+    assert state["state"]["gate_flags"] == {"g1": True}
+    state, fx = feed(state, env, (1760, snap(battery=95, zone=GATED_ZONE)))
     assert events(fx, "gate_crossing_ended")
     assert prompts(state, "gate_close")
     assert state["state"]["gate_flags"] == {"g1": False}
 
 
-# The gated Run's native_ref (ENV's "z1" Zone) and a Zone that is not it.
-GATED_ZONE = "11111111"
-OTHER_ZONE = "99999999"
-
-
 @pytest.mark.parametrize(
     ("zone", "arrived"),
-    [(GATED_ZONE, True), (None, True), (OTHER_ZONE, False)],
+    [(GATED_ZONE, True), (None, False), (OTHER_ZONE, False)],
     ids=["in-the-gated-zone", "zone-unknown", "in-another-zone"],
 )
 def test_the_way_out_ends_when_mowing_in_the_gated_zone(zone, arrived) -> None:
-    """Mowing in the Run's own Zone (or in an unknown one) means the Mower
-    came through; mowing in some other Zone does not (issue #82)."""
+    """Only mowing in the Run's own Zone means the Mower came through: an
+    unknown Zone is the transit from the dock (issue #97) and some other Zone
+    is a stray reading (issue #82)."""
     env = env_for(gate())
     state = recharging(env, battery=80)
     state, fx = feed(state, env, (1600, snap(DOCKED, job_active=True, recharging=True,
@@ -312,16 +319,34 @@ def test_the_way_out_ends_when_mowing_in_the_gated_zone(zone, arrived) -> None:
     assert bool(prompts(state, "gate_close")) is arrived
 
 
+def test_a_resume_crossing_ends_at_the_fallback_when_no_zone_is_reported() -> None:
+    """The Mower leaves the dock after a recharge and the Zone never reads."""
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = recharging(env, battery=80)
+    state, fx = feed(state, env, (1600, snap(DOCKED, job_active=True, recharging=True,
+                                             battery=91)))
+    assert [w["kind"] for w in expected(fx)] == ["resume"]
+    state, _ = answer(state, env, "opened", t=1610)
+    state, fx = feed(state, env, (1700, snap(battery=96)))
+    assert state["state"]["gate_crossings"].keys() == {"g1"}
+    state, fx = feed(state, env, (1700 + limit - 1, snap(battery=95)))
+    assert not events(fx, "gate_crossing_ended")
+    state, fx = feed(state, env, (1700 + limit, snap(battery=94)))
+    assert events(fx, "gate_crossing_ended")
+    assert prompts(state, "gate_close")
+
+
 @pytest.mark.parametrize(
     ("zone", "warned"),
-    [(GATED_ZONE, False), (None, False), (OTHER_ZONE, True)],
+    [(GATED_ZONE, False), (None, True), (OTHER_ZONE, True)],
     ids=["in-the-gated-zone", "zone-unknown", "in-another-zone"],
 )
 def test_leaving_the_dock_unannounced_is_warned_unless_already_in_the_gated_zone(
     zone, warned
 ) -> None:
     """Leaving the dock to mow before any resume warning: urgent, unless the
-    Mower is already reported in the Run's own Zone (issue #82)."""
+    Mower is already reported in the Run's own Zone (issues #82, #97)."""
     env = env_for(gate())
     state = recharging(env, battery=80)
     state, _ = feed(state, env, (1000, snap(DOCKED, job_active=True, recharging=True,

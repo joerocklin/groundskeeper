@@ -10,13 +10,15 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_capture_events
 
 from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
-from tests.fake_mower import DEFAULT_SNAPSHOT
+from tests.fake_mower import DEFAULT_SNAPSHOT, DEFAULT_ZONES
 from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_checks_ha import add_plan, advance, setup, ws  # noqa: F401
 from tests.test_prompts import list_prompts
 
 MOWING = replace(DEFAULT_SNAPSHOT, activity=LawnMowerActivity.MOWING, job_active=True,
                  job_ref="j1")
+# The Mower reads as inside the Run's Zone, the Front Lawn (issue #97).
+IN_ZONE = replace(MOWING, zone=DEFAULT_ZONES[0].native_ref)
 
 
 async def channel_to_dock(hass, hass_ws_client, entry):
@@ -185,10 +187,16 @@ async def test_run_start_holds_for_the_gate_until_the_user_opens_it(
     await advance(hass, freezer, 61)
     await advance(hass, freezer, 61)
     assert [c[0] for c in mower.commands] == ["start_run"]
-    mower.emit_snapshot(MOWING)
+    flag = eid(hass, "switch", entry, gate, "open_flag")
+    mower.emit_snapshot(MOWING)  # on its way from the dock: the Zone reads None
+    await hass.async_block_till_done()
+    assert hass.states.get(crossing).state == "on"
+    assert hass.states.get(flag).state == "on"
+    assert await list_prompts(hass, hass_ws_client, entry) == []
+    mower.emit_snapshot(IN_ZONE)
     await hass.async_block_till_done()
     assert hass.states.get(crossing).state == "off"
-    assert hass.states.get(eid(hass, "switch", entry, gate, "open_flag")).state == "off"
+    assert hass.states.get(flag).state == "off"
     kinds = [e.data["type"] for e in events]
     assert "gate_crossing_expected" in kinds and "gate_crossing_ended" in kinds
     [close] = await list_prompts(hass, hass_ws_client, entry)
@@ -225,7 +233,7 @@ async def test_open_and_close_actions_run_instead_of_notifying(
     await advance(hass, freezer, 61)
     await advance(hass, freezer, 61)
     assert [c[0] for c in mower.commands] == ["start_run"]
-    mower.emit_snapshot(MOWING)
+    mower.emit_snapshot(IN_ZONE)
     await hass.async_block_till_done()
     assert [c.service for c in calls] == ["open_gate", "close_gate"]
     assert await list_prompts(hass, hass_ws_client, entry) == []

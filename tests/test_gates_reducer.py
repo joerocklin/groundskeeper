@@ -1,19 +1,33 @@
 """Gate open Check, Gate Prompt and crossings at the reducer seam (spec §9.2, §10)."""
 
 from dataclasses import replace
+from datetime import timedelta
 
+import pytest
+from homeassistant.components.lawn_mower import LawnMowerActivity
+
+from custom_components.groundskeeper.adapter import RainStop, SelfCheckReason
 from custom_components.groundskeeper.core import (
+    OUT_CROSSING_FALLBACK,
     AddPlan,
     AnswerPrompt,
+    CancelSchedule,
     GateActionEffect,
     SetGateFlag,
+    SignalReceived,
     SnapshotReceived,
     StartRunEffect,
+    StopNow,
     TimerFired,
     initial_core_state,
 )
 from custom_components.groundskeeper.gates import normalise_gate
 from tests.test_core_reducer import DOCKED, ENV, MOWING, at, events, make_plan, step
+
+# The gated Run's native_ref (ENV's "z1" Zone) and a Zone that is not it.
+GATED_ZONE = "11111111"
+OTHER_ZONE = "99999999"
+IN_ZONE = replace(MOWING, zone=GATED_ZONE)
 
 OPEN_ACTION = [{"action": "cover.open_cover", "target": {"entity_id": "cover.fence"}}]
 CLOSE_ACTION = [{"action": "cover.close_cover", "target": {"entity_id": "cover.fence"}}]
@@ -132,12 +146,12 @@ def start_through(env, state):
     return state
 
 
-def test_crossing_ends_when_mowing_closes_the_flag_and_prompts_to_close() -> None:
+def test_crossing_ends_when_mowing_in_the_zone_closes_the_flag_and_prompts_to_close() -> None:
     env = env_for(gate())
     state, _ = begin(env)
     state, _ = answer(state, env, "opened")
     state = start_through(env, state)
-    state, fx = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, fx = step(state, SnapshotReceived(at(100), IN_ZONE), env)
     [ended] = events(fx, "gate_crossing_ended")
     assert ended.payload["gate_id"] == "g1" and ended.payload["run_id"] == "p1-r1"
     assert state["state"]["gate_flags"] == {"g1": False}
@@ -153,10 +167,228 @@ def test_close_action_runs_instead_of_the_through_prompt() -> None:
     state, _ = begin(env)
     state, _ = answer(state, env, "opened")
     state = start_through(env, state)
-    state, fx = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, fx = step(state, SnapshotReceived(at(100), IN_ZONE), env)
     [act] = [e for e in fx if isinstance(e, GateActionEffect)]
     assert (act.gate_id, act.which) == ("g1", "close")
     assert prompts(state, "gate_close") == []
+
+
+# -- the Mower is not through the Gate until the Zone says so (issue #97) -----------
+
+
+def gate_opened(env):
+    """The Gate Prompt is answered and the Run has been started."""
+    state, _ = begin(env)
+    state, _ = answer(state, env, "opened")
+    return start_through(env, state)
+
+
+def assert_still_crossing(state, fx):
+    assert state["state"]["gate_crossings"].keys() == {"g1"}
+    assert state["state"]["gate_flags"] == {"g1": True}
+    assert not events(fx, "gate_crossing_ended")
+    assert prompts(state, "gate_close") == []
+
+
+@pytest.mark.parametrize(
+    "zone", [None, OTHER_ZONE], ids=["zone-unknown", "in-another-zone"]
+)
+def test_a_mower_not_yet_in_the_zone_has_not_come_through_the_gate(zone) -> None:
+    """The Zone reads None on the way from the dock and a stray neighbouring
+    Zone shows near the Gate: neither means the Mower is through."""
+    env = env_for(gate())
+    state = gate_opened(env)
+
+    state, fx = step(state, SnapshotReceived(at(100), replace(MOWING, zone=zone)), env)
+
+    assert state["state"]["runs"][0]["status"] == "mowing"
+    assert_still_crossing(state, fx)
+
+
+def test_the_through_prompt_waits_for_the_zone_and_is_sent_once() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    for t, zone in ((100, None), (105, OTHER_ZONE), (110, None), (160, None)):
+        state, fx = step(state, SnapshotReceived(at(t), replace(MOWING, zone=zone)), env)
+        assert_still_crossing(state, fx)
+
+    state, fx = step(state, SnapshotReceived(at(170), IN_ZONE), env)
+    assert [e.payload["gate_id"] for e in events(fx, "gate_crossing_ended")] == ["g1"]
+    [close] = prompts(state, "gate_close")
+    assert state["state"]["gate_crossings"] == {}
+    assert state["state"]["gate_flags"] == {"g1": False}
+
+    state, fx = step(state, SnapshotReceived(at(180), IN_ZONE), env)
+    assert not events(fx, "gate_crossing_ended")
+    assert prompts(state, "gate_close") == [close]
+
+
+def test_a_zone_that_never_reads_ends_the_crossing_at_the_fallback_limit() -> None:
+    """An adapter that never reports a Zone still gets its through Prompt, once
+    the Mower has been mowing for the fallback limit, and not before."""
+    env = env_for(gate())
+    state = gate_opened(env)
+    state, fx = step(state, SnapshotReceived(at(100), MOWING), env)
+    assert_still_crossing(state, fx)
+    just_before = (OUT_CROSSING_FALLBACK - timedelta(seconds=1)).total_seconds()
+    state, fx = step(state, SnapshotReceived(at(100 + just_before), MOWING), env)
+    assert_still_crossing(state, fx)
+
+    state, fx = step(
+        state,
+        SnapshotReceived(at(100 + OUT_CROSSING_FALLBACK.total_seconds()), MOWING),
+        env,
+    )
+
+    assert [e.payload["gate_id"] for e in events(fx, "gate_crossing_ended")] == ["g1"]
+    assert len(prompts(state, "gate_close")) == 1
+    assert state["state"]["gate_crossings"] == {}
+    assert state["state"]["gate_flags"] == {"g1": False}
+
+
+def test_the_fallback_clock_starts_when_the_mower_is_first_seen_mowing() -> None:
+    """Time spent waiting to start does not count towards the limit."""
+    env = env_for(gate())
+    state = gate_opened(env)  # the Run started at t=80
+    late = OUT_CROSSING_FALLBACK.total_seconds() * 3
+    state, fx = step(state, SnapshotReceived(at(80 + late), MOWING), env)
+    assert_still_crossing(state, fx)
+
+
+def test_mowing_in_the_zone_ends_the_crossing_before_the_fallback() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, fx = step(state, SnapshotReceived(at(130), IN_ZONE), env)
+    assert events(fx, "gate_crossing_ended") and prompts(state, "gate_close")
+
+
+def test_the_fallback_clock_restarts_when_the_mower_stops_mowing() -> None:
+    """Pausing in transit does not use up the limit."""
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    paused = replace(MOWING, activity=LawnMowerActivity.PAUSED)
+    state, _ = step(state, SnapshotReceived(at(150), paused), env)
+    state, fx = step(state, SnapshotReceived(at(100 + limit), MOWING), env)
+    assert_still_crossing(state, fx)  # counted from t=100 the limit would be up
+    state, fx = step(state, SnapshotReceived(at(100 + limit + limit), MOWING), env)
+    assert events(fx, "gate_crossing_ended")
+
+
+def test_the_fallback_clock_restarts_when_the_run_comes_back_from_a_hold() -> None:
+    """The Mower's own non-work window pauses it mid-job (a hold); the time
+    it stood there is not mowing time."""
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    non_work = replace(MOWING, self_check=SelfCheckReason.DEVICE_NON_WORK_HOURS)
+    state, _ = step(state, SnapshotReceived(at(110), non_work), env)
+    assert state["state"]["runs"][0]["status"] == "on_hold"
+    state, _ = step(state, SnapshotReceived(at(100 + 3 * limit), MOWING), env)
+    state, fx = step(state, TimerFired(at(100 + 3 * limit + 61)), env)
+    assert state["state"]["runs"][0]["status"] == "mowing"
+    assert_still_crossing(state, fx)  # the limit counts from here, not from t=100
+
+
+def test_the_fallback_clock_does_not_run_while_contact_is_lost() -> None:
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, _ = step(state, SnapshotReceived(at(110), replace(MOWING, available=False)), env)
+    back = 100 + limit + 20  # within the 10 min grace: no hold, but 5 min since t=100
+    state, fx = step(state, SnapshotReceived(at(back), MOWING), env)
+    assert state["state"]["runs"][0]["status"] == "mowing"
+    assert_still_crossing(state, fx)
+    state, fx = step(state, SnapshotReceived(at(back + limit), MOWING), env)
+    assert events(fx, "gate_crossing_ended")
+
+
+def test_a_run_without_a_native_ref_never_counts_an_unknown_zone_as_arrived() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    state["state"]["runs"][0].pop("native_ref")
+    state, fx = step(state, SnapshotReceived(at(100), MOWING), env)
+    assert_still_crossing(state, fx)
+
+
+def test_a_rain_stopped_run_starts_again_with_a_crossing_of_its_own() -> None:
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, fx = step(state, SignalReceived(at(150), RainStop()), env)
+    assert state["state"]["runs"][0]["status"] == "pending"
+    assert state["state"]["gate_crossings"] == {}  # forgotten, nothing went through
+    assert state["state"]["gate_flags"] == {"g1": True}  # nobody closed the Gate
+    assert prompts(state) == [] and not events(fx, "gate_crossing_ended")
+    state, _ = step(state, SnapshotReceived(at(160), DOCKED), env)
+    [asked] = prompts(state, "is_raining")
+    state, _ = step(state, AnswerPrompt(at(200), asked["prompt_id"], "no"), env)
+    state, _ = step(state, TimerFired(at(210)), env)
+    state, fx = step(state, TimerFired(at(280)), env)
+    assert [e for e in fx if isinstance(e, StartRunEffect)]
+
+    state, fx = step(state, SnapshotReceived(at(100 + 3 * limit), MOWING), env)
+
+    assert state["state"]["runs"][0]["status"] == "mowing"
+    assert_still_crossing(state, fx)  # a new crossing: the limit counts from here
+
+
+# -- the Run ends with the Mower not yet through (nothing stale is left) ------------
+
+
+def test_a_finished_run_closes_a_crossing_that_never_saw_the_zone() -> None:
+    """The Run is done, so the Mower did go through: close behind it, as the
+    return crossing does."""
+    env = env_for(gate())
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, _ = step(state, SnapshotReceived(at(130), DOCKED), env)
+    state, fx = step(state, TimerFired(at(130 + 61)), env)
+    assert state["state"]["runs"] == []  # done, archived
+    assert state["state"]["gate_crossings"] == {}
+    assert state["state"]["gate_flags"] == {"g1": False}
+    assert [e.payload["gate_id"] for e in events(fx, "gate_crossing_ended")] == ["g1"]
+    assert len(prompts(state, "gate_close")) == 1
+
+
+def test_a_failed_run_leaves_no_crossing_or_gate_prompt() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    stopped = replace(MOWING, activity=LawnMowerActivity.IDLE, job_active=False)
+    state, _ = step(state, SnapshotReceived(at(110), stopped), env)
+    state, fx = step(state, TimerFired(at(110 + 61)), env)
+    assert [r["status"] for r in state["state"]["runs"]] == ["failed"]
+    assert state["state"]["gate_crossings"] == {}
+    assert prompts(state) == [] and prompts(state, "gate_close") == []
+    assert not events(fx, "gate_crossing_ended")
+
+
+def test_stopping_the_run_now_leaves_no_crossing_or_gate_prompt() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, fx = step(state, StopNow(at(120)), env)
+    assert [r["status"] for r in state["state"]["runs"]] == ["pending"]
+    assert state["state"]["gate_crossings"] == {}
+    assert prompts(state) == [] and prompts(state, "gate_close") == []
+    assert not events(fx, "gate_crossing_ended")
+
+
+def test_a_cancelled_schedule_leaves_no_crossing_or_gate_prompt() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    state, fx = step(state, CancelSchedule(at(120)), env)
+    assert state["state"]["runs"] == []
+    assert state["state"]["gate_crossings"] == {}
+    assert prompts(state) == [] and prompts(state, "gate_close") == []
+    assert not events(fx, "gate_crossing_ended")
 
 
 def test_crossing_dropped_quietly_when_the_run_never_gets_through() -> None:
