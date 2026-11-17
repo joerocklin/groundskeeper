@@ -8,7 +8,7 @@ service is ever called.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -17,9 +17,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_DEVICE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     MockModule,
+    async_fire_time_changed_exact,
     mock_integration,
 )
 
@@ -33,6 +35,7 @@ from custom_components.groundskeeper.adapter import (
 )
 from custom_components.groundskeeper.adapter import Movement, Snapshot
 from custom_components.groundskeeper.adapters import ADAPTER_REGISTRY
+from custom_components.groundskeeper.adapters.mammotion import ERROR_SETTLE_S
 from custom_components.groundskeeper.const import DOMAIN
 from tests.conftest import make_mammotion_mower
 from tests.mammotion_states import (
@@ -230,6 +233,13 @@ async def _adapter_with_sink(hass: HomeAssistant) -> tuple[object, _Recorder, ob
     return adapter, recorder, entry, mower
 
 
+def _log_stale_fault(hass: HomeAssistant, entry: ConfigEntry, mower: object) -> None:
+    """The fault of the day before still sits in the Mower's error log."""
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+
+
 async def test_new_error_from_error_sensors(hass: HomeAssistant) -> None:
     """A new (code, time) pair with code != 0 emits NewError once the
     sensors settle; the same pair again does not (works over BLE, no
@@ -278,10 +288,7 @@ async def test_error_sensors_updating_one_by_one_report_the_new_error(
     signal must carry the new error, not the previous one's code and
     message under the new time (issue #95)."""
     _, recorder, entry, mower = await _adapter_with_sink(hass)
-    # The stale error from the day before sits in the log.
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+    _log_stale_fault(hass, entry, mower)
     await settle_errors(hass)
     recorder.signals.clear()
 
@@ -300,6 +307,10 @@ async def test_error_sensors_updating_one_by_one_report_the_new_error(
         "navigation: Blade stopped: wheel slip detected while reversing",
         {},
     )
+    await hass.async_block_till_done()
+    assert recorder.signals == []
+    # Half the settle period on, the reading is still not reported.
+    async_fire_time_changed_exact(hass, dt_util.utcnow() + timedelta(seconds=ERROR_SETTLE_S / 2))
     await hass.async_block_till_done()
     assert recorder.signals == []
 
@@ -347,9 +358,7 @@ async def test_a_later_reading_of_the_same_time_is_not_a_new_error(
     """The late code and message of an error already reported (same time)
     are not a second error."""
     _, recorder, entry, mower = await _adapter_with_sink(hass)
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+    _log_stale_fault(hass, entry, mower)
     await settle_errors(hass)
     recorder.signals.clear()
 
@@ -367,9 +376,7 @@ async def test_unknown_time_holds_a_new_fault_until_it_is_stamped(
     under an `unknown` time are held across the settle period, then
     reported once with the real time and the new code and message."""
     _, recorder, entry, mower = await _adapter_with_sink(hass)
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "1008", {})
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "Robot is locked", {})
-    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-15T12:00:00+00:00", {})
+    _log_stale_fault(hass, entry, mower)
     await settle_errors(hass)
     recorder.signals.clear()
 
@@ -414,6 +421,36 @@ async def test_restart_reports_the_fault_the_log_still_carries(hass: HomeAssista
         code="2748", message="lift motor", time=datetime(2026, 10, 15, 21, 46, tzinfo=UTC)
     )
     assert reported == [[expected], [expected]]
+
+
+async def test_start_leaves_a_reading_that_is_still_settling_to_the_timer(
+    hass: HomeAssistant,
+) -> None:
+    """`subscribe` listens before `async_start` finishes, so the time sensor
+    can change in between. Starting must not report that half-updated
+    reading (the new time under the previous fault's code); the settle
+    timer already owns it."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    _log_stale_fault(hass, entry, mower)
+    adapter = make_adapter(hass, entry)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_time", "2026-11-16T21:07:58+00:00", {})
+    await adapter.async_start()
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_code", "11132", {})
+    set_entity(hass, entry, mower, NAME, "sensor:error_1_message", "wheel slip", {})
+    await settle_errors(hass)
+
+    assert recorder.signals == [
+        NewError(
+            code="11132",
+            message="wheel slip",
+            time=datetime(2026, 11, 16, 21, 7, 58, tzinfo=UTC),
+        )
+    ]
+    await adapter.async_close()
 
 
 async def test_closing_the_adapter_drops_a_pending_error(hass: HomeAssistant) -> None:

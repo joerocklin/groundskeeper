@@ -76,6 +76,9 @@ MAMMOTION = "mammotion"
 # still invisible next to a Run's failure handling.
 ERROR_SETTLE_S = 1.0
 
+# `error_1_code` values that mean the log holds no fault.
+_NO_ERROR_CODES = ("", "0")
+
 # `CurrentTaskSettings` fields worth keeping (PyMammotion `data/model/work.py`):
 # the job's identity, cut height, perimeter laps (`edge_mode`), path mode and
 # angle, Zones and speed. A whitelist of scalars, so no future field can carry
@@ -283,7 +286,7 @@ class MammotionAdapter:
         self._snapshot = self._derive_snapshot()
         self._seen_error_times: set[datetime] = set()
         # The error sensors as last observed, and the pending settle timer.
-        self._error_seen: tuple[str, str, str] = ("", "", "")
+        self._last_error_reading: tuple[str, str, str] = ("", "", "")
         self._error_settle_cancel: CALLBACK_TYPE | None = None
         self._seen_task_states: dict[str, str] = {}
         self._was_mowing = (
@@ -561,13 +564,14 @@ class MammotionAdapter:
         any of the three only (re)starts a quiet period of `ERROR_SETTLE_S`;
         the signal is emitted from a fresh read of all three once the
         sensors have been quiet that long (`_emit_error`). A reading with
-        no code holds no fault, so it starts no wait.
+        no code holds no fault, so it starts no wait (and a fault whose code
+        clears inside the period is not reported: the Mower withdrew it).
         """
         reading = self._error_reading()
-        if reading == self._error_seen:
+        if reading == self._last_error_reading:
             return
-        self._error_seen = reading
-        if reading[0] in ("", "0"):
+        self._last_error_reading = reading
+        if reading[0] in _NO_ERROR_CODES:
             return
         self._cancel_error_settle()
         self._error_settle_cancel = async_call_later(
@@ -589,7 +593,7 @@ class MammotionAdapter:
     def _emit_error(self) -> None:
         """Emit NewError from one read of all three sensors, if it is new."""
         code, raw_time, message = self._error_reading()
-        if not code or code == "0":
+        if code in _NO_ERROR_CODES:
             return
         stamp = dt_util.parse_datetime(raw_time)
         if stamp is None or stamp in self._seen_error_times:
@@ -908,10 +912,13 @@ class MammotionAdapter:
             self._source_version = None
         else:
             self._source_version = str(integration.version) if integration.version else None
-        # Nothing is in flight yet, so a fault the log still carries is
-        # read and reported at once; the core dedupes the re-emit by time.
-        self._error_seen = self._error_reading()
-        self._emit_error()
+        # A fault the log still carries is read and reported at once (the
+        # core dedupes the re-emit by time), unless a sensor changed since
+        # `subscribe` and its settle timer is pending: that reading may be
+        # half-updated, and the timer owns it.
+        if self._error_settle_cancel is None:
+            self._last_error_reading = self._error_reading()
+            self._emit_error()
         self._check_task_areas()
         self._publish()
 

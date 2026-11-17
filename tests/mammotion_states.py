@@ -110,7 +110,7 @@ def set_entity(
 
 async def settle_errors(hass: HomeAssistant) -> None:
     """Let the adapter's error settle period pass, firing its timer."""
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=ERROR_SETTLE_S + 1))
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=ERROR_SETTLE_S * 2))
     await hass.async_block_till_done()
 
 
