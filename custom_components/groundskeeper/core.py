@@ -87,6 +87,7 @@ CHECK_TICK = timedelta(seconds=60)
 DEADLINE_START_WINDOW = "start_window"
 DEADLINE_DONE_STABLE = "done_stable"
 DEADLINE_STOPPED_STABLE = "stopped_stable"
+DEADLINE_ERROR_STABLE = "error_stable"  # issue #96: `error` activity after a tolerated error
 DEADLINE_STALL = "stall"
 DEADLINE_HEIGHT_VERIFY = "height_verify"  # spec §7.6: window per `mowing` segment
 DEADLINE_HEIGHT_STABLE = "height_stable"  # spec §7.6: 60 s on the rounded target
@@ -103,6 +104,7 @@ RESTART_WINDOWS = (
     DEADLINE_STABILITY,
     DEADLINE_DONE_STABLE,
     DEADLINE_STOPPED_STABLE,
+    DEADLINE_ERROR_STABLE,
     DEADLINE_PAUSE_STABLE,
     DEADLINE_HOLD_CLEAR_STABLE,
     DEADLINE_HEIGHT_STABLE,
@@ -1678,6 +1680,8 @@ class _Machine:
         if self._stable(DEADLINE_STOPPED_STABLE, stopped):
             self._fail_run(run, "stopped_off_dock", abort=False)
             return
+        if self._fail_if_errored_after_tolerance(run, snapshot):
+            return
         if self._external_pause(snapshot):
             self._enter_hold(run, HOLD_EXTERNAL_PAUSE)
             return
@@ -1689,6 +1693,30 @@ class _Machine:
         # rule's to decide, never a stall.
         if run["status"] == RunStatus.MOWING and not (off_job or stopped):
             self._evaluate_stall(run, snapshot)
+
+    def _fail_if_errored_after_tolerance(
+        self, run: dict[str, Any], snapshot: Snapshot
+    ) -> bool:
+        """Fail the Run when the Mower reads `error` for 60 s after a tolerated error.
+
+        The error signal can arrive just before the snapshot catches up, and
+        the stall rule holds its clock on `error` activity, so without this a
+        locked Mower would keep its Run `mowing`. The Run fails as it would
+        have on the error itself. Only an error tolerated during this attempt
+        counts (a Retry starts a new one). Returns True when the Run failed.
+        """
+        started = parse(run["started_at"]) if run.get("started_at") else None
+        tolerated = [
+            note
+            for note in run.get("tolerated_errors", [])
+            if started is None or parse(note["seen_at"]) >= started
+        ]
+        errored = bool(tolerated) and snapshot.activity is LawnMowerActivity.ERROR
+        if not self._stable(DEADLINE_ERROR_STABLE, errored):
+            return False
+        run["error"] = {k: tolerated[-1][k] for k in ("code", "message", "time")}
+        self._fail_run(run, "error", abort=False)
+        return True
 
     # -- Blade height verification (spec §7.6) -----------------------------
 
@@ -1806,6 +1834,7 @@ class _Machine:
         for name in (
             DEADLINE_DONE_STABLE,
             DEADLINE_STOPPED_STABLE,
+            DEADLINE_ERROR_STABLE,
             DEADLINE_STALL,
             DEADLINE_PAUSE_STABLE,
             DEADLINE_CONTACT_LOST,
@@ -1985,10 +2014,18 @@ class _Machine:
             }
             run = self._mowing_run()
             if run is not None:
-                # Every code is treated alike; the Mower is usually locked in
-                # `error`, so no command (spec §7.3).
-                run["error"] = error
-                self._fail_run(run, "error", abort=False)
+                # An error is evidence, not a verdict (issue #96): a Mower can
+                # log one, recover and keep mowing, and failing the Run then
+                # offers Retry on a Mower still on the job. No code is special;
+                # the snapshot decides. Mowing on a live job: record it, and
+                # the stop rules end the Run if the Mower really stops.
+                # Anything else is a stopped Mower (usually locked in `error`):
+                # fail the Run, no command (spec §7.3).
+                if self._mowing_with_live_job():
+                    self._tolerate_error(run, error)
+                else:
+                    run["error"] = error
+                    self._fail_run(run, "error", abort=False)
             elif self.status == ScheduleStatus.WAITING:
                 self.s["blocking_error"] = error
                 self._evaluate()
@@ -2002,6 +2039,32 @@ class _Machine:
             run = self._mowing_run()
             if run is not None and self._is_external_job(run, signal):
                 self._fail_run(run, "superseded", abort=False)
+
+    def _mowing_with_live_job(self) -> bool:
+        """The latest snapshot says the Mower is mowing and on a live job."""
+        snapshot = self._snapshot()
+        return (
+            snapshot is not None
+            and snapshot.available
+            and snapshot.activity is LawnMowerActivity.MOWING
+            and snapshot.job_active
+        )
+
+    def _tolerate_error(self, run: dict[str, Any], error: dict[str, Any]) -> None:
+        """Keep the Run `mowing` and record the error.
+
+        A note on the Run (so the archived history shows it) and an
+        `error_tolerated` event.
+        """
+        run.setdefault("tolerated_errors", []).append({**error, "seen_at": iso(self.now)})
+        self._emit(
+            "error_tolerated",
+            run_id=run["id"],
+            zone_name=run["zone_name"],
+            code=error["code"],
+            message=error["message"],
+            time=error["time"],
+        )
 
     def _mowing_run(self) -> dict[str, Any] | None:
         run = active_run(self.s)
@@ -2044,6 +2107,7 @@ class _Machine:
             DEADLINE_START_WINDOW,
             DEADLINE_DONE_STABLE,
             DEADLINE_STOPPED_STABLE,
+            DEADLINE_ERROR_STABLE,
             DEADLINE_STALL,
             DEADLINE_HEIGHT_VERIFY,
             DEADLINE_HEIGHT_STABLE,

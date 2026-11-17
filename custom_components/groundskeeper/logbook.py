@@ -51,6 +51,11 @@ def describe(data: dict[str, Any]) -> str:
             return f"Opening {data.get('gate_name')} did not work; notifying instead"
         case "height_unverified":
             return f"Blade height on {zone} could not be verified"
+        case "error_tolerated":
+            return (
+                f"Mower reported error {data.get('code')} ({data.get('message')}) "
+                f"but is still mowing {zone}"
+            )
         case _:
             return str(kind)
 

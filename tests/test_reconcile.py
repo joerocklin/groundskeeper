@@ -116,13 +116,40 @@ def test_starting_job_started_before_the_intent_is_superseded():
 # -- mowing: missed signals -----------------------------------------------------
 
 
-def test_mowing_newer_error_fails_without_command():
-    state = mowing_state()
+def test_mowing_newer_error_while_live_mower_is_still_mowing_is_tolerated():
+    """The same rule as a live signal (issue #96): the Mower is mowing on its job."""
+    state = fresh_stall(mowing_state())
     state["state"]["last_error_time"] = at(50).isoformat()
     error = NewError("1004", "stuck", at(5000))
     state, fx = reconcile(state, LIVE, signals=[error])
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert run_of(state)["tolerated_errors"][0]["code"] == "1004"
+    assert [e.payload["code"] for e in events(fx, "error_tolerated")] == ["1004"]
+    assert not events(fx, "prompt_sent")
+    assert commands(fx) == []
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        replace(LIVE, activity=LawnMowerActivity.ERROR),
+        replace(LIVE, job_active=False),
+        replace(LIVE, activity=LawnMowerActivity.PAUSED),
+        replace(LIVE, available=False),
+        None,
+    ],
+    ids=["activity_error", "no_live_job", "paused", "unavailable", "no_snapshot"],
+)
+def test_mowing_newer_error_fails_without_command_unless_the_mower_is_mowing(snapshot):
+    state = fresh_stall(mowing_state())
+    state["state"]["last_error_time"] = at(50).isoformat()
+    error = NewError("1004", "stuck", at(5000))
+    state, fx = reconcile(state, snapshot, signals=[error])
     assert run_of(state)["status"] == "failed"
+    assert run_of(state)["reason"] == "error"
     assert run_of(state)["error"]["code"] == "1004"
+    assert not events(fx, "error_tolerated")
     assert commands(fx) == []
 
 

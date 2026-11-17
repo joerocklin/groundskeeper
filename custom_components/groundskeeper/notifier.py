@@ -128,6 +128,8 @@ class Notifier:
                 await self._schedule_completed(payload)
             case "check_timeout":
                 await self._check_timeout(payload)
+            case "error_tolerated":
+                await self._error_tolerated(payload)
 
     # -- Prompts ----------------------------------------------------------------------
 
@@ -243,6 +245,28 @@ class Notifier:
                 )
             ],
             subject=payload["check_id"],
+        )
+
+    async def _error_tolerated(self, payload: dict[str, Any]) -> None:
+        """The Mower logged an error but is still mowing (issue #96).
+
+        A plain notice, never a Prompt. It has no toggle: it is rare and tells
+        the owner why the Run was not failed. One notice per Run (a later
+        error replaces it).
+        """
+        strings = await async_prompt_strings(self._hass)
+        await self.async_notice(
+            "error_tolerated",
+            "error_tolerated",
+            strings["prompt_headline_error_tolerated"],
+            [
+                strings["prompt_zone"].format(zone=payload.get("zone_name")),
+                strings["prompt_error_tolerated"].format(
+                    code=payload.get("code"), message=payload.get("message")
+                ),
+                strings["prompt_error_tolerated_still_mowing"],
+            ],
+            subject=payload["run_id"],
         )
 
     def _find_run(self, run_id: str) -> dict[str, Any] | None:
