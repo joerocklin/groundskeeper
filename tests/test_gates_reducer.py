@@ -658,3 +658,54 @@ def test_turning_the_open_switch_on_after_the_close_prompt_stops_the_open_prompt
     assert len(prompts(state)) == 1 and len(prompts(state, "gate_close")) == 1
     state, _ = step(state, SetGateFlag(at(930), "g1", True), env)
     assert failing(state) == [] and prompts(state) == []
+
+
+def test_the_open_switch_answers_the_close_prompt_it_makes_stale() -> None:
+    """The owner who flips the Gate's own switch has said what the Prompt asks."""
+    env = env_for(gate())
+    for flag, action in ((True, "left_open"), (False, "closed")):
+        state = through(env)
+        state, fx = step(state, SetGateFlag(at(110), "g1", flag), env)
+        assert prompts(state, "gate_close") == []
+        assert [e.payload["action"] for e in events(fx, "prompt_answered")] == [action]
+        assert state["state"]["gate_flags"] == {"g1": flag}
+
+
+def test_the_open_switch_does_not_answer_the_close_prompt_of_a_gate_with_a_state_entity() -> None:
+    env = env_for(gate(state_entity="cover.fence"), entity_states={"g1": "open"})
+    state, _ = begin(env)
+    state = start_through(env, state)
+    state, _ = step(state, SnapshotReceived(at(100), IN_ZONE), env)
+    [close] = prompts(state, "gate_close")
+    state, _ = step(state, SetGateFlag(at(110), "g1", True), env)
+    assert prompts(state, "gate_close") == [close]
+
+
+def test_a_gate_closed_by_hand_while_the_mower_is_on_its_way_is_asked_about_again() -> None:
+    env = env_for(gate())
+    state, _ = begin(env)
+    state, _ = answer(state, env, "opened")
+    state = start_through(env, state)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)  # in transit: not through
+    assert prompts(state) == []
+    state, _ = step(state, SetGateFlag(at(110), "g1", False), env)  # the owner closed it again
+    state, _ = step(state, SnapshotReceived(at(120), MOWING), env)
+    [prompt] = prompts(state)
+    assert prompt["kind"] == "gate" and prompt["context"]["urgent"] is False
+
+
+def test_left_open_after_the_gate_gained_a_state_entity_changes_nothing() -> None:
+    state = through(env_for(gate()))
+    [close] = prompts(state, "gate_close")
+    changed = env_for(gate(state_entity="cover.fence"), entity_states={"g1": "closed"})
+    state, _ = step(state, AnswerPrompt(at(110), close["prompt_id"], "left_open"), changed)
+    assert prompts(state, "gate_close") == []
+    assert state["state"]["gate_flags"] == {"g1": False}
+
+
+def test_left_open_after_the_gate_was_deleted_changes_nothing() -> None:
+    state = through(env_for(gate()))
+    [close] = prompts(state, "gate_close")
+    state, _ = step(state, AnswerPrompt(at(110), close["prompt_id"], "left_open"), env_for())
+    assert prompts(state, "gate_close") == []
+    assert state["state"]["gate_flags"] == {"g1": False}
