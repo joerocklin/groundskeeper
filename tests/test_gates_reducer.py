@@ -6,7 +6,7 @@ from datetime import timedelta
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
 
-from custom_components.groundskeeper.adapter import RainStop
+from custom_components.groundskeeper.adapter import RainStop, SelfCheckReason
 from custom_components.groundskeeper.core import (
     OUT_CROSSING_FALLBACK,
     AddPlan,
@@ -272,31 +272,59 @@ def test_the_fallback_clock_restarts_when_the_mower_stops_mowing() -> None:
     paused = replace(MOWING, activity=LawnMowerActivity.PAUSED)
     state, _ = step(state, SnapshotReceived(at(150), paused), env)
     state, fx = step(state, SnapshotReceived(at(100 + limit), MOWING), env)
-    assert_still_crossing(state, fx)  # 100 s of the limit would have been up
+    assert_still_crossing(state, fx)  # counted from t=100 the limit would be up
     state, fx = step(state, SnapshotReceived(at(100 + limit + limit), MOWING), env)
     assert events(fx, "gate_crossing_ended")
 
 
 def test_the_fallback_clock_restarts_when_the_run_comes_back_from_a_hold() -> None:
+    """The Mower's own non-work window pauses it mid-job (a hold); the time
+    it stood there is not mowing time."""
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = gate_opened(env)
+    state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
+    non_work = replace(MOWING, self_check=SelfCheckReason.DEVICE_NON_WORK_HOURS)
+    state, _ = step(state, SnapshotReceived(at(110), non_work), env)
+    assert state["state"]["runs"][0]["status"] == "on_hold"
+    state, _ = step(state, SnapshotReceived(at(100 + 3 * limit), MOWING), env)
+    state, fx = step(state, TimerFired(at(100 + 3 * limit + 61)), env)
+    assert state["state"]["runs"][0]["status"] == "mowing"
+    assert_still_crossing(state, fx)  # the limit counts from here, not from t=100
+
+
+def test_the_fallback_clock_does_not_run_while_contact_is_lost() -> None:
     env = env_for(gate())
     limit = OUT_CROSSING_FALLBACK.total_seconds()
     state = gate_opened(env)
     state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
     state, _ = step(state, SnapshotReceived(at(110), replace(MOWING, available=False)), env)
-    state, _ = step(state, TimerFired(at(110 + 600)), env)
-    assert state["state"]["runs"][0]["status"] == "on_hold"
-    state, fx = step(state, SnapshotReceived(at(100 + 3 * limit), MOWING), env)
+    back = 100 + limit + 20  # within the 10 min grace: no hold, but 5 min since t=100
+    state, fx = step(state, SnapshotReceived(at(back), MOWING), env)
     assert state["state"]["runs"][0]["status"] == "mowing"
-    assert_still_crossing(state, fx)  # the limit counts from here, not from t=100
+    assert_still_crossing(state, fx)
+    state, fx = step(state, SnapshotReceived(at(back + limit), MOWING), env)
+    assert events(fx, "gate_crossing_ended")
 
 
-def test_the_fallback_clock_restarts_when_a_rain_stopped_run_starts_again() -> None:
+def test_a_run_without_a_native_ref_never_counts_an_unknown_zone_as_arrived() -> None:
+    env = env_for(gate())
+    state = gate_opened(env)
+    state["state"]["runs"][0].pop("native_ref")
+    state, fx = step(state, SnapshotReceived(at(100), MOWING), env)
+    assert_still_crossing(state, fx)
+
+
+def test_a_rain_stopped_run_starts_again_with_a_crossing_of_its_own() -> None:
     env = env_for(gate())
     limit = OUT_CROSSING_FALLBACK.total_seconds()
     state = gate_opened(env)
     state, _ = step(state, SnapshotReceived(at(100), MOWING), env)
-    state, _ = step(state, SignalReceived(at(150), RainStop()), env)
+    state, fx = step(state, SignalReceived(at(150), RainStop()), env)
     assert state["state"]["runs"][0]["status"] == "pending"
+    assert state["state"]["gate_crossings"] == {}  # forgotten, nothing went through
+    assert state["state"]["gate_flags"] == {"g1": True}  # nobody closed the Gate
+    assert prompts(state) == [] and not events(fx, "gate_crossing_ended")
     state, _ = step(state, SnapshotReceived(at(160), DOCKED), env)
     [asked] = prompts(state, "is_raining")
     state, _ = step(state, AnswerPrompt(at(200), asked["prompt_id"], "no"), env)
@@ -307,7 +335,7 @@ def test_the_fallback_clock_restarts_when_a_rain_stopped_run_starts_again() -> N
     state, fx = step(state, SnapshotReceived(at(100 + 3 * limit), MOWING), env)
 
     assert state["state"]["runs"][0]["status"] == "mowing"
-    assert_still_crossing(state, fx)  # the limit counts from this restart
+    assert_still_crossing(state, fx)  # a new crossing: the limit counts from here
 
 
 # -- the Run ends with the Mower not yet through (nothing stale is left) ------------

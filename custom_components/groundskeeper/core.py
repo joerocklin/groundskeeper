@@ -134,9 +134,10 @@ ACTION_GATE_CLOSED = "closed"
 DEADLINE_GATE_VERIFY = "gate_verify:"  # + Gate id: open action verified by state
 GATE_OPEN_VERIFY = timedelta(minutes=2)  # spec §10
 # Issue #97: the way out ends when the Zone reads as the Run's Zone. When it
-# never does (an adapter without Zone readings), it ends this long after the
-# Mower was first seen mowing with a live job. The transit from the dock took
-# 64 to 70 s in the Stage 3 trial; the limit leaves four times that.
+# never does (an adapter without Zone readings), it ends once the Mower has
+# been mowing with a live job for this long without a break. The transit from
+# the dock took 64 to 70 s in the Stage 3 trial; the limit leaves over four
+# times that.
 OUT_CROSSING_FALLBACK = timedelta(minutes=5)
 PROMPT_ANOMALY = "anomaly"  # spec §11.6: Dismiss
 ACTION_DISMISS = "dismiss"
@@ -1648,7 +1649,6 @@ class _Machine:
             self._set_run(run, RunStatus.MOWING)
             # The Mower is on its way, not through the Gate: the way out ends
             # when the Zone says so (issue #97).
-            self._crossings_restart_clock(run)
             self._crossings_end(run, snapshot)
             self._watch(run)["prev"] = LawnMowerActivity.MOWING.value
             self._arm_stall(snapshot)
@@ -1664,6 +1664,7 @@ class _Machine:
         # Contact lost: the Run state is frozen for the 10 min grace (clocks
         # keep running but nothing is decided from stale evidence); then hold.
         if not snapshot.available or snapshot.activity is None:
+            self._crossings_restart_clock(run)
             if self._stable(DEADLINE_CONTACT_LOST, True, CONTACT_LOST_GRACE):
                 self._enter_hold(run, HOLD_CONTACT_LOST)
             return
@@ -1925,6 +1926,11 @@ class _Machine:
         self.s["battery_trend"] = None
         self._set_run(run, RunStatus.PENDING, "rain_stop")
         self._set_schedule(ScheduleStatus.WAITING, "rain_stop")
+        # The Run starts afresh with crossings of its own, not this one's open
+        # actions and clock; the Gate flag stays as it is (nothing closed it).
+        for gate_id, crossing in list(self.s["gate_crossings"].items()):
+            if crossing["run_id"] == run["id"]:
+                self._gate_forget(gate_id)
         self._wet_rain_stop()
         self._evaluate()
 
@@ -2449,14 +2455,19 @@ class _Machine:
         for gate_id, crossing in list(self.s["gate_crossings"].items()):
             if crossing["run_id"] in live and gate_id in records:
                 continue
-            del self.s["gate_crossings"][gate_id]
-            self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
-            for prompt in self._gate_prompts(gate_id):
-                self._settle_prompt(prompt, "stale")
+            self._gate_forget(gate_id)
+
+    def _gate_forget(self, gate_id: str) -> None:
+        """Drop a crossing and settle its Prompts without any Gate effect."""
+        del self.s["gate_crossings"][gate_id]
+        self._cancel_deadline(DEADLINE_GATE_VERIFY + gate_id)
+        for prompt in self._gate_prompts(gate_id):
+            self._settle_prompt(prompt, "stale")
 
     def _gate_crossing_ended(self, run: Mapping[str, Any], direction: str | None = None) -> None:
-        """The Mower is mowing in the gated Zone (out) or docked (back): close
-        behind it (spec §10). `direction` limits which crossings end."""
+        """The Mower is through (out: in the gated Zone, or the fallback ran out)
+        or home (back: docked, or the Run ended): close behind it (spec §10).
+        `direction` limits which crossings end."""
         records = self._gate_records()
         for gate_id, crossing in list(self.s["gate_crossings"].items()):
             if crossing["run_id"] != run["id"]:
@@ -2618,11 +2629,12 @@ class _Machine:
             self._mowing_live(snapshot) and native_ref is not None and snapshot.zone == native_ref
         )
 
-    def _out_fallback_due(self, run: Mapping[str, Any], snapshot: Snapshot) -> bool:
+    def _tick_out_fallback(self, snapshot: Snapshot, run: Mapping[str, Any]) -> bool:
         """Fallback for a Mower whose Zone is never reported: an outbound
-        crossing is over `OUT_CROSSING_FALLBACK` after the Mower was first seen
-        mowing with a live job. The clock lives on the crossing (`mowing_since`),
-        so it is kept here, on the snapshots that arrive; there is no timer."""
+        crossing is over once the Mower has been mowing with a live job for
+        `OUT_CROSSING_FALLBACK` without a break. The clock is the crossing's
+        `mowing_since`; this keeps it on every snapshot (there is no timer) and
+        says whether it has run out."""
         if not self._mowing_live(snapshot):
             self._crossings_restart_clock(run)
             return False
@@ -2642,13 +2654,13 @@ class _Machine:
         ]
 
     def _crossings_restart_clock(self, run: Mapping[str, Any]) -> None:
-        """The Mower is not on its way out (docked, paused, on hold, Run
-        restarted): the fallback counts from the next time it is."""
+        """The Mower is not on its way out (docked, paused, contact lost, on
+        hold): the fallback counts from the next time it is."""
         for crossing in self._crossings_of(run, "out"):
             crossing.pop("mowing_since", None)
 
     def _crossings_end(self, run: dict[str, Any], snapshot: Snapshot) -> None:
-        fallback_due = self._out_fallback_due(run, snapshot)
+        fallback_due = self._tick_out_fallback(snapshot, run)  # on every snapshot
         if snapshot.activity is LawnMowerActivity.DOCKED:
             self._gate_crossing_ended(run, "back")
         elif self._out_arrived(snapshot, run) or fallback_due:

@@ -10,15 +10,15 @@ from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import async_capture_events
 
 from custom_components.groundskeeper.const import DOMAIN, EVENT_TYPE
-from tests.fake_mower import DEFAULT_SNAPSHOT
+from tests.fake_mower import DEFAULT_SNAPSHOT, DEFAULT_ZONES
 from custom_components.groundskeeper.runtime import async_get_director
 from tests.test_checks_ha import add_plan, advance, setup, ws  # noqa: F401
 from tests.test_prompts import list_prompts
 
 MOWING = replace(DEFAULT_SNAPSHOT, activity=LawnMowerActivity.MOWING, job_active=True,
                  job_ref="j1")
-# The Front Lawn's native ref: the Mower reads as inside the Run's Zone (issue #97).
-IN_ZONE = replace(MOWING, zone="11111111")
+# The Mower reads as inside the Run's Zone, the Front Lawn (issue #97).
+IN_ZONE = replace(MOWING, zone=DEFAULT_ZONES[0].native_ref)
 
 
 async def channel_to_dock(hass, hass_ws_client, entry):

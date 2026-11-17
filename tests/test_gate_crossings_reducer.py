@@ -6,6 +6,7 @@ import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity as A
 
 from custom_components.groundskeeper.core import (
+    OUT_CROSSING_FALLBACK,
     AnswerPrompt,
     GateActionEffect,
     SnapshotReceived,
@@ -316,6 +317,24 @@ def test_the_way_out_ends_when_mowing_in_the_gated_zone(zone, arrived) -> None:
 
     assert bool(events(fx, "gate_crossing_ended")) is arrived
     assert bool(prompts(state, "gate_close")) is arrived
+
+
+def test_a_resume_crossing_ends_at_the_fallback_when_no_zone_is_reported() -> None:
+    """The Mower leaves the dock after a recharge and the Zone never reads."""
+    env = env_for(gate())
+    limit = OUT_CROSSING_FALLBACK.total_seconds()
+    state = recharging(env, battery=80)
+    state, fx = feed(state, env, (1600, snap(DOCKED, job_active=True, recharging=True,
+                                             battery=91)))
+    assert [w["kind"] for w in expected(fx)] == ["resume"]
+    state, _ = answer(state, env, "opened", t=1610)
+    state, fx = feed(state, env, (1700, snap(battery=96)))
+    assert state["state"]["gate_crossings"].keys() == {"g1"}
+    state, fx = feed(state, env, (1700 + limit - 1, snap(battery=95)))
+    assert not events(fx, "gate_crossing_ended")
+    state, fx = feed(state, env, (1700 + limit, snap(battery=94)))
+    assert events(fx, "gate_crossing_ended")
+    assert prompts(state, "gate_close")
 
 
 @pytest.mark.parametrize(
