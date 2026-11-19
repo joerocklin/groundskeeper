@@ -19,6 +19,7 @@ and the per-Zone task sensors are created and removed while a job runs.
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Any
@@ -53,6 +54,7 @@ from ..adapter import (
     JobStarted,
     Limits,
     Movement,
+    MowerPosition,
     NativeTask,
     NewError,
     RainStop,
@@ -240,6 +242,18 @@ def _int(value: str | None) -> int | None:
     return None if number is None else int(number)
 
 
+def _coordinate(value: Any, limit: float) -> float | None:
+    """A finite number within +-`limit` from a state attribute, else None.
+
+    Attributes are whatever the other integration wrote: a bool, a string or
+    NaN is not a coordinate.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and abs(number) <= limit else None
+
+
 # `source_version` as a comparable tuple; anything unparseable (a dev
 # checkout) degrades to the TypeError belt instead of a guess.
 _VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)")
@@ -394,7 +408,9 @@ class MammotionAdapter:
                 # recorded snapshot and Store write, put raw GPS into the Store
                 # and diagnostics (#49), and the stall rule's exact-equality
                 # comparison would be defeated by millimetre noise at rest.
-                # See "Out of scope" on #82; revisit after #49.
+                # See "Out of scope" on #82; revisit after #49. The Now tab's
+                # marker reads it through `mower_position()` instead, outside
+                # the snapshot.
                 position=None,
             ),
             job_ref=None,  # no stable Mammotion job id on v0.6.18
@@ -986,6 +1002,49 @@ class MammotionAdapter:
                 value = value[:_JOB_SETTING_TEXT_MAX]
             settings[name] = value
         return settings or None
+
+    @callback
+    def _tracker_entity_id(self) -> str | None:
+        """This Mower's device tracker, found through the registry.
+
+        The device's one `mammotion` `device_tracker` entity: its unique_id is
+        not assumed and its entity_id is never configured (like every other
+        entity here). Disabled entities are skipped; ties sort by entity_id.
+        """
+        reg = er.async_get(self._hass)
+        trackers = sorted(
+            entry.entity_id
+            for entry in er.async_entries_for_device(reg, self._device_id)
+            if entry.domain == "device_tracker" and entry.platform == MAMMOTION
+        )
+        return trackers[0] if trackers else None
+
+    def mower_position(self) -> MowerPosition | None:
+        """Where the Mower is and which way it faces, from its device tracker.
+
+        Read on demand, never through the snapshot (see `_derive_snapshot`).
+        The tracker (Mammotion-HA 0.6.18) carries `latitude`, `longitude` and
+        `direction`, an integer compass bearing clockwise from north in
+        -179..179, which is folded onto 0..359. `gps_accuracy` reads 0 on every
+        update, so it is ignored. A missing, `unavailable` or `unknown`
+        tracker, or one without a usable latitude and longitude, is None; an
+        unusable `direction` only drops the heading.
+        """
+        entity_id = self._tracker_entity_id()
+        state = self._hass.states.get(entity_id) if entity_id is not None else None
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return None
+        latitude = _coordinate(state.attributes.get("latitude"), 90.0)
+        longitude = _coordinate(state.attributes.get("longitude"), 180.0)
+        if latitude is None or longitude is None:
+            return None
+        direction = _coordinate(state.attributes.get("direction"), 360.0)
+        return MowerPosition(
+            latitude=latitude,
+            longitude=longitude,
+            fixed_at=state.last_reported,
+            direction_deg=None if direction is None else round(direction) % 360,
+        )
 
     def _mammotion_work(self) -> Any | None:
         """`MowingDevice.work` for this Mower, or None if it cannot be reached."""

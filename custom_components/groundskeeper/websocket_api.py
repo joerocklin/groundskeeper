@@ -13,6 +13,8 @@ Pattern every later panel ticket follows (see docs/panel-websocket-pattern.md):
 from __future__ import annotations
 
 import copy
+import logging
+from datetime import timedelta
 from typing import Any
 
 import voluptuous as vol
@@ -24,7 +26,10 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.util import dt as dt_util
 
+from .adapter import MowerAdapter, MowerPosition
 from .const import DOMAIN, SIGNAL_STATE_CHANGED
 from .core import DETECTORS, plan_status
 from .gates import is_fraction
@@ -54,6 +59,8 @@ from .schedule_ops import (
 )
 from .transfer import async_export, async_import, async_undo_import
 from .zone_sync import async_get_zone_sync
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _loaded_entry(hass: HomeAssistant, entry_id: str) -> ConfigEntry | None:
@@ -103,7 +110,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_zones)
     websocket_api.async_register_command(hass, ws_list_prompts)
     websocket_api.async_register_command(hass, ws_subscribe_prompts)
-    for cmd in (ws_get_now, ws_subscribe_now, ws_run_control, ws_answer_prompt):
+    for cmd in (ws_get_now, ws_subscribe_now, ws_subscribe_mower_position,
+                ws_run_control, ws_answer_prompt):
         websocket_api.async_register_command(hass, cmd)
     for cmd in (
         ws_get_schedule,
@@ -520,6 +528,81 @@ def ws_subscribe_now(hass, connection, msg) -> None:
         connection.send_message(websocket_api.event_message(msg["id"], now_view(director)))
 
     connection.subscriptions[msg["id"]] = director.async_add_listener(_push)
+    connection.send_result(msg["id"])
+    _push()
+
+
+# -- Mower position on the Now tab's map (issue #113) -------------------------------
+
+# One push at most this often per connection. The source updates about once a
+# second while mowing; the marker does not need every fix.
+POSITION_PUSH_INTERVAL = timedelta(seconds=1.5)
+
+_NO_PUSH_YET = object()  # distinct from None, which is a real "no fix" push
+
+
+def read_mower_position(adapter: MowerAdapter) -> MowerPosition | None:
+    """The adapter's Mower position, or None: no capability, no fix, or a failure.
+
+    Read on demand and handed straight to the panel. It never enters the
+    Snapshot, the Store, diagnostics, logs or events, and no rule reads it.
+    Another integration's data never breaks us, so a failing read is no fix.
+    """
+    try:
+        read = getattr(adapter, "mower_position", None)
+        return read() if callable(read) else None
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("mower position read failed", exc_info=True)
+        return None
+
+
+def _position_view(fix: MowerPosition | None) -> dict[str, Any]:
+    """What the panel gets: the fix's age as a duration, never a timestamp.
+
+    The panel counts the age on from the moment it receives this, so it never
+    compares its clock with the server's.
+    """
+    if fix is None:
+        return {"position": None}
+    age = max(0.0, (dt_util.utcnow() - fix.fixed_at).total_seconds())
+    return {
+        "position": {
+            "latitude": fix.latitude,
+            "longitude": fix.longitude,
+            "direction": fix.direction_deg,
+            "age_s": round(age, 1),
+        }
+    }
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/subscribe_mower_position", vol.Required("entry_id"): str}
+)
+@callback
+def ws_subscribe_mower_position(hass, connection, msg) -> None:
+    """The Mower position now, then whenever it changes, at most every 1.5 s.
+
+    Deliberately not part of `subscribe_now`, which pushes on every Director
+    change. The panel subscribes only while the Now tab shows; the source is
+    read only while this subscription is open.
+    """
+    director = _director_or_error(hass, connection, msg)
+    if director is None:
+        return
+    last: list[Any] = [_NO_PUSH_YET]
+
+    @callback
+    def _push(_now=None) -> None:
+        fix = read_mower_position(director.adapter)
+        if fix == last[0]:
+            return  # nothing new; the panel counts the age on itself
+        last[0] = fix
+        connection.send_message(websocket_api.event_message(msg["id"], _position_view(fix)))
+
+    connection.subscriptions[msg["id"]] = async_track_time_interval(
+        hass, _push, POSITION_PUSH_INTERVAL
+    )
     connection.send_result(msg["id"])
     _push()
 

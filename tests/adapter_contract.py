@@ -32,6 +32,7 @@ from custom_components.groundskeeper.adapter import (
     CommandResult,
     Limits,
     MowerAdapter,
+    MowerPosition,
     NativeTask,
     NewError,
     RainStop,
@@ -220,6 +221,25 @@ class _AdapterContract:
         for value in (settings or {}).values():
             items = value if isinstance(value, list) else [value]
             assert all(item is None or isinstance(item, (str, int, float, bool)) for item in items)
+
+    async def test_mower_position_is_none_or_a_well_formed_fix(self, mower: MowerAdapter) -> None:
+        """A Mower position is optional and only shown: None, or a fix with a
+        compass heading in 0..359 or None (the Now tab's marker)."""
+        await mower.async_start()
+        fix = mower.mower_position()
+        await mower.async_close()
+        assert fix is None or isinstance(fix, MowerPosition)
+        if fix is not None:
+            assert fix.direction_deg is None or 0 <= fix.direction_deg < 360
+
+    async def test_mower_position_never_enters_the_snapshot(self, mower: MowerAdapter) -> None:
+        """Position is read on demand, outside the Snapshot: the stall rule's
+        position stays unset however the source reports one."""
+        await mower.async_start()
+        mower.mower_position()
+        movement = mower.snapshot.movement
+        await mower.async_close()
+        assert movement.position is None
 
 
 def _run_settings(mower: MowerAdapter) -> RunSettings:
