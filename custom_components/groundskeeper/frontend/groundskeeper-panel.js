@@ -919,7 +919,7 @@ function nogoLapsHtml(d, zones, nogo) {
   return `<p><label>No-go laps (optional) <input type="number" step="1" min="${esc(nogo.min)}" max="${esc(nogo.max)}"
       id="np-nogo-laps" placeholder="${esc(z.nogo_laps_default)}" value="${esc(d.nogo_laps)}"></label>
     <span class="hint">Laps around each No-go area, ${esc(nogo.min)} to ${esc(nogo.max)}; blank uses the default.
-    Applies to every Run of the Plan, including the Finishing Run, and overrides the Finishing set.</span></p>`;
+    Applies to every Run of the Plan, including the Finishing Run, and wins over the Finishing Run's own settings.</span></p>`;
 }
 
 function previewHtml(pv, lengthUnit) {

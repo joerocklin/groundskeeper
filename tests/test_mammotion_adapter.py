@@ -38,6 +38,7 @@ from custom_components.groundskeeper.adapter import Movement, Snapshot
 from custom_components.groundskeeper.adapters import ADAPTER_REGISTRY
 from custom_components.groundskeeper.adapters.mammotion import ERROR_SETTLE_S
 from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.run_settings import nogo_laps_setting
 from tests.conftest import make_mammotion_mower
 from tests.mammotion_states import (
     add_zone_switch,
@@ -1154,9 +1155,7 @@ async def test_the_no_go_laps_extra_is_marked_for_the_core_and_panel(
     hass: HomeAssistant,
 ) -> None:
     """Core and panel find No-go laps by its role, never by Mammotion's key (#109)."""
-    from custom_components.groundskeeper.run_settings import nogo_laps_setting
-
     entry, mower = await make_director_entry(hass)
     install_baseline(hass, entry, mower, NAME)
     found = nogo_laps_setting(make_adapter(hass, entry).limits)
-    assert found == {"key": "obstacle_laps", "label": "No-go zone laps", "min": 0, "max": 4}
+    assert found == {"key": "obstacle_laps", "min": 0, "max": 4}
