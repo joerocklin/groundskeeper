@@ -217,6 +217,20 @@ async def test_nogo_areas_are_unknown_when_the_geometry_could_not_be_loaded(setu
     assert all(z.nogo_areas is None for z in zones)  # unknown, never "none"
 
 
+async def test_a_zone_whose_map_feature_has_no_geometry_has_unknown_nogo_areas(setup) -> None:
+    catalogue, services, *_ = setup
+    front = next(
+        f
+        for f in services.geojson["features"]
+        if f["properties"]["type_name"] == "area" and str(f["properties"]["hash"]) == FRONT
+    )
+    front["geometry"] = None  # the Zone is on the map but its geometry did not load
+    by_ref = {z.native_ref: z for z in await catalogue.list_zones()}
+    assert by_ref[FRONT].polygon is None
+    assert by_ref[FRONT].nogo_areas is None  # unknown, not none
+    assert by_ref[BACKYARD].nogo_areas == []  # the others are unaffected
+
+
 async def test_a_zone_the_map_does_not_carry_has_unknown_nogo_areas(setup) -> None:
     catalogue, _, _, entry, device = setup
     ent = er.async_get(catalogue._hass).async_get_or_create(

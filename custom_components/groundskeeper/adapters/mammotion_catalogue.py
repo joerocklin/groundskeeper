@@ -206,7 +206,7 @@ class MammotionCatalogue:
                 names[ref],
                 polygons.get(ref),
                 # Known (possibly none) only once the Zone's own geometry is.
-                nogo.get(ref, []) if ref in polygons else None,
+                nogo.get(ref, []) if polygons.get(ref) is not None else None,
             )
             for ref in names
         ]

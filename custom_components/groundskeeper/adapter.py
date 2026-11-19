@@ -407,7 +407,7 @@ class MowerAdapter(Protocol):
     # -- catalogues (spec §3.4) ---------------------------------------------
 
     async def list_zones(self) -> list[Zone]:
-        """Zones as (native_ref, name, polygon or None)."""
+        """Zones as (native_ref, name, polygon or None, No-go areas or None)."""
         ...
 
     async def list_channels(self) -> list[Channel]:
