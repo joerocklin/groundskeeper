@@ -110,13 +110,23 @@ def _derive(
 
 
 def preview_plan(director: Director, **kwargs: Any) -> dict[str, Any]:
-    """The Runs a new Plan would get (height, angle, estimated time) and the
-    derivation warnings, without placing anything (spec §16.3, §5.5)."""
+    """The Runs a new Plan would get (height, angle, Spacing and speed, estimated
+    time) and the derivation warnings, without placing anything (spec §16.3,
+    §5.5). Each Run is estimated from its own resolved Spacing and speed, so a
+    Plan override and the Finishing set show in the time too."""
     found, built = _derive(director, origin="panel", **kwargs)
     runs = []
     for run in built.runs:
+        settings = run["settings"]
         view = _run_view(run)
-        view["estimated_time_s"] = run_estimate_s(found, run["angle_deg"])
+        view["spacing_cm"] = settings["spacing_cm"]
+        view["speed_m_s"] = settings["speed_m_s"]
+        view["estimated_time_s"] = run_estimate_s(
+            found,
+            run["angle_deg"],
+            spacing_cm=settings["spacing_cm"],
+            speed_m_s=settings["speed_m_s"],
+        )
         runs.append(view)
     return {
         "runs": runs,

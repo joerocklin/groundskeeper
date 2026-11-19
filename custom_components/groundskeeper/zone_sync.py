@@ -36,7 +36,7 @@ from homeassistant.util import ulid as ulid_util
 
 from .adapter import AdapterSignal, MowerAdapter, Zone, ZonesChanged
 from .const import DOMAIN, SIGNAL_STATE_CHANGED
-from .run_settings import nogo_laps_setting, resolve_run_settings
+from .run_settings import nogo_laps_setting, resolve_run_settings, run_limits_view
 from .zone_angles import angle_estimates, refresh_zone_angles
 
 _LOGGER = logging.getLogger(__name__)
@@ -256,11 +256,20 @@ class ZoneSync:
         # it and its range, and each Zone's resolved default for the placeholder.
         limits = self._adapter.limits
         nogo = nogo_laps_setting(limits)
-        if nogo is not None:
-            for z in zones:
-                resolved = resolve_run_settings(limits, cfg, z)
+        for z in zones:
+            resolved = resolve_run_settings(limits, cfg, z)
+            # Each Zone's resolved Spacing and speed (Mower default, then the
+            # Zone's own), for the New Plan form's placeholders.
+            z["spacing_cm_default"] = resolved["spacing_cm"]
+            z["speed_m_s_default"] = resolved["speed_m_s"]
+            if nogo is not None:
                 z["nogo_laps_default"] = resolved["extras"][nogo["key"]]
-        return {"zones": zones, "channels": list(cfg["channels"]), "nogo_laps": nogo}
+        return {
+            "zones": zones,
+            "channels": list(cfg["channels"]),
+            "nogo_laps": nogo,
+            "run_limits": run_limits_view(limits, cfg),
+        }
 
     async def async_sync(self) -> None:
         """Run one sync: Zones, then Channels, then the Repairs issue."""

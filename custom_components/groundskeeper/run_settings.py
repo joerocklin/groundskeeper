@@ -103,6 +103,25 @@ def resolve_run_settings(
     return out
 
 
+def run_limits_view(limits: Limits, config: Mapping[str, Any]) -> dict[str, Any]:
+    """Spacing and speed as {min, max, default} (SI), for the New Plan form's
+    hint and placeholder. `default` is the Mower default; a Zone's own resolved
+    default is on its entry in the Zones view."""
+    defaults = mower_run_defaults(limits, config)
+    return {
+        "spacing_cm": {
+            "min": limits.spacing_min_cm,
+            "max": limits.spacing_max_cm,
+            "default": defaults["spacing_cm"],
+        },
+        "speed_m_s": {
+            "min": limits.speed_min_m_s,
+            "max": limits.speed_max_m_s,
+            "default": defaults["speed_m_s"],
+        },
+    }
+
+
 def nogo_laps_setting(limits: Limits) -> dict[str, Any] | None:
     """The adapter's No-go laps extra as {key, min, max}, or None.
 
