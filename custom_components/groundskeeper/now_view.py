@@ -49,8 +49,6 @@ def _run_row(run: dict[str, Any]) -> dict[str, Any]:
         "angle_deg": run["angle_deg"],
         "n": run["index"],
         "of": run["of"],
-        "spacing_cm": run["settings"].get("spacing_cm"),
-        "speed_m_s": run["settings"].get("speed_m_s"),
     }
 
 
@@ -120,6 +118,8 @@ def now_view(director: Director) -> dict[str, Any]:
     for i, run in enumerate(pending):
         up_next.append({
             **_run_row(run),
+            "spacing_cm": run["settings"].get("spacing_cm"),
+            "speed_m_s": run["settings"].get("speed_m_s"),
             "can_up": i > 0 and move_blocker(state, run["id"], i - 1) is None,
             "can_down": i < len(pending) - 1 and move_blocker(state, run["id"], i + 1) is None,
         })

@@ -18,7 +18,7 @@ function makeShadow() {
   const shadow = {
     get innerHTML() { return html; },
     // A render replaces every input: what was typed is gone unless the markup carries it.
-  set innerHTML(v) { html = v; handlers = []; typed.clear(); },
+    set innerHTML(v) { html = v; handlers = []; typed.clear(); },
     type(sel, value) { typed.set(sel, value); },
     handlers: () => handlers,
     querySelector(sel) {
@@ -129,6 +129,11 @@ async function sheet(reply, type) {
 
   s = await schedule(ok, { '.edit-speed[data-run="r2"]': '' });
   out.schedule_blank = { sent: edits(s.sent).length, notice: s.p._notice, shown: s.shadow.innerHTML.includes('Enter a speed above zero.') };
+
+  for (const field of ['height', 'angle']) {
+    s = await schedule(ok, { [`.edit-${field}[data-run="r2"]`]: '' });
+    out[`schedule_blank_${field}`] = { sent: edits(s.sent).length, notice: s.p._notice };
+  }
 
   s = await sheet(ok, { '#run-spacing': '22', '#run-speed': '0.3' });
   out.sheet_changed = { sent: edits(s.sent), closed: s.p._sheet === null };
