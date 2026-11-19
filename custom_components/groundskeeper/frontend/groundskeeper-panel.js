@@ -733,15 +733,27 @@ function upNextHtml(view, lengthUnit, selectedRunId) {
     <p><button data-act="add-plan">+ Plan</button></p>`;
 }
 
-// Bottom sheet for one pending Run. `state` carries { warnings, error } from the
-// last save; values are shown and entered in HA units.
+// Spacing and speed are offered only for a Run that has them stored: the input
+// is pre-filled from that, so a blank one is always a mistake, never "default".
+const hasStored = (v) => typeof v === 'number';
+
+// Bottom sheet for one pending Run. `state` carries { warnings, error, draft }
+// from the last save or re-render; values are shown and entered in HA units.
+// `run` is an up_next row, which carries the Run's stored spacing_cm / speed_m_s.
 function runSheetHtml(run, lengthUnit, state) {
   const h = lengthUnit === 'mi' ? Math.round((run.height_mm / 25.4) * 100) / 100 : num(run.height_mm);
   const st = state || {};
+  const typed = (key, stored) => (st.draft && st.draft[key] != null ? esc(st.draft[key]) : stored);
+  const imperial = lengthUnit === 'mi';
+  const spacing = hasStored(run.spacing_cm)
+    ? `<label>Spacing (${imperial ? 'in' : 'cm'}) <input id="run-spacing" type="number" step="any" value="${typed('spacing', spacingValue(run.spacing_cm, lengthUnit))}"></label>` : '';
+  const speed = hasStored(run.speed_m_s)
+    ? `<label>Speed (${imperial ? 'ft/s' : 'm/s'}) <input id="run-speed" type="number" step="any" value="${typed('speed', speedValue(run.speed_m_s, lengthUnit))}"></label>` : '';
   return `<div class="sheet" role="dialog" aria-label="Edit Run" data-run="${esc(run.run_id)}">
     <h3>${esc(run.zone_name)}, Run ${esc(run.n)} of ${esc(run.of)}</h3>
-    <label>Height (${lengthUnit === 'mi' ? 'in' : 'mm'}) <input id="run-height" type="number" step="any" value="${st.draft ? esc(st.draft.height) : h}"></label>
+    <label>Height (${imperial ? 'in' : 'mm'}) <input id="run-height" type="number" step="any" value="${st.draft ? esc(st.draft.height) : h}"></label>
     <label>Angle (°) <input id="run-angle" type="number" step="any" value="${st.draft ? esc(st.draft.angle) : num(run.angle_deg)}"></label>
+    ${spacing}${speed}
     ${(st.warnings || []).map((w) => `<p class="warn">${esc(NOTES[w] || w)}</p>`).join('')}
     ${st.error ? `<p class="warn" id="run-error">${esc(st.error)}</p>` : ''}
     <div class="btns"><button data-act="save-run">Save</button>
@@ -749,14 +761,40 @@ function runSheetHtml(run, lengthUnit, state) {
     <button data-act="close-sheet">Close</button></div></div>`;
 }
 
-// edit_run fields from the sheet's raw inputs, or { error }.
-function runEditPayload(d, lengthUnit) {
+// One Spacing or speed input as the settings value to send, null when it is
+// unchanged from what the Run stores (compared as shown, so a value the unit
+// round trip would nudge is never resent untouched), or { error }. `raw` is the
+// input's text, undefined when the Run has no such input.
+function runSettingValue(raw, stored, shown, toSi, noun) {
+  if (raw === undefined) return { value: null };
+  const text = raw == null ? '' : String(raw).trim();
+  const typed = text === '' ? NaN : Number(text);
+  if (!Number.isFinite(typed) || typed <= 0) return { error: `Enter a ${noun} above zero.` };
+  if (stored != null && typed === shown(stored)) return { value: null };
+  return { value: toSi(typed) };
+}
+
+// edit_run fields from the sheet's raw inputs, or { error }. `stored` is the
+// Run's own { spacing_cm, speed_m_s }, so only a changed value goes in `settings`.
+function runEditPayload(d, lengthUnit, stored) {
   const height = d.height === '' || d.height == null ? NaN : Number(d.height);
   const angle = d.angle === '' || d.angle == null ? NaN : Number(d.angle);
   if (!Number.isFinite(height) || height <= 0) return { error: 'Enter a height above zero.' };
   if (!Number.isFinite(angle)) return { error: 'Enter an angle in degrees.' };
+  const have = stored || {};
+  const spacing = runSettingValue(d.spacing, have.spacing_cm, (cm) => spacingValue(cm, lengthUnit),
+    (v) => spacingToCm(v, lengthUnit), 'spacing');
+  if (spacing.error) return { error: spacing.error };
+  const speed = runSettingValue(d.speed, have.speed_m_s, (ms) => speedValue(ms, lengthUnit),
+    (v) => speedToMs(v, lengthUnit), 'speed');
+  if (speed.error) return { error: speed.error };
   const mm = lengthUnit === 'mi' ? height * 25.4 : height;
-  return { payload: { height_mm: Math.round(mm * 10) / 10, angle_deg: angle } };
+  const payload = { height_mm: Math.round(mm * 10) / 10, angle_deg: angle };
+  const settings = {};
+  if (spacing.value != null) settings.spacing_cm = spacing.value;
+  if (speed.value != null) settings.speed_m_s = speed.value;
+  if (Object.keys(settings).length) payload.settings = settings;
+  return { payload };
 }
 
 function checkPillsHtml(checks) {
@@ -843,6 +881,18 @@ function spacingSpeedNote(run, lengthUnit) {
   return parts.length ? ` <span class="spacing-speed">${parts.join(', ')}</span>` : '';
 }
 
+// The Spacing and speed inputs of one pending Run in a Plan card, pre-filled
+// from its stored values; none for a value the Run does not store.
+function runSettingInputsHtml(run, lengthUnit) {
+  const s = run.settings || {};
+  const imperial = lengthUnit === 'mi';
+  const spacing = hasStored(s.spacing_cm)
+    ? `<label>Spacing (${imperial ? 'in' : 'cm'}) <input type="number" step="any" class="edit-spacing" data-run="${esc(run.id)}" value="${spacingValue(s.spacing_cm, lengthUnit)}"></label>` : '';
+  const speed = hasStored(s.speed_m_s)
+    ? `<label>Speed (${imperial ? 'ft/s' : 'm/s'}) <input type="number" step="any" class="edit-speed" data-run="${esc(run.id)}" value="${speedValue(s.speed_m_s, lengthUnit)}"></label>` : '';
+  return spacing + speed;
+}
+
 function planCardsHtml(view, lengthUnit) {
   const cards = (view.plans || []).map((p) => {
     const runs = (view.runs || []).filter((r) => r.plan_id === p.id);
@@ -852,6 +902,7 @@ function planCardsHtml(view, lengthUnit) {
       const pend = r.status === 'pending';
       const edit = pend ? `<label>Height <input type="number" step="any" class="edit-height" data-run="${esc(r.id)}" value="${heightValue(r.height_mm, lengthUnit)}"></label>
           <label>Angle <input type="number" step="any" class="edit-angle" data-run="${esc(r.id)}" value="${num(r.angle_deg)}"></label>
+          ${runSettingInputsHtml(r, lengthUnit)}
           <button data-act="edit-run" data-run="${esc(r.id)}">Save</button>
           <button data-act="delete-run" data-run="${esc(r.id)}">Delete</button>`
         : `${fmtHeight(r.height_mm, lengthUnit)} at ${fmtDeg(r.angle_deg)} <span class="tag">${esc(r.status)}</span>`;
@@ -1530,9 +1581,13 @@ class GroundskeeperPanel extends HTMLElement {
             break;
           }
           case 'edit-run': {
-            const q = (c) => root.querySelector(`.${c}[data-run="${run_id}"]`);
-            const height = Number(q('edit-height').value), angle = Number(q('edit-angle').value);
-            this._scheduleCmd('edit_run', { run_id, height_mm: heightToMm(height, unit), angle_deg: angle });
+            const value = (c) => { const el = root.querySelector(`.${c}[data-run="${run_id}"]`); return el ? el.value : undefined; };
+            const run = ((this._scheduleView || {}).runs || []).find((r) => r.id === run_id) || {};
+            const { payload, error } = runEditPayload({
+              height: value('edit-height'), angle: value('edit-angle'),
+              spacing: value('edit-spacing'), speed: value('edit-speed') }, unit, run.settings);
+            if (error) { this._notice = error; this._render(); break; }
+            this._scheduleCmd('edit_run', { run_id, ...payload });
             break;
           }
           case 'delete-run':
@@ -1939,9 +1994,12 @@ class GroundskeeperPanel extends HTMLElement {
             break;
           }
           case 'save-run': {
+            const value = (sel) => { const el = root.querySelector(sel); return el ? el.value : undefined; };
+            const row = ((this._now || {}).up_next || []).find((r) => r.run_id === run_id) || {};
             const { payload, error } = runEditPayload({
-              height: root.querySelector('#run-height').value,
-              angle: root.querySelector('#run-angle').value }, this._lengthUnit());
+              height: value('#run-height'), angle: value('#run-angle'),
+              spacing: value('#run-spacing'), speed: value('#run-speed') }, this._lengthUnit(),
+              { spacing_cm: row.spacing_cm, speed_m_s: row.speed_m_s });
             if (error) { this._sheet.error = error; this._render(); break; }
             try {
               const res = await this._hass.connection.sendMessagePromise({
@@ -2050,7 +2108,10 @@ class GroundskeeperPanel extends HTMLElement {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
     const rh = this.shadowRoot.querySelector('#run-height');
     if (this._sheet && rh) {
-      this._sheet.draft = { height: rh.value, angle: this.shadowRoot.querySelector('#run-angle').value };
+      const rs = this.shadowRoot.querySelector('#run-spacing'), rv = this.shadowRoot.querySelector('#run-speed');
+      this._sheet.draft = {
+        height: rh.value, angle: this.shadowRoot.querySelector('#run-angle').value,
+        spacing: rs ? rs.value : undefined, speed: rv ? rv.value : undefined };
     }
     if (this._tab === 'schedule') this._readPlanDraft(this.shadowRoot);
     if (this._tab === 'checks') this._readCustomDraft(this.shadowRoot);

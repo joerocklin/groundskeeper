@@ -49,6 +49,8 @@ def _run_row(run: dict[str, Any]) -> dict[str, Any]:
         "angle_deg": run["angle_deg"],
         "n": run["index"],
         "of": run["of"],
+        "spacing_cm": run["settings"].get("spacing_cm"),
+        "speed_m_s": run["settings"].get("speed_m_s"),
     }
 
 
