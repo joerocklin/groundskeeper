@@ -189,7 +189,7 @@ def _int_field(
 # only matters when `channel_mode` is the double grid.
 _EXTRAS_SCHEMA: tuple[ExtrasField, ...] = (
     _int_field("border_mode", "Border/grid order", 0, 1, 0),
-    _int_field("obstacle_laps", "No-go zone laps", 0, 4, 0, role=NOGO_LAPS_ROLE),
+    _int_field("obstacle_laps", "No-go laps", 0, 4, 0, role=NOGO_LAPS_ROLE),
     _int_field("channel_mode", "Cutting path mode", 0, 3, 0),
     _int_field("toward_included_angle", "Double-grid angle", -180, 180, 90),
     ExtrasField(

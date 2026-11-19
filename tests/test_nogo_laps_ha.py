@@ -7,9 +7,11 @@ the descriptor the views carry, the way the panel finds it.
 import pytest
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_DEVICE
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.groundskeeper import adapters
 from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.panel import FRONTEND_DIR
 from tests.conftest import make_mammotion_mower
 from tests.fake_mower import NOGO_LIMITS, FakeMower
 from tests.test_checks_ha import ws
@@ -132,8 +134,6 @@ async def test_the_schedule_view_names_the_no_go_laps_key_the_cards_read(
 async def test_the_add_plan_service_rejects_an_out_of_range_value_too(
     hass, hass_ws_client, setup
 ) -> None:
-    from homeassistant.exceptions import HomeAssistantError
-
     entry, _ = setup
     key = (await descriptor(hass, hass_ws_client, entry))["key"]
     with pytest.raises(HomeAssistantError):
@@ -147,8 +147,6 @@ async def test_the_add_plan_service_rejects_an_out_of_range_value_too(
 
 def test_neither_core_nor_panel_names_the_mammotion_key() -> None:
     """The setting is brand-neutral outside the adapter (#109)."""
-    from custom_components.groundskeeper.panel import FRONTEND_DIR
-
     root = FRONTEND_DIR.parent
     sources = [p for p in root.rglob("*.py") if "adapters" not in p.parts]
     sources += [p for p in FRONTEND_DIR.glob("*.js")]

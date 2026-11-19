@@ -105,7 +105,7 @@ def test_no_go_laps_setting_is_none_when_the_adapter_has_no_such_extra() -> None
 
 @pytest.mark.parametrize("value", [5, -1, 4.5, 1.5, "2", True, None])
 def test_a_number_extra_outside_the_schema_range_is_rejected(value) -> None:
-    with pytest.raises(SettingsError, match=NOGO["label"]):
+    with pytest.raises(SettingsError, match="No-go passes"):
         validate_overrides(NOGO_LIMITS, {"extras": {NOGO["key"]: value}})
 
 

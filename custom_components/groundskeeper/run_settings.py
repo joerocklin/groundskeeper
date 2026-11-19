@@ -104,14 +104,14 @@ def resolve_run_settings(
 
 
 def nogo_laps_setting(limits: Limits) -> dict[str, Any] | None:
-    """The adapter's No-go laps extra as {key, label, min, max}, or None.
+    """The adapter's No-go laps extra as {key, min, max}, or None.
 
     Found by its role, so neither core nor panel names an adapter's own key.
     """
     for f in limits.extras_schema:
         if f.role == NOGO_LAPS_ROLE and _is_number(f):
             cfg = f.selector.config
-            return {"key": f.key, "label": f.label, "min": cfg["min"], "max": cfg["max"]}
+            return {"key": f.key, "min": cfg["min"], "max": cfg["max"]}
     return None
 
 
@@ -125,8 +125,9 @@ def _is_number(field: ExtrasField) -> bool:
 
 
 def _check_extra(field: ExtrasField, value: Any) -> None:
-    """A number extra must be a number inside the schema's range (never clamped)."""
-    if not _is_number(field):
+    """The No-go laps extra must be a whole number inside the schema's range
+    (never clamped). Other extras are not range-checked here (see #122)."""
+    if field.role != NOGO_LAPS_ROLE or not _is_number(field):
         return
     cfg = field.selector.config
     lo, hi = cfg["min"], cfg["max"]
