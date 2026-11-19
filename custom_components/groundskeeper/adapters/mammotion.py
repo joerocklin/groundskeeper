@@ -902,7 +902,7 @@ class MammotionAdapter:
     # -- catalogues (delegated to the ticket #9 catalogue) -------------------
 
     async def list_zones(self) -> list[Zone]:
-        """Zones as (native_ref, name, polygon or None)."""
+        """Zones as (native_ref, name, polygon or None, No-go areas or None)."""
         return await self._catalogue.list_zones()
 
     async def list_channels(self) -> list[Channel]:

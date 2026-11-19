@@ -13,7 +13,7 @@ A Director Zone is a plain dict (JSON for the Store):
 `nogo_areas` is the Zone's No-go areas as GeoJSON geometries: a list (empty
 means none) or None when unknown, which is also how a record written before
 it existed reads. They are read from the Mower and refreshed wherever
-`polygon` is; they feed nothing else yet.
+`polygon` is. They do not feed the bearing or the Allowed angle range.
 
 `bearing` and `angle_range` are the records of `zone_angles`; they are filled
 in by `ZoneSync` after every reconcile.
@@ -93,7 +93,7 @@ def reconcile_zones(
             if rebind:
                 z["native_ref"] = lz.native_ref
                 z["polygon"] = None  # changed ref: refetch the polygon
-                z["nogo_areas"] = None  # ...and its No-go areas
+                z["nogo_areas"] = None
             if lz.polygon is not None:
                 z["polygon"] = lz.polygon
             if lz.nogo_areas is not None:
