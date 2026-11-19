@@ -69,6 +69,7 @@ const STYLE = `
   ul.zones li { display: flex; gap: 8px; align-items: center; padding: 8px; border-radius: 6px; cursor: pointer; }
   ul.zones li.selected { background: var(--secondary-background-color); }
   ul.zones .name { flex: 1; }
+  ul.zones .nogo-count { color: var(--secondary-text-color); font-size: .9em; }
   .tag { font-size: 12px; padding: 1px 6px; border-radius: 8px; background: var(--secondary-background-color); }
   .tag.missing { background: var(--error-color, #db4437); color: #fff; }
   .warn { color: var(--warning-color, #b26a00); }
@@ -475,9 +476,15 @@ function rangeHtml(z, lengthUnit) {
     ${inputs}</section>`;
 }
 
+// A Zone's No-go areas are a list (empty means none) or null when unknown, which
+// shows no count at all: an unknown Zone is not a Zone with none.
+const nogoCountHtml = (z) => (Array.isArray(z.nogo_areas)
+  ? `<span class="nogo-count">No-go areas: ${z.nogo_areas.length}</span>` : '');
+
 function zoneListHtml(zones, selectedId) {
   const rows = zones.map((z) => `<li data-zone="${esc(z.id)}" class="${z.id === selectedId ? 'selected' : ''}">
       <span class="name">${esc(z.name)}</span>
+      ${nogoCountHtml(z)}
       ${z.missing ? '<span class="tag missing">missing</span>' : ''}
       <label><input type="checkbox" data-act="toggle-hidden" data-zone="${esc(z.id)}"${z.hidden ? ' checked' : ''}> hidden</label></li>`).join('');
   return `<ul class="zones">${rows}</ul><p><button data-act="refresh-zones">Refresh Zones</button></p>`;

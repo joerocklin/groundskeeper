@@ -169,6 +169,9 @@ def plan_import(
                       "missing": t.get("missing", False)}
             if "polygon" in t:
                 merged["polygon"] = t["polygon"]
+            # The map is the Mower's own, like the polygon; a Zone record
+            # written before No-go areas existed reads unknown.
+            merged["nogo_areas"] = t.get("nogo_areas")
             zones.append(merged)
         zones += [z for z in target_zones if z["id"] not in mapping.values()]
         config["zones"] = zones

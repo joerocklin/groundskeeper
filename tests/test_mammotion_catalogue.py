@@ -167,6 +167,75 @@ async def test_zones_without_geometry_when_fetch_fails(setup) -> None:
     assert {z.native_ref: z.name for z in zones}[BACKYARD] == "Area Backyard"
 
 
+async def test_list_zones_reads_each_zones_nogo_areas_from_the_map(setup) -> None:
+    catalogue, services, *_ = setup
+    by_ref = {z.native_ref: z for z in await catalogue.list_zones()}
+    # The map carries 19 obstacles: 16 belong to a listed Zone, 3 name a
+    # parent that is no Zone (an orphan, which attaches to nothing).
+    assert {ref: len(z.nogo_areas) for ref, z in by_ref.items()} == {
+        BACKYARD: 0,
+        FRONT: 6,
+        "1000000000000000003": 7,
+        "1000000000000000004": 2,
+        "1000000000000000005": 1,
+        FENCE: 0,
+        SIDE: 0,
+    }
+    # Same GeoJSON form as `Zone.polygon`.
+    first_front = next(
+        f["geometry"]
+        for f in services.geojson["features"]
+        if f["properties"]["type_name"] == "obstacle"
+        and str(f["properties"]["parent_hash_a"]) == FRONT
+    )
+    assert by_ref[FRONT].nogo_areas[0] == first_front
+    assert first_front["type"] == "Polygon"
+
+
+async def test_loaded_geometry_without_obstacles_reports_none_not_unknown(setup) -> None:
+    catalogue, services, *_ = setup
+    services.geojson["features"] = [
+        f for f in services.geojson["features"] if f["properties"]["type_name"] != "obstacle"
+    ]
+    zones = await catalogue.list_zones()
+    assert len(zones) == 7
+    assert all(z.polygon is not None for z in zones)
+    assert all(z.nogo_areas == [] for z in zones)
+
+
+async def test_nogo_areas_are_unknown_when_the_geometry_could_not_be_loaded(setup) -> None:
+    catalogue, *_ = setup
+
+    async def boom(call):
+        raise HomeAssistantError("offline")
+
+    catalogue._hass.services.async_register(
+        "mammotion", "get_geojson", boom, supports_response=SupportsResponse.ONLY
+    )
+    zones = await catalogue.list_zones()
+    assert len(zones) == 7
+    assert all(z.nogo_areas is None for z in zones)  # unknown, never "none"
+
+
+async def test_a_zone_the_map_does_not_carry_has_unknown_nogo_areas(setup) -> None:
+    catalogue, _, _, entry, device = setup
+    ent = er.async_get(catalogue._hass).async_get_or_create(
+        "switch",
+        "mammotion",
+        "1000000000000000099",
+        suggested_object_id="area_51",
+        config_entry=entry,
+        device_id=device.id,
+        original_name="Area 51",
+    )
+    catalogue._hass.states.async_set(
+        ent.entity_id, "on", {"hash": 1000000000000000099, "friendly_name": "Area 51"}
+    )
+    by_ref = {z.native_ref: z for z in await catalogue.list_zones()}
+    assert by_ref["1000000000000000099"].nogo_areas is None  # no geometry for it
+    assert by_ref[FRONT].nogo_areas != []  # the rest of the map still reads
+
+
 async def test_zone_without_matching_map_feature_uses_switch_name(setup) -> None:
     catalogue, _, _, entry, device = setup
     # A switch for a Zone the map does not (yet) carry, e.g. a rebuilt map.
@@ -294,6 +363,35 @@ async def test_zone_list_change_signals_and_refetches_geometry(setup) -> None:
     hass.states.async_set(ent, "off", {"hash": 999, "friendly_name": "Backyard"})
     await hass.async_block_till_done()
     assert signals == [ZonesChanged()]
+    catalogue.async_stop()
+
+
+async def test_a_map_update_that_adds_or_removes_a_nogo_area_is_read_on_the_refetch(
+    setup,
+) -> None:
+    catalogue, services, signals, entry, device = setup
+    catalogue.async_start()
+    before = {z.native_ref: z for z in await catalogue.list_zones()}
+    assert len(before[FRONT].nogo_areas) == 6
+    hass = catalogue._hass
+    ent = er.async_get(hass).async_get_entity_id("switch", "mammotion", BACKYARD)
+
+    # The map update the catalogue notices (a Zone re-keyed) refetches the map;
+    # in the new map one of Front yard's No-go areas is gone.
+    dropped = next(
+        f
+        for f in services.geojson["features"]
+        if f["properties"]["type_name"] == "obstacle"
+        and str(f["properties"]["parent_hash_a"]) == FRONT
+    )
+    services.geojson["features"].remove(dropped)
+    hass.states.async_set(ent, "on", {"hash": 999, "friendly_name": "Backyard"})
+    await hass.async_block_till_done()
+    assert signals == [ZonesChanged()]
+
+    after = {z.native_ref: z for z in await catalogue.list_zones()}
+    assert len(after[FRONT].nogo_areas) == 5
+    assert dropped["geometry"] not in after[FRONT].nogo_areas
     catalogue.async_stop()
 
 

@@ -179,7 +179,7 @@ class MammotionCatalogue:
     # -- catalogues --------------------------------------------------------
 
     async def list_zones(self) -> list[Zone]:
-        """Zones as (native_ref, name, polygon or None)."""
+        """Zones as (native_ref, name, polygon or None, No-go areas or None)."""
         features: list[dict[str, Any]] = []
         try:
             features = await self._geometry()
@@ -190,8 +190,26 @@ class MammotionCatalogue:
             for feat in features
             if feat.get("properties", {}).get("type_name") == "area"
         }
+        # Mammotion calls a No-go area an `obstacle` and names its Zone by
+        # parent hash; one whose parent is no listed Zone is simply ignored.
+        nogo: dict[str, list[dict[str, Any]]] = {}
+        for feat in features:
+            props = feat.get("properties", {})
+            if props.get("type_name") == "obstacle" and feat.get("geometry"):
+                nogo.setdefault(str(props.get("parent_hash_a")), []).append(
+                    feat["geometry"]
+                )
         names = self._zone_names(features)
-        return [Zone(ref, names[ref], polygons.get(ref)) for ref in names]
+        return [
+            Zone(
+                ref,
+                names[ref],
+                polygons.get(ref),
+                # Known (possibly none) only once the Zone's own geometry is.
+                nogo.get(ref, []) if ref in polygons else None,
+            )
+            for ref in names
+        ]
 
     def _zone_names(self, features: list[dict[str, Any]]) -> dict[str, str]:
         """Each Zone's name by native_ref, the one rule `list_zones` and the
