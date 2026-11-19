@@ -86,6 +86,27 @@ class Position:
 
 
 @dataclass(frozen=True, slots=True)
+class MowerPosition:
+    """Where the Mower is and which way it faces, as the source reports it.
+
+    Only shown on the Now tab's map, never acted on: no Check, Anomaly or Run
+    rule reads it, and it never enters a `Snapshot` (that would make nearly
+    every GPS update a recorded snapshot and a Store write). A separate type
+    from `Position`, which feeds the stall rule's exact-equality comparison.
+
+    `direction_deg` is a compass bearing in 0..359, clockwise from north, or
+    None when the source gives no heading. `fixed_at` is when the source last
+    reported this fix; the websocket turns it into an age, so the panel never
+    compares its clock with the server's.
+    """
+
+    latitude: float
+    longitude: float
+    fixed_at: datetime
+    direction_deg: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Movement:
     """Generic progress indicators the core's stall rule reads (spec §3.2)."""
 
@@ -336,6 +357,17 @@ class MowerAdapter(Protocol):
         it is called on each recorded snapshot change. Values are JSON scalars
         and lists of scalars; never a position or an entity id. A source that
         cannot say returns None. It must not raise, but the caller survives it.
+        """
+        ...
+
+    def mower_position(self) -> MowerPosition | None:
+        """Where the Mower is now, or None when the source has no usable fix.
+
+        Optional: a source that cannot say may omit it, and the caller treats
+        a missing member like None (no marker, no error). Read on demand for
+        the Now tab's map only, never through `snapshot`, and never recorded,
+        logged or emitted. Cheap and synchronous; it must not raise, but the
+        caller survives it.
         """
         ...
 

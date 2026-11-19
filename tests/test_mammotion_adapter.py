@@ -27,6 +27,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.groundskeeper.adapter import (
     JobStarted,
+    MowerPosition,
     NewError,
     RainStop,
     ZoneTaskAborted,
@@ -1004,3 +1005,146 @@ async def test_job_settings_are_none_when_they_cannot_be_reached(hass: HomeAssis
     assert adapter.job_settings() is None  # no job yet
     assert data.work.edge_mode == 1  # (the other Mower's data was never read)
 
+
+# -- Mower position (issue #113) ---------------------------------------------------
+
+# What the live tracker carries (Mammotion-HA 0.6.18, Stage 1 recording).
+TRACKER_ATTRS = {
+    "tracking_type": "position",
+    "in_zones": ["zone.home"],
+    "source_type": "gps",
+    "latitude": 39.395642778825284,
+    "longitude": -84.45706392229717,
+    "gps_accuracy": 0,
+    "direction": -84,
+    "friendly_name": "Example Mower",
+}
+
+
+def add_tracker(hass, entry, device, state="home", attributes=None, unique_id="whatever-the-integration-chose"):
+    """A Mammotion device tracker. The unique_id is deliberately not the
+    `{name}_{key}` pattern: the adapter must find the tracker by device and
+    platform, not by a unique_id or entity_id it assumed."""
+    tracker = er.async_get(hass).async_get_or_create(
+        "device_tracker", "mammotion", unique_id, config_entry=entry, device_id=device.id
+    )
+    hass.states.async_set(tracker.entity_id, state, TRACKER_ATTRS if attributes is None else attributes)
+    return tracker.entity_id
+
+
+async def tracker_adapter(hass, **tracker):
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    mammotion_entry = hass.config_entries.async_entries("mammotion")[0]
+    entity_id = add_tracker(hass, mammotion_entry, mower, **tracker)
+    return make_adapter(hass, entry), entity_id
+
+
+async def test_mower_position_reads_latitude_longitude_and_direction(hass: HomeAssistant) -> None:
+    adapter, entity_id = await tracker_adapter(hass)
+    fix = adapter.mower_position()
+    assert fix == MowerPosition(
+        latitude=39.395642778825284,
+        longitude=-84.45706392229717,
+        fixed_at=hass.states.get(entity_id).last_reported,
+        direction_deg=276,  # -84 degrees, folded onto 0..359
+    )
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [(0, 0), (1, 1), (90, 90), (179, 179), (-1, 359), (-84, 276), (-90, 270), (-179, 181), (360, 0)],
+)
+async def test_mower_direction_is_normalised_to_a_compass_bearing(
+    hass: HomeAssistant, direction, expected
+) -> None:
+    adapter, _ = await tracker_adapter(hass, attributes={**TRACKER_ATTRS, "direction": direction})
+    assert adapter.mower_position().direction_deg == expected
+
+
+@pytest.mark.parametrize("direction", [None, "north", True, float("nan"), 1000])
+async def test_a_fix_without_a_usable_direction_has_no_heading_but_keeps_its_place(
+    hass: HomeAssistant, direction
+) -> None:
+    attributes = {**TRACKER_ATTRS, "direction": direction}
+    adapter, _ = await tracker_adapter(hass, attributes=attributes)
+    fix = adapter.mower_position()
+    assert fix is not None and fix.direction_deg is None
+    assert (fix.latitude, fix.longitude) == (39.395642778825284, -84.45706392229717)
+
+
+async def test_a_fix_with_no_direction_attribute_is_a_plain_fix(hass: HomeAssistant) -> None:
+    attributes = {k: v for k, v in TRACKER_ATTRS.items() if k != "direction"}
+    adapter, _ = await tracker_adapter(hass, attributes=attributes)
+    assert adapter.mower_position().direction_deg is None
+
+
+@pytest.mark.parametrize("state", ["unavailable", "unknown"])
+async def test_an_unavailable_or_unknown_tracker_is_no_fix(hass: HomeAssistant, state) -> None:
+    adapter, _ = await tracker_adapter(hass, state=state)
+    assert adapter.mower_position() is None
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"latitude": None},
+        {"longitude": None},
+        {"latitude": "39.39"},
+        {"latitude": 91.0},
+        {"longitude": -181.0},
+        {"latitude": float("nan")},
+        {"longitude": float("inf")},
+        {"latitude": True},
+    ],
+)
+async def test_a_fix_missing_or_with_a_bad_latitude_or_longitude_is_no_fix(
+    hass: HomeAssistant, broken
+) -> None:
+    adapter, _ = await tracker_adapter(hass, attributes={**TRACKER_ATTRS, **broken})
+    assert adapter.mower_position() is None
+
+
+async def test_a_missing_tracker_is_no_fix(hass: HomeAssistant) -> None:
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    assert make_adapter(hass, entry).mower_position() is None  # no tracker registered
+
+    mammotion_entry = hass.config_entries.async_entries("mammotion")[0]
+    entity_id = add_tracker(hass, mammotion_entry, mower)
+    adapter = make_adapter(hass, entry)
+    assert adapter.mower_position() is not None
+    hass.states.async_remove(entity_id)
+    assert adapter.mower_position() is None  # registered, but no state
+
+
+async def test_the_tracker_is_found_through_the_registry_not_an_entity_id(hass: HomeAssistant) -> None:
+    adapter, entity_id = await tracker_adapter(hass)
+    before = adapter.mower_position()
+    # The owner renames the entity; the tracker is still this device's.
+    renamed = er.async_get(hass).async_update_entity(
+        entity_id, new_entity_id="device_tracker.my_own_name"
+    ).entity_id
+    hass.states.async_set(renamed, "home", TRACKER_ATTRS)
+    assert adapter.mower_position().latitude == before.latitude
+
+
+async def test_another_devices_tracker_is_never_read(hass: HomeAssistant) -> None:
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    mammotion_entry = hass.config_entries.async_entries("mammotion")[0]
+    rtk = dr.async_get(hass).async_get_or_create(
+        config_entry_id=mammotion_entry.entry_id, identifiers={("mammotion", "RTK-1")}, name="RTK"
+    )
+    add_tracker(hass, mammotion_entry, rtk, unique_id="rtk-tracker")  # the RTK station's fix
+    assert make_adapter(hass, entry).mower_position() is None
+
+
+async def test_the_position_stays_out_of_the_snapshot(hass: HomeAssistant) -> None:
+    """The Mower's GPS never reaches `movement.position` (the stall rule's
+    exact-equality input) however the tracker moves."""
+    adapter, entity_id = await tracker_adapter(hass)
+    assert adapter.snapshot.movement.position is None
+    hass.states.async_set(entity_id, "home", {**TRACKER_ATTRS, "latitude": 39.5})
+    assert adapter.snapshot.movement.position is None
+    assert adapter.mower_position().latitude == 39.5

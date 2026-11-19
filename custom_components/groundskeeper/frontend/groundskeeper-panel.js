@@ -58,6 +58,10 @@ const STYLE = `
   svg .stripe { stroke: var(--primary-text-color); stroke-opacity: .35; stroke-width: 1; }
   svg .label { font-size: 11px; text-anchor: middle; fill: var(--primary-text-color); pointer-events: none; }
   svg .dock { fill: var(--primary-text-color); }
+  svg .mower { cursor: pointer; }
+  svg .mower .glyph { fill: var(--warning-color, #ffa600); stroke: var(--primary-text-color); stroke-width: 1.5; }
+  svg .mower .fix { font-size: 10px; text-anchor: middle; fill: var(--primary-text-color); pointer-events: none;
+    paint-order: stroke; stroke: var(--secondary-background-color); stroke-width: 3px; }
   svg .dial { fill: none; stroke: var(--divider-color); }
   svg .wedge { fill: var(--primary-color); fill-opacity: .35; stroke: var(--primary-color); }
   svg.wedge-map { width: 140px; height: 140px; float: right; }
@@ -141,7 +145,7 @@ const pathOf = (c) => {
 function projectZones(zones, extra = []) {
   const rings = zones.map((z) => ringOf(z.polygon));
   const pts = [...rings.flatMap((r) => r || []), ...extra];
-  if (!pts.length) return { rings: rings.map(() => null), at: () => [MAP_W / 2, MAP_H / 2] };
+  if (!pts.length) return { rings: rings.map(() => null), at: () => [MAP_W / 2, MAP_H / 2], fitted: false };
   const lat0 = pts.reduce((a, p) => a + p[1], 0) / pts.length;
   const kx = Math.cos((lat0 * Math.PI) / 180);
   const xs = pts.map((p) => p[0] * kx);
@@ -156,7 +160,58 @@ function projectZones(zones, extra = []) {
     MAP_PAD + (lon * kx - minX) * scale + ((MAP_W - 2 * MAP_PAD) - (maxX - minX) * scale) / 2,
     MAP_PAD + (-lat - minY) * scale + ((MAP_H - 2 * MAP_PAD) - (maxY - minY) * scale) / 2,
   ];
-  return { rings: rings.map((r) => (r ? r.map(at) : null)), at };
+  return { rings: rings.map((r) => (r ? r.map(at) : null)), at, fitted: true };
+}
+
+// The map's fit: what the Zone rings and the Channel paths that can be drawn
+// are projected by. Shared by `renderMap` and the Mower marker, so a mark is
+// placed by the very projection the map is drawn with. Nothing but Zones and
+// Channels ever widens it: the Mower's position must not.
+function mapFit(zones, channels) {
+  // Only paths that can be drawn (every Zone end has an outline) widen the fit.
+  const placed = new Set(zones.filter((z) => ringOf(z.polygon)).map((z) => z.id));
+  const drawable = (channels || []).filter((c) => [c.end_a, c.end_b].every((r) => r === DOCK || placed.has(r)));
+  return projectZones(zones, drawable.flatMap((c) => pathOf(c) || []));
+}
+
+// -- Mower position marker (issue #113) ---------------------------------------
+// Only shown, never acted on. The fix arrives on its own subscription and is
+// placed with the map's own projection; it never changes the fit.
+
+// Where a fix sits on the map, or null when it cannot be shown: no fit to
+// place it by, a fix without a latitude/longitude, or a place outside the map.
+// `direction` is a compass bearing, clockwise from north, and the map is north
+// up, so it is the marker's rotation as it stands.
+function mowerPlace(zones, channels, fix) {
+  if (!fix || !Number.isFinite(fix.latitude) || !Number.isFinite(fix.longitude)) return null;
+  const fit = mapFit(zones, channels);
+  if (!fit.fitted) return null;
+  const [x, y] = fit.at([fix.longitude, fix.latitude]);
+  if (!(x >= 0 && x <= MAP_W && y >= 0 && y <= MAP_H)) return null;
+  const heading = Number.isFinite(fix.direction) ? fix.direction : null;
+  return { x: num(x), y: num(y), direction: heading };
+}
+
+// "last fix 5 s ago", from the age the server sent plus the time since.
+function fixAgeText(ageS) {
+  const s = Math.max(0, Math.round(ageS));
+  if (s < 90) return `last fix ${s} s ago`;
+  if (s < 5400) return `last fix ${Math.round(s / 60)} min ago`;
+  return `last fix ${Math.round(s / 3600)} h ago`;
+}
+
+const MOWER_ARROW = '0,-9 6,7 0,3 -6,7';
+const mowerShape = (m) => (m.direction == null ? 'dot' : 'arrow');
+const mowerGlyph = (m) => (m.direction == null
+  ? '<circle class="glyph" r="5"/>'
+  : `<polygon class="glyph" points="${MOWER_ARROW}" transform="rotate(${num(m.direction)})"/>`);
+
+// One marker: an arrow rotated to the heading, or a plain dot without one.
+// The tooltip (and, once tapped, the label) says how old the fix is.
+function mowerMarkSvg(m, ageS, labelOpen) {
+  const age = fixAgeText(ageS);
+  return `<g class="mower" data-shape="${mowerShape(m)}" transform="translate(${m.x} ${m.y})"><title>${esc(age)}</title>`
+    + `${mowerGlyph(m)}${labelOpen ? `<text class="fix" y="-14">${esc(age)}</text>` : ''}</g>`;
 }
 
 const centroid = (pts) => [
@@ -264,13 +319,12 @@ function stripesSvg(pts, angle, clipId) {
  * with believed open/closed state), pickedChannelIds (enables Channel
  * picking and highlights those), angle (absolute compass degrees; with
  * stripeZoneId draws synthetic stripes in that Zone), selectedZoneId,
- * currentZoneId (the Mower's Zone), highlightZoneId.
+ * currentZoneId (the Mower's Zone), highlightZoneId, mower (the Now tab's
+ * Mower marker: { mark, ageS, labelOpen }, `mark` null for none; the slot is
+ * drawn whenever the key is present so the marker can be updated in place).
  */
 function renderMap(zones, channels, opts = {}) {
-  // Only paths that can be drawn (every Zone end has an outline) widen the fit.
-  const placed = new Set(zones.filter((z) => ringOf(z.polygon)).map((z) => z.id));
-  const drawable = (channels || []).filter((c) => [c.end_a, c.end_b].every((r) => r === DOCK || placed.has(r)));
-  const { rings, at } = projectZones(zones, drawable.flatMap((c) => pathOf(c) || []));
+  const { rings, at } = mapFit(zones, channels);
   const centre = {};
   zones.forEach((z, i) => { if (rings[i]) centre[z.id] = centroid(rings[i]); });
   const paths = channelPaths(channels, centre, at);
@@ -336,7 +390,10 @@ function renderMap(zones, channels, opts = {}) {
     shapes += `<text class="label" x="${num(x)}" y="${num(y)}">${esc(z.name)}</text>`;
   });
   const dockMark = hasDock ? `<circle class="dock" cx="${num(dock[0])}" cy="${num(dock[1])}" r="5"/>` : '';
-  return `<svg class="map" viewBox="0 0 ${MAP_W} ${MAP_H}" role="img" aria-label="Zones and Channels"><defs>${defs}</defs>${shapes}${lines}${gateMarks}${dockMark}</svg>`;
+  const mower = opts.mower
+    ? `<g id="mower-slot">${opts.mower.mark ? mowerMarkSvg(opts.mower.mark, opts.mower.ageS, opts.mower.labelOpen) : ''}</g>`
+    : '';
+  return `<svg class="map" viewBox="0 0 ${MAP_W} ${MAP_H}" role="img" aria-label="Zones and Channels"><defs>${defs}</defs>${shapes}${lines}${gateMarks}${dockMark}${mower}</svg>`;
 }
 
 // Values are shown in HA units: lengths follow the unit system, times are
@@ -1082,6 +1139,14 @@ class GroundskeeperPanel extends HTMLElement {
     this._runId = null; // tapped Run, highlighted on the map
     this._sheet = null; // { run_id, warnings, error } while the edit sheet is open
     this._nowZonesAt = 0;
+    // Mower position (issue #113): its own subscription, open only while the Now tab shows
+    this._mower = null; // latest push: { latitude, longitude, direction, age_s }, or null for no fix
+    this._mowerAt = 0; // Date.now() when it arrived: the age counts on from here
+    this._unsubMower = null;
+    this._mowerPending = false; // a subscribe is in flight
+    this._mowerFailed = null; // entry id whose subscribe was refused: not retried on every render
+    this._mowerTimer = null; // counts the fix's age in place
+    this._fixLabelOpen = false; // tapped: the age shows on the map, not only as a tooltip
     this._notify = null; // Settings tab: { targets, categories } from get_notify_settings
   }
 
@@ -1517,6 +1582,7 @@ class GroundskeeperPanel extends HTMLElement {
     if (this._unsub) { this._unsub(); this._unsub = null; }
     if (this._unsubNow) { this._unsubNow(); this._unsubNow = null; }
     if (this._unsubPrompts) { this._unsubPrompts(); this._unsubPrompts = null; }
+    this._unsubscribeMower();
   }
 
   // ---- Now tab (spec §16.2) -------------------------------------------------
@@ -1563,6 +1629,89 @@ class GroundskeeperPanel extends HTMLElement {
     if (this._countdownTimer) { clearInterval(this._countdownTimer); this._countdownTimer = null; }
   }
 
+  // ---- Mower position (issue #113) -------------------------------------------
+  // A subscription of its own, never `subscribe_now`: it is open only while the
+  // Now tab shows, and the marker moves by rewriting itself, never by re-rendering
+  // (a re-render each second would drop focus and half-typed input elsewhere).
+
+  _syncMower() {
+    const want = this._tab === 'now' && this._hass && this._entryId && !this._error;
+    if (want && !this._unsubMower && !this._mowerPending && this._mowerFailed !== this._entryId) {
+      this._subscribeMower();
+    } else if (!want) {
+      this._unsubscribeMower();
+    }
+    if (want && this._mower && !this._mowerTimer) {
+      this._mowerTimer = setInterval(() => this._updateMower(), 1000);
+    } else if (!(want && this._mower)) {
+      this._stopMowerTimer();
+    }
+  }
+
+  async _subscribeMower() {
+    const entryId = this._entryId;
+    this._mowerPending = true;
+    try {
+      const unsub = await this._hass.connection.subscribeMessage((ev) => {
+        this._mower = (ev && ev.position) || null;
+        this._mowerAt = Date.now();
+        this._updateMower();
+        this._syncMower();
+      }, { type: 'groundskeeper/subscribe_mower_position', entry_id: entryId });
+      if (this._tab === 'now' && this._entryId === entryId && this._started) this._unsubMower = unsub;
+      else unsub(); // the tab was left, or the Mower changed, while subscribing
+    } catch (err) {
+      this._mowerFailed = entryId; // no marker and no error shown
+    } finally {
+      this._mowerPending = false;
+    }
+    this._syncMower();
+  }
+
+  _unsubscribeMower() {
+    if (this._unsubMower) { this._unsubMower(); this._unsubMower = null; }
+    this._stopMowerTimer();
+    this._mower = null;
+    this._mowerFailed = null; // leaving the tab (or the Mower) allows a fresh try
+    this._fixLabelOpen = false;
+  }
+
+  _stopMowerTimer() {
+    if (this._mowerTimer) { clearInterval(this._mowerTimer); this._mowerTimer = null; }
+  }
+
+  // The marker's data for `renderMap`, from the latest fix and the map's own fit.
+  _mowerOpts() {
+    const { zones, channels } = this._zoneView;
+    const mark = mowerPlace(zones, channels, this._mower);
+    return { mark, ageS: this._mowerAgeS(), labelOpen: this._fixLabelOpen };
+  }
+
+  _mowerAgeS() {
+    return ((this._mower && this._mower.age_s) || 0) + (Date.now() - this._mowerAt) / 1000;
+  }
+
+  // Move the marker without re-rendering anything else: the same marker gets a new
+  // place, heading and age; only a change of shape (dot or arrow) or a fix
+  // appearing or going away replaces it.
+  _updateMower() {
+    const slot = this.shadowRoot.querySelector('#mower-slot');
+    if (!slot) return;
+    const { mark, ageS, labelOpen } = this._mowerOpts();
+    const el = mark ? slot.querySelector('.mower') : null;
+    if (!mark || !el || el.getAttribute('data-shape') !== mowerShape(mark)
+        || Boolean(el.querySelector('.fix')) !== labelOpen) {
+      slot.innerHTML = mark ? mowerMarkSvg(mark, ageS, labelOpen) : '';
+      return;
+    }
+    el.setAttribute('transform', `translate(${mark.x} ${mark.y})`);
+    const glyph = el.querySelector('.glyph');
+    if (mark.direction != null) glyph.setAttribute('transform', `rotate(${num(mark.direction)})`);
+    el.querySelector('title').textContent = fixAgeText(ageS);
+    const label = el.querySelector('.fix');
+    if (label) label.textContent = fixAgeText(ageS);
+  }
+
   _lengthUnit() {
     const u = this._hass && this._hass.config && this._hass.config.unit_system;
     return (u && u.length) || 'km';
@@ -1587,7 +1736,8 @@ class GroundskeeperPanel extends HTMLElement {
     const unit = this._lengthUnit();
     const { zones, channels } = this._zoneView;
     const sheetRun = this._sheet && (view.up_next || []).find((r) => r.run_id === this._sheet.run_id);
-    const map = renderMap(zones, channels, { gates: this._zoneView.gates || [], ...nowMapOpts(view, this._runId) });
+    const map = renderMap(zones, channels, {
+      gates: this._zoneView.gates || [], ...nowMapOpts(view, this._runId), mower: this._mowerOpts() });
     return `<section class="card"><h2>Map</h2>${map}</section>
       <div><section class="card"><h2>Status</h2>${this._notice ? `<p class="warn" id="notice">${esc(this._notice)}</p>` : ''}
         ${statusCardHtml(view, unit, this._elapsedS())}</section>
@@ -1598,6 +1748,14 @@ class GroundskeeperPanel extends HTMLElement {
   }
 
   _wireNow(root) {
+    root.querySelectorAll('#mower-slot').forEach((slot) => {
+      // Tap (or click) the marker for its fix age as a label; a tooltip needs a hover.
+      slot.addEventListener('click', (e) => {
+        if (!e.target.closest('.mower')) return;
+        this._fixLabelOpen = !this._fixLabelOpen;
+        this._updateMower();
+      });
+    });
     const confirmed = (action) => {
       const text = confirmText(action);
       return !text || (typeof confirm !== 'function') || confirm(text);
@@ -1794,6 +1952,7 @@ class GroundskeeperPanel extends HTMLElement {
     if (this._tab === 'checks') this._wireChecks(this.shadowRoot);
     if (this._tab === 'settings') this._wireSettings(this.shadowRoot);
     this._syncCountdown();
+    this._syncMower();
   }
 }
 

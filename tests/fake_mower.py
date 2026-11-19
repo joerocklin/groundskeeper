@@ -33,6 +33,7 @@ from custom_components.groundskeeper.adapter import (
     Limits,
     Movement,
     MowerAdapter,
+    MowerPosition,
     NativeTask,
     NewError,
     Refused,
@@ -133,6 +134,9 @@ class FakeMower:
     redact_terms: list[str] = field(default_factory=lambda: ["SN-FAKE-1"])
     job_settings_value: dict[str, Any] | None = None
     job_settings_error: Exception | None = None
+    # Scripted Mower position (None = no fix); raises `mower_position_error` if set.
+    mower_position_value: MowerPosition | None = None
+    mower_position_error: Exception | None = None
     # Like Mammotion, a source version that only becomes known in `async_start`.
     source_ver_on_start: str | None = None
 
@@ -213,6 +217,12 @@ class FakeMower:
         if self.job_settings_error is not None:
             raise self.job_settings_error
         return self.job_settings_value
+
+    def mower_position(self) -> MowerPosition | None:
+        """Scripted Mower position (None by default); raises `mower_position_error` if set."""
+        if self.mower_position_error is not None:
+            raise self.mower_position_error
+        return self.mower_position_value
 
     def subscribe(self, sink: AdapterSink) -> CALLBACK_TYPE:
         """Register a sink; returns unsubscribe."""
