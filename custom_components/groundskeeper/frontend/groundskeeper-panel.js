@@ -780,6 +780,18 @@ const fmtHeight = (mm, lengthUnit) =>
 const heightToMm = (v, lengthUnit) => (lengthUnit === 'mi' ? num(v * 25.4) : v);
 const heightValue = (mm, lengthUnit) => (lengthUnit === 'mi' ? num(mm / 25.4) : num(mm));
 
+// Spacing is stored in cm and speed in m/s; shown and typed in HA units (inches
+// and ft/s when imperial), the same factors as the Python to_display/from_display.
+// A typed imperial value is rounded to 0.1 cm / 0.01 m/s on the way out, so a
+// device limit read off the hint and typed back in lands on the limit instead
+// of a hair over it.
+const fmtSpacing = (cm, lengthUnit) => (lengthUnit === 'mi' ? `${num(cm / 2.54)} in` : `${num(cm)} cm`);
+const fmtSpeed = (ms, lengthUnit) => (lengthUnit === 'mi' ? `${num(ms / 0.3048)} ft/s` : `${num(ms)} m/s`);
+const spacingValue = (cm, lengthUnit) => (lengthUnit === 'mi' ? num(cm / 2.54) : num(cm));
+const speedValue = (ms, lengthUnit) => (lengthUnit === 'mi' ? num(ms / 0.3048) : num(ms));
+const spacingToCm = (v, lengthUnit) => (lengthUnit === 'mi' ? Math.round(v * 2.54 * 10) / 10 : v);
+const speedToMs = (v, lengthUnit) => (lengthUnit === 'mi' ? Math.round(v * 0.3048 * 100) / 100 : v);
+
 const EDIT_WARNINGS = {
   height_increases: 'This makes the Run taller than the one before it, so the Plan no longer steps down.',
   step_above_max_cut: 'This step is more than the Plan\'s max cut.',
@@ -821,6 +833,16 @@ function nogoLapsNote(run, key) {
   return laps > 0 ? ` <span class="nogo-laps">No-go laps: ${esc(laps)}</span>` : '';
 }
 
+// A Run's stored Spacing and speed, whatever its status. Nothing for a Run
+// stored without them.
+function spacingSpeedNote(run, lengthUnit) {
+  const s = run.settings || {};
+  const parts = [];
+  if (s.spacing_cm != null) parts.push(`Spacing ${fmtSpacing(s.spacing_cm, lengthUnit)}`);
+  if (s.speed_m_s != null) parts.push(`speed ${fmtSpeed(s.speed_m_s, lengthUnit)}`);
+  return parts.length ? ` <span class="spacing-speed">${parts.join(', ')}</span>` : '';
+}
+
 function planCardsHtml(view, lengthUnit) {
   const cards = (view.plans || []).map((p) => {
     const runs = (view.runs || []).filter((r) => r.plan_id === p.id);
@@ -833,7 +855,7 @@ function planCardsHtml(view, lengthUnit) {
           <button data-act="edit-run" data-run="${esc(r.id)}">Save</button>
           <button data-act="delete-run" data-run="${esc(r.id)}">Delete</button>`
         : `${fmtHeight(r.height_mm, lengthUnit)} at ${fmtDeg(r.angle_deg)} <span class="tag">${esc(r.status)}</span>`;
-      return `<li>Run ${esc(r.index)} of ${esc(r.of)}: ${edit}${nogoLapsNote(r, view.nogo_laps_key)}</li>`;
+      return `<li>Run ${esc(r.index)} of ${esc(r.of)}: ${edit}${spacingSpeedNote(r, lengthUnit)}${nogoLapsNote(r, view.nogo_laps_key)}</li>`;
     }).join('');
     const warns = (p.angle_warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join('');
     const note = p.note === 'angles_redrawn_for_range'
@@ -870,6 +892,13 @@ function nogoLapsState(d, zones, nogo) {
   return z.nogo_areas.length ? 'offered' : 'none';
 }
 
+// A number typed in the form: null when blank, NaN when it is not a number.
+function optionalNumber(raw) {
+  if (raw == null || String(raw).trim() === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
 // Websocket fields for preview_plan / add_plan from the New Plan form, or { error }.
 // `zones` and `nogo` (the Zones view's No-go laps descriptor) decide whether a
 // No-go laps value is sent; both are optional.
@@ -893,7 +922,13 @@ function newPlanPayload(d, lengthUnit, zones, nogo) {
     if (Number.isNaN(laps)) return { error: 'No-go laps must be a number.' };
     nogoSettings = { extras: { [nogo.key]: laps } };
   }
-  const settings = mergeSettings(nogoSettings);
+  const spacing = optionalNumber(d.spacing), speed = optionalNumber(d.speed);
+  if (Number.isNaN(spacing)) return { error: 'Spacing must be a number.' };
+  if (Number.isNaN(speed)) return { error: 'Speed must be a number.' };
+  const ownSettings = {};
+  if (spacing != null) ownSettings.spacing_cm = spacingToCm(spacing, lengthUnit);
+  if (speed != null) ownSettings.speed_m_s = speedToMs(speed, lengthUnit);
+  const settings = mergeSettings(ownSettings, nogoSettings);
   if (Object.keys(settings).length) payload.settings = settings;
   return { payload };
 }
@@ -925,14 +960,34 @@ function nogoLapsHtml(d, zones, nogo) {
 function previewHtml(pv, lengthUnit) {
   const rows = pv.runs.map((r) => `<tr><td>${esc(r.n)} of ${esc(r.m)}</td><td>${fmtHeight(r.height_mm, lengthUnit)}</td>
       <td>${fmtDeg(r.angle_deg)}${r.provisional ? ' <span class="tag">provisional</span>' : ''}</td>
+      <td>${r.spacing_cm == null ? '' : fmtSpacing(r.spacing_cm, lengthUnit)}</td>
+      <td>${r.speed_m_s == null ? '' : fmtSpeed(r.speed_m_s, lengthUnit)}</td>
       <td>${r.estimated_time_s == null ? 'unknown' : fmtDuration(r.estimated_time_s)}</td></tr>`).join('');
   const prov = pv.provisional
     ? '<p class="warn" id="provisional-warning">Angles are provisional: the Zone\'s allowed angle range is not known yet. They are redrawn when it arrives.</p>' : '';
   const warns = (pv.warnings || []).filter((w) => !/provisional/i.test(w)).map((w) => `<p class="warn">${esc(w)}</p>`).join('');
-  return `<table class="preview"><tr><th>Run</th><th>Height</th><th>Angle</th><th>Estimated time</th></tr>${rows}</table>${prov}${warns}`;
+  return `<table class="preview"><tr><th>Run</th><th>Height</th><th>Angle</th><th>Spacing</th><th>Speed</th><th>Estimated time</th></tr>${rows}</table>${prov}${warns}`;
 }
 
-function newPlanFormHtml(d, zones, preview, lengthUnit, nogo) {
+// The Spacing and speed inputs. A blank input uses the resolved default, shown as
+// the placeholder (the picked Zone's, else the Mower's); the device limits are
+// the hint. `limits` is the Zones view's `run_limits`, optional.
+function spacingSpeedHtml(d, zones, lengthUnit, limits) {
+  const z = (zones || []).find((x) => x.id === d.zone) || {};
+  const sp = (limits || {}).spacing_cm, sd = (limits || {}).speed_m_s;
+  const spDefault = z.spacing_cm_default ?? (sp && sp.default);
+  const sdDefault = z.speed_m_s_default ?? (sd && sd.default);
+  const ph = (v, fn) => (v == null ? '' : ` placeholder="${esc(fn(v, lengthUnit))}"`);
+  const su = lengthUnit === 'mi' ? 'in' : 'cm', vu = lengthUnit === 'mi' ? 'ft/s' : 'm/s';
+  const range = (lim, fn, unit) => (lim ? ` ${fn(lim.min, lengthUnit)} to ${fn(lim.max, lengthUnit)} ${unit}` : '');
+  const rangeText = limits
+    ? `Spacing${range(sp, spacingValue, su)}, speed${range(sd, speedValue, vu)}; blank uses the default. ` : '';
+  return `<p><label>Spacing (${su}, optional) <input type="number" step="any" id="np-spacing"${ph(spDefault, spacingValue)} value="${esc(d.spacing)}"></label>
+    <label>Speed (${vu}, optional) <input type="number" step="any" id="np-speed"${ph(sdDefault, speedValue)} value="${esc(d.speed)}"></label>
+    <span class="hint">${rangeText}Applies to every Run of the Plan, including the Finishing Run, and wins over the Finishing Run's own settings.</span></p>`;
+}
+
+function newPlanFormHtml(d, zones, preview, lengthUnit, nogo, runLimits) {
   const opts = zones.filter((z) => !z.missing && !z.hidden)
     .map((z) => `<option value="${esc(z.id)}"${z.id === d.zone ? ' selected' : ''}>${esc(z.name)}</option>`).join('');
   const hu = lengthUnit === 'mi' ? 'in' : 'mm';
@@ -944,6 +999,7 @@ function newPlanFormHtml(d, zones, preview, lengthUnit, nogo) {
     <p><label>Max cut (%, optional) <input type="number" step="any" id="np-max-cut" value="${esc(d.max_cut)}"></label>
     <label>Base angle (optional) <input type="number" step="any" id="np-base-angle" value="${esc(d.base_angle)}"></label>
     <label>Finishing <select id="np-finishing">${fin('default', 'Default')}${fin('on', 'On')}${fin('off', 'Off')}</select></label></p>
+    ${spacingSpeedHtml(d, zones, lengthUnit, runLimits)}
     ${nogoLapsHtml(d, zones, nogo)}
     ${d.error ? `<p class="warn" id="np-error">${esc(d.error)}</p>` : ''}
     <p><button data-act="preview-plan">Preview</button> <button data-act="add-plan">Add Plan</button></p>
@@ -1195,7 +1251,7 @@ class GroundskeeperPanel extends HTMLElement {
     this._zoneId = null;
     this._gateDraft = null; // Gate being created or edited, with its picked Channels
     this._scheduleView = { schedule: {}, plans: [], runs: [] };
-    this._planDraft = { zone: '', start: '', end: '', max_cut: '', base_angle: '', finishing: 'default', nogo_laps: '' };
+    this._planDraft = { zone: '', start: '', end: '', max_cut: '', base_angle: '', finishing: 'default', spacing: '', speed: '', nogo_laps: '' };
     this._planPreview = null;
     this._checksView = null;
     this._customDraft = blankCustomDraft();
@@ -1414,10 +1470,12 @@ class GroundskeeperPanel extends HTMLElement {
     const el = (id) => root.querySelector(id);
     if (!el('#np-zone')) return;
     const laps = el('#np-nogo-laps');
+    const spacing = el('#np-spacing'), speed = el('#np-speed');
     this._planDraft = readPlanDraft(this._planDraft, {
       zone: el('#np-zone').value, start: el('#np-start').value, end: el('#np-end').value,
       max_cut: el('#np-max-cut').value, base_angle: el('#np-base-angle').value,
       finishing: el('#np-finishing').value, nogo_laps: laps ? laps.value : '',
+      spacing: spacing ? spacing.value : '', speed: speed ? speed.value : '',
     });
   }
 
@@ -1447,13 +1505,13 @@ class GroundskeeperPanel extends HTMLElement {
     const view = this._scheduleView;
     const notice = this._notice ? `<p class="warn" id="schedule-notice">${esc(this._notice)}</p>` : '';
     return `<section class="card"><h2>Schedule</h2>${notice}${scheduleTableHtml(view, unit)}</section>
-      ${newPlanFormHtml(this._planDraft, this._zoneView.zones || [], this._planPreview, unit, this._zoneView.nogo_laps)}
+      ${newPlanFormHtml(this._planDraft, this._zoneView.zones || [], this._planPreview, unit, this._zoneView.nogo_laps, this._zoneView.run_limits)}
       ${planCardsHtml(view, unit)}`;
   }
 
   _wireSchedule(root) {
     const unit = this._lengthUnit();
-    root.querySelectorAll('#np-zone,#np-start,#np-end,#np-max-cut,#np-base-angle,#np-finishing,#np-nogo-laps').forEach((el) => {
+    root.querySelectorAll('#np-zone,#np-start,#np-end,#np-max-cut,#np-base-angle,#np-finishing,#np-spacing,#np-speed,#np-nogo-laps').forEach((el) => {
       el.addEventListener('change', () => {
         this._readPlanDraft(root);
         this._planPreview = null;

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from .angle_range import DEFAULT_TOLERANCE, Basis, estimate_angle_range, estimate_at
 from .zone_bearing import zone_bearing
@@ -115,13 +115,27 @@ def angle_estimates(zone: dict) -> dict | None:
     }
 
 
-def run_estimate_s(zone: dict, rel_angle: float) -> float | None:
+def run_estimate_s(
+    zone: dict,
+    rel_angle: float,
+    *,
+    spacing_cm: float | None = None,
+    speed_m_s: float | None = None,
+) -> float | None:
     """Estimated mow time of one Run on `zone` at a path angle relative to the
     bearing (spec 5.4/5.5), or None while the bearing or outline is unknown.
-    Uses the basis stored on the range record."""
+
+    Uses the basis stored on the range record, with the Run's own Spacing and
+    speed in place of the basis' when given. The stored record is never
+    touched: the Allowed angle range stays derived from the Mower-level basis."""
     rec = zone.get("angle_range") or {}
     bearing = (zone.get("bearing") or {}).get("value")
     ring = _ring(zone.get("polygon"))
     if bearing is None or ring is None or "basis" not in rec:
         return None
-    return estimate_at(ring, bearing, rel_angle, basis=Basis(**rec["basis"])).time_s
+    basis = Basis(**rec["basis"])
+    if spacing_cm is not None:
+        basis = replace(basis, spacing=spacing_cm / 100)
+    if speed_m_s is not None:
+        basis = replace(basis, speed=speed_m_s)
+    return estimate_at(ring, bearing, rel_angle, basis=basis).time_s
