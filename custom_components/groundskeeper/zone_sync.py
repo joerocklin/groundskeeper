@@ -242,7 +242,9 @@ class ZoneSync:
     # -- operations ---------------------------------------------------------
 
     async def async_zone_view(self) -> dict:
-        """Zones (with estimated angle times) and Channels for the panel."""
+        """Zones (with estimated angle times) and Channels for the panel, plus what
+        the New Plan form needs beside its inputs: the No-go laps setting and the
+        Spacing and speed limits (`run_limits`) with each Zone's resolved defaults."""
         cfg = await self._config()
         # A record written before No-go areas existed has no `nogo_areas`:
         # the view says unknown (None) outright so the panel never shows 0.
@@ -252,8 +254,9 @@ class ZoneSync:
                 for z in cfg["zones"]
             ]
         )
-        # The No-go laps setting, for the New Plan form: what the adapter calls
-        # it and its range, and each Zone's resolved default for the placeholder.
+        # For the New Plan form's placeholders: each Zone's resolved Spacing and
+        # speed, and its No-go laps default; the No-go laps setting itself is what
+        # the adapter calls it and its range.
         limits = self._adapter.limits
         nogo = nogo_laps_setting(limits)
         for z in zones:

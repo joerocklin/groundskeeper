@@ -127,7 +127,9 @@ def run_estimate_s(
 
     Uses the basis stored on the range record, with the Run's own Spacing and
     speed in place of the basis' when given. The stored record is never
-    touched: the Allowed angle range stays derived from the Mower-level basis."""
+    touched: the Allowed angle range stays derived from the Mower-level basis.
+    Only Spacing and speed are the Run's own here; the basis' perimeter laps
+    still apply as stored (see #108)."""
     rec = zone.get("angle_range") or {}
     bearing = (zone.get("bearing") or {}).get("value")
     ring = _ring(zone.get("polygon"))

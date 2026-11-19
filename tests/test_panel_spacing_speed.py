@@ -77,8 +77,9 @@ def test_the_placeholder_is_the_mower_default_while_no_zone_is_picked() -> None:
 
 def test_the_placeholder_is_shown_in_the_users_units_when_imperial() -> None:
     html = form(IMPERIAL)
-    assert f'placeholder="{to_display("spacing", 25, US):g}"' in html
-    assert f'placeholder="{to_display("speed", 0.4, US):g}"' in html
+    assert 'placeholder="9.84"' in html  # 25 cm
+    assert 'placeholder="1.31"' in html  # 0.4 m/s
+    assert f'placeholder="{to_display("spacing", 25, US):g}"' in html  # as Python shows it
 
 
 def test_the_device_limits_are_the_hint_in_metric() -> None:
@@ -134,19 +135,31 @@ def test_only_the_filled_field_is_sent() -> None:
 
 def test_imperial_values_are_converted_to_cm_and_m_per_s() -> None:
     got = payload(IMPERIAL, spacing="10", speed="1.5")["settings"]
+    assert got == {"spacing_cm": 25.4, "speed_m_s": 0.46}  # 10 in; 1.5 ft/s is 0.4572 m/s
     assert got["spacing_cm"] == pytest.approx(from_display("spacing", 10, US), abs=0.05)
     assert got["speed_m_s"] == pytest.approx(from_display("speed", 1.5, US), abs=0.005)
 
 
-def test_typing_a_displayed_limit_back_in_lands_on_the_limit_and_is_not_rejected() -> None:
+@pytest.mark.parametrize(
+    ("field", "key", "typed", "si"),
+    [
+        ("spacing", "spacing_cm", "13.78", 35.0),  # 35 cm shown as 13.78 in
+        ("spacing", "spacing_cm", "7.87", 20.0),  # 20 cm shown as 7.87 in
+        ("speed", "speed_m_s", "1.97", 0.6),  # 0.6 m/s shown as 1.97 ft/s
+        ("speed", "speed_m_s", "0.66", 0.2),  # 0.2 m/s shown as 0.66 ft/s
+    ],
+)
+def test_typing_a_displayed_limit_back_in_lands_on_the_limit_and_is_not_rejected(
+    field, key, typed, si
+) -> None:
     """The hint shows the limit rounded to two decimals; typing it must not
     come out a hair over the limit and be refused."""
-    for kind, si in (("spacing", 35.0), ("spacing", 20.0), ("speed", 0.6), ("speed", 0.2)):
-        shown = to_display(kind, si, US)
-        key = "spacing_cm" if kind == "spacing" else "speed_m_s"
-        field = "spacing" if kind == "spacing" else "speed"
-        got = payload(IMPERIAL, **{field: str(shown)})["settings"][key]
-        assert got == si, (kind, shown, got)
+    assert payload(IMPERIAL, **{field: typed})["settings"][key] == si
+
+
+def test_a_value_clearly_outside_the_limit_is_still_sent_for_the_backend_to_reject() -> None:
+    assert payload(IMPERIAL, spacing="7.8")["settings"] == {"spacing_cm": 19.8}  # min is 20 cm
+    assert payload(IMPERIAL, speed="2.2")["settings"] == {"speed_m_s": 0.67}
 
 
 def test_zero_is_a_value_not_a_blank_and_the_backend_decides() -> None:
@@ -183,7 +196,7 @@ PREVIEW = {
 
 def preview_rows(unit="km", pv=PREVIEW) -> list[str]:
     html = call("previewHtml", pv, unit)
-    return [row for row in html.split("<tr>")[2:]]
+    return html.split("<tr>")[2:]
 
 
 def test_each_preview_row_shows_its_own_spacing_and_speed() -> None:
@@ -199,8 +212,8 @@ def test_with_a_slower_finishing_set_only_the_last_row_shows_the_lower_speed() -
 
 def test_the_preview_shows_spacing_and_speed_in_the_users_units_when_imperial() -> None:
     first, _ = preview_rows(IMPERIAL)
-    assert f'{to_display("spacing", 25, US):g} in' in first
-    assert f'{to_display("speed", 0.4, US):g} ft/s' in first
+    assert "9.84 in" in first and "1.31 ft/s" in first  # 25 cm, 0.4 m/s
+    assert f'{to_display("spacing", 25, US):g} in' in first  # as Python shows it
 
 
 def test_the_preview_has_spacing_and_speed_columns() -> None:
@@ -238,8 +251,7 @@ def test_a_plan_card_shows_each_runs_spacing_and_speed_for_every_status() -> Non
 
 def test_a_plan_card_shows_them_in_the_users_units_when_imperial() -> None:
     html = cards(run("r1", "pending", 25, 0.4), unit=IMPERIAL)
-    assert f'{to_display("spacing", 25, US):g} in' in html
-    assert f'{to_display("speed", 0.4, US):g} ft/s' in html
+    assert "9.84 in" in html and "1.31 ft/s" in html  # 25 cm, 0.4 m/s
 
 
 def test_a_run_without_stored_settings_shows_neither() -> None:
