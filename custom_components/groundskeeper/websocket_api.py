@@ -34,7 +34,13 @@ from .const import DOMAIN, SIGNAL_STATE_CHANGED
 from .core import DETECTORS, plan_status
 from .gates import is_fraction
 from .heights import MAX_MAX_CUT, MIN_MAX_CUT
-from .run_settings import SettingsError, finishing_set, mower_run_defaults, validate_overrides
+from .run_settings import (
+    SettingsError,
+    finishing_set,
+    mower_run_defaults,
+    nogo_laps_setting,
+    validate_overrides,
+)
 from .notifier import (
     CATEGORY_DEFAULTS,
     CONFIG_CATEGORIES,
@@ -684,10 +690,13 @@ def schedule_view(director: Director) -> dict[str, Any]:
         {**plan, "status": plan_status(core, plan_id).value}
         for plan_id, plan in state["plans"].items()
     ]
+    nogo = nogo_laps_setting(director.adapter.limits)
     return {
         "schedule": dict(state["schedule"]),
         "plans": plans,
         "runs": [dict(r) for r in state["runs"]],
+        # Which extra holds a Run's No-go laps, so the Plan cards can read it.
+        "nogo_laps_key": nogo["key"] if nogo else None,
     }
 
 

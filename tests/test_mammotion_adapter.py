@@ -1148,3 +1148,15 @@ async def test_the_position_stays_out_of_the_snapshot(hass: HomeAssistant) -> No
     hass.states.async_set(entity_id, "home", {**TRACKER_ATTRS, "latitude": 39.5})
     assert adapter.snapshot.movement.position is None
     assert adapter.mower_position().latitude == 39.5
+
+
+async def test_the_no_go_laps_extra_is_marked_for_the_core_and_panel(
+    hass: HomeAssistant,
+) -> None:
+    """Core and panel find No-go laps by its role, never by Mammotion's key (#109)."""
+    from custom_components.groundskeeper.run_settings import nogo_laps_setting
+
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    found = nogo_laps_setting(make_adapter(hass, entry).limits)
+    assert found == {"key": "obstacle_laps", "label": "No-go zone laps", "min": 0, "max": 4}

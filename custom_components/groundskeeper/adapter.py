@@ -292,6 +292,10 @@ class RunSettings:
 # ---------------------------------------------------------------------------
 
 
+# The extra that sets the No-go laps a Run makes around each No-go area.
+NOGO_LAPS_ROLE = "nogo_laps"
+
+
 @dataclass(frozen=True, slots=True)
 class ExtrasField:
     """One adapter-owned Run setting, panel-renderable (decision A7).
@@ -304,6 +308,9 @@ class ExtrasField:
     label: str
     selector: selector.Selector
     default: Any
+    # Marks an extra whose meaning the core and panel know without knowing the
+    # adapter's own key for it (`NOGO_LAPS_ROLE`); None for a plain extra.
+    role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

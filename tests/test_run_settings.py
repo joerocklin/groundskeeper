@@ -5,10 +5,11 @@ import pytest
 from custom_components.groundskeeper.run_settings import (
     SettingsError,
     finishing_set,
+    nogo_laps_setting,
     resolve_run_settings,
     validate_overrides,
 )
-from tests.fake_mower import FakeMower
+from tests.fake_mower import NOGO_LIMITS, FakeMower
 
 LIMITS = FakeMower().limits
 
@@ -85,3 +86,29 @@ def test_invalid_overrides_are_rejected_not_clamped(bad) -> None:
 
 def test_valid_overrides_pass() -> None:
     validate_overrides(LIMITS, {"spacing_cm": LIMITS.spacing_min_cm, "perimeter_laps": 2})
+
+
+# -- No-go laps: found through the adapter's schema, range-checked from it ------
+
+NOGO = nogo_laps_setting(NOGO_LIMITS)
+
+
+def test_the_adapters_no_go_laps_setting_is_found_by_its_role_not_its_key() -> None:
+    assert NOGO is not None
+    assert NOGO["min"] == 0 and NOGO["max"] == 4
+    assert NOGO["key"] in {f.key for f in NOGO_LIMITS.extras_schema}
+
+
+def test_no_go_laps_setting_is_none_when_the_adapter_has_no_such_extra() -> None:
+    assert nogo_laps_setting(LIMITS) is None
+
+
+@pytest.mark.parametrize("value", [5, -1, 4.5, 1.5, "2", True, None])
+def test_a_number_extra_outside_the_schema_range_is_rejected(value) -> None:
+    with pytest.raises(SettingsError, match=NOGO["label"]):
+        validate_overrides(NOGO_LIMITS, {"extras": {NOGO["key"]: value}})
+
+
+@pytest.mark.parametrize("value", [0, 1, 4, 2.0])
+def test_a_number_extra_inside_the_schema_range_passes(value) -> None:
+    validate_overrides(NOGO_LIMITS, {"extras": {NOGO["key"]: value}})

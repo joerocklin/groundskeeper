@@ -817,3 +817,15 @@ async def test_all_commands_refuse_not_ready_without_any_services(
         await adapter.refresh(),
     ]:
         assert result == Refused("mammotion_not_ready")
+
+
+async def test_start_run_sends_a_stored_no_go_laps_value_to_the_mower(
+    hass: HomeAssistant,
+) -> None:
+    """A Run's stored No-go laps (#109) is what the start command carries."""
+    adapter = await make_command_adapter(hass)
+    calls = async_mock_service(hass, "mammotion", "start_mow")
+    run = settings()
+    run.extras["obstacle_laps"] = 3
+    assert await adapter.start_run(SIDE_YARD, run) == Accepted()
+    assert calls[0].data["obstacle_laps"] == 3

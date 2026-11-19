@@ -36,6 +36,7 @@ from homeassistant.util import ulid as ulid_util
 
 from .adapter import AdapterSignal, MowerAdapter, Zone, ZonesChanged
 from .const import DOMAIN, SIGNAL_STATE_CHANGED
+from .run_settings import nogo_laps_setting, resolve_run_settings
 from .zone_angles import angle_estimates, refresh_zone_angles
 
 _LOGGER = logging.getLogger(__name__)
@@ -251,7 +252,15 @@ class ZoneSync:
                 for z in cfg["zones"]
             ]
         )
-        return {"zones": zones, "channels": list(cfg["channels"])}
+        # The No-go laps setting, for the New Plan form: what the adapter calls
+        # it and its range, and each Zone's resolved default for the placeholder.
+        limits = self._adapter.limits
+        nogo = nogo_laps_setting(limits)
+        if nogo is not None:
+            for z in zones:
+                resolved = resolve_run_settings(limits, cfg, z)
+                z["nogo_laps_default"] = resolved["extras"][nogo["key"]]
+        return {"zones": zones, "channels": list(cfg["channels"]), "nogo_laps": nogo}
 
     async def async_sync(self) -> None:
         """Run one sync: Zones, then Channels, then the Repairs issue."""

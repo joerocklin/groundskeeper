@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .adapter import Limits
+from .adapter import NOGO_LAPS_ROLE, ExtrasField, Limits
 from .angle_draw import DEFAULT_CROSSING, DEFAULT_FINISH_JITTER, DEFAULT_SEPARATION
 from .angle_range import Basis
 
@@ -103,14 +103,55 @@ def resolve_run_settings(
     return out
 
 
+def nogo_laps_setting(limits: Limits) -> dict[str, Any] | None:
+    """The adapter's No-go laps extra as {key, label, min, max}, or None.
+
+    Found by its role, so neither core nor panel names an adapter's own key.
+    """
+    for f in limits.extras_schema:
+        if f.role == NOGO_LAPS_ROLE and _is_number(f):
+            cfg = f.selector.config
+            return {"key": f.key, "label": f.label, "min": cfg["min"], "max": cfg["max"]}
+    return None
+
+
+def _is_number(field: ExtrasField) -> bool:
+    cfg = getattr(field.selector, "config", None) or {}
+    return (
+        getattr(field.selector, "selector_type", None) == "number"
+        and cfg.get("min") is not None
+        and cfg.get("max") is not None
+    )
+
+
+def _check_extra(field: ExtrasField, value: Any) -> None:
+    """A number extra must be a number inside the schema's range (never clamped)."""
+    if not _is_number(field):
+        return
+    cfg = field.selector.config
+    lo, hi = cfg["min"], cfg["max"]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SettingsError(f"{field.label} must be a number")
+    if not lo <= value <= hi:
+        raise SettingsError(
+            f"{field.label} {value:g} is outside the allowed range ({lo:g}-{hi:g})"
+        )
+    step = cfg.get("step")
+    if isinstance(step, int | float) and step >= 1 and float(step).is_integer():
+        if int(value) != value:
+            raise SettingsError(f"{field.label} must be a whole number")
+
+
 def validate_overrides(limits: Limits, overrides: Mapping[str, Any]) -> None:
     """Reject (never clamp) an override outside the device limits."""
-    schema = {f.key for f in limits.extras_schema}
+    schema = {f.key: f for f in limits.extras_schema}
     for key, value in overrides.items():
         if key == "extras":
-            unknown = sorted(set(value) - schema)
+            unknown = sorted(set(value) - set(schema))
             if unknown:
                 raise SettingsError(f"unknown extra setting(s): {', '.join(unknown)}")
+            for extra_key, extra_value in value.items():
+                _check_extra(schema[extra_key], extra_value)
         elif key == "spacing_cm":
             if not limits.spacing_min_cm <= value <= limits.spacing_max_cm:
                 raise SettingsError(
