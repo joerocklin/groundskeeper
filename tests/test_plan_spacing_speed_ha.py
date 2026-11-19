@@ -79,10 +79,19 @@ async def test_a_slower_speed_or_closer_spacing_takes_longer_on_the_same_zone_an
     # The default estimate at this very angle (drawn angles vary between previews).
     default = run_estimate_s(zone_record(hass, entry), run["angle_deg"])
     assert run["estimated_time_s"] > default
-    assert run["estimated_time_s"] == run_estimate_s(
-        zone_record(hass, entry), run["angle_deg"],
-        spacing_cm=run["spacing_cm"], speed_m_s=run["speed_m_s"],
-    )
+
+
+async def test_a_mower_default_shows_in_the_estimate_like_any_other_resolved_value(
+    hass, hass_ws_client, director
+) -> None:
+    """The estimate follows the Run's resolved Spacing and speed, wherever they
+    came from, so a slower Mower default is in the time with no Plan override."""
+    entry, _, _ = director
+    await ws(hass, hass_ws_client, entry, "set_mower_run_settings",
+             run_defaults={"speed_m_s": 0.3})
+    (run,) = (await preview(hass, hass_ws_client, entry, **ONE_RUN))["runs"]
+    assert run["speed_m_s"] == 0.3
+    assert run["estimated_time_s"] > run_estimate_s(zone_record(hass, entry), run["angle_deg"])
 
 
 async def test_the_finishing_run_is_estimated_from_its_own_slower_speed(

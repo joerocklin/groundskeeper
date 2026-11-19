@@ -925,10 +925,10 @@ function newPlanPayload(d, lengthUnit, zones, nogo) {
   const spacing = optionalNumber(d.spacing), speed = optionalNumber(d.speed);
   if (Number.isNaN(spacing)) return { error: 'Spacing must be a number.' };
   if (Number.isNaN(speed)) return { error: 'Speed must be a number.' };
-  const ownSettings = {};
-  if (spacing != null) ownSettings.spacing_cm = spacingToCm(spacing, lengthUnit);
-  if (speed != null) ownSettings.speed_m_s = speedToMs(speed, lengthUnit);
-  const settings = mergeSettings(ownSettings, nogoSettings);
+  const spacingSpeedSettings = {};
+  if (spacing != null) spacingSpeedSettings.spacing_cm = spacingToCm(spacing, lengthUnit);
+  if (speed != null) spacingSpeedSettings.speed_m_s = speedToMs(speed, lengthUnit);
+  const settings = mergeSettings(spacingSpeedSettings, nogoSettings);
   if (Object.keys(settings).length) payload.settings = settings;
   return { payload };
 }
@@ -974,16 +974,17 @@ function previewHtml(pv, lengthUnit) {
 // the hint. `limits` is the Zones view's `run_limits`, optional.
 function spacingSpeedHtml(d, zones, lengthUnit, limits) {
   const z = (zones || []).find((x) => x.id === d.zone) || {};
-  const sp = (limits || {}).spacing_cm, sd = (limits || {}).speed_m_s;
-  const spDefault = z.spacing_cm_default ?? (sp && sp.default);
-  const sdDefault = z.speed_m_s_default ?? (sd && sd.default);
-  const ph = (v, fn) => (v == null ? '' : ` placeholder="${esc(fn(v, lengthUnit))}"`);
-  const su = lengthUnit === 'mi' ? 'in' : 'cm', vu = lengthUnit === 'mi' ? 'ft/s' : 'm/s';
-  const range = (lim, fn, unit) => (lim ? ` ${fn(lim.min, lengthUnit)} to ${fn(lim.max, lengthUnit)} ${unit}` : '');
+  const spacingLimits = (limits || {}).spacing_cm, speedLimits = (limits || {}).speed_m_s;
+  const spacingDefault = z.spacing_cm_default ?? (spacingLimits && spacingLimits.default);
+  const speedDefault = z.speed_m_s_default ?? (speedLimits && speedLimits.default);
+  const placeholder = (v, show) => (v == null ? '' : ` placeholder="${esc(show(v, lengthUnit))}"`);
+  const spacingUnit = lengthUnit === 'mi' ? 'in' : 'cm', speedUnit = lengthUnit === 'mi' ? 'ft/s' : 'm/s';
+  const range = (lim, show, unit) => (lim ? ` ${show(lim.min, lengthUnit)} to ${show(lim.max, lengthUnit)} ${unit}` : '');
   const rangeText = limits
-    ? `Spacing${range(sp, spacingValue, su)}, speed${range(sd, speedValue, vu)}; blank uses the default. ` : '';
-  return `<p><label>Spacing (${su}, optional) <input type="number" step="any" id="np-spacing"${ph(spDefault, spacingValue)} value="${esc(d.spacing)}"></label>
-    <label>Speed (${vu}, optional) <input type="number" step="any" id="np-speed"${ph(sdDefault, speedValue)} value="${esc(d.speed)}"></label>
+    ? `Spacing${range(spacingLimits, spacingValue, spacingUnit)}, speed${range(speedLimits, speedValue, speedUnit)}; `
+      + 'blank uses the default (the Finishing set\'s, on the Finishing Run). ' : '';
+  return `<p><label>Spacing (${spacingUnit}, optional) <input type="number" step="any" id="np-spacing"${placeholder(spacingDefault, spacingValue)} value="${esc(d.spacing)}"></label>
+    <label>Speed (${speedUnit}, optional) <input type="number" step="any" id="np-speed"${placeholder(speedDefault, speedValue)} value="${esc(d.speed)}"></label>
     <span class="hint">${rangeText}Applies to every Run of the Plan, including the Finishing Run, and wins over the Finishing Run's own settings.</span></p>`;
 }
 

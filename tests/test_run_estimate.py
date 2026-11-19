@@ -2,6 +2,8 @@
 
 import copy
 
+import pytest
+
 from custom_components.groundskeeper.zone_angles import (
     DEFAULT_SETTINGS,
     refresh_zone_angles,
@@ -52,3 +54,18 @@ def test_estimating_with_overrides_leaves_the_zones_range_record_alone() -> None
     before = copy.deepcopy(ZONE)
     run_estimate_s(ZONE, 12.0, spacing_cm=20, speed_m_s=0.2)
     assert ZONE == before
+
+
+# -- hand-counted: a 20 x 10 m Zone, no laps, stripes along the long side ----------
+
+
+def test_the_estimate_follows_the_run_s_own_values_by_hand() -> None:
+    plain = refresh_zone_angles(
+        {"id": "z2", "polygon": {"type": "Polygon", "coordinates": [rect(20, 10, 0)]}},
+        {**DEFAULT_SETTINGS, "spacing": 1.0, "speed": 0.4, "perimeter_laps": 0, "nogo_laps": 0},
+    )
+    # 10 stripes of 20 m at 1 m spacing, 8 s per turn (as tests/test_angle_range.py).
+    assert run_estimate_s(plain, 0.0) == pytest.approx(200 / 0.4 + 10 * 8)  # 580
+    assert run_estimate_s(plain, 0.0, speed_m_s=0.8) == pytest.approx(200 / 0.8 + 10 * 8)  # 330
+    # 2 m spacing: 5 stripes of 20 m.
+    assert run_estimate_s(plain, 0.0, spacing_cm=200) == pytest.approx(100 / 0.4 + 5 * 8)  # 290
