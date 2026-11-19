@@ -53,6 +53,16 @@ def test_a_blank_plan_card_value_is_refused_in_the_panel_and_nothing_is_sent(out
     assert got == {"sent": 0, "notice": "Enter a speed above zero.", "shown": True}
 
 
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [("height", "Enter a height above zero."), ("angle", "Enter an angle in degrees.")],
+)
+def test_a_blank_plan_card_height_or_angle_is_refused_too_not_sent_as_zero(out, field, message) -> None:
+    """The inline edit shares the sheet's validation, so a blank angle is no
+    longer quietly sent as 0 degrees."""
+    assert out[f"schedule_blank_{field}"] == {"sent": 0, "notice": message}
+
+
 # -- the Now tab's Run sheet --------------------------------------------------------------
 
 

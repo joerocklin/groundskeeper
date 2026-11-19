@@ -733,27 +733,18 @@ function upNextHtml(view, lengthUnit, selectedRunId) {
     <p><button data-act="add-plan">+ Plan</button></p>`;
 }
 
-// Spacing and speed are offered only for a Run that has them stored: the input
-// is pre-filled from that, so a blank one is always a mistake, never "default".
-const hasStored = (v) => typeof v === 'number';
-
 // Bottom sheet for one pending Run. `state` carries { warnings, error, draft }
 // from the last save or re-render; values are shown and entered in HA units.
 // `run` is an up_next row, which carries the Run's stored spacing_cm / speed_m_s.
 function runSheetHtml(run, lengthUnit, state) {
   const h = lengthUnit === 'mi' ? Math.round((run.height_mm / 25.4) * 100) / 100 : num(run.height_mm);
   const st = state || {};
-  const typed = (key, stored) => (st.draft && st.draft[key] != null ? esc(st.draft[key]) : stored);
-  const imperial = lengthUnit === 'mi';
-  const spacing = hasStored(run.spacing_cm)
-    ? `<label>Spacing (${imperial ? 'in' : 'cm'}) <input id="run-spacing" type="number" step="any" value="${typed('spacing', spacingValue(run.spacing_cm, lengthUnit))}"></label>` : '';
-  const speed = hasStored(run.speed_m_s)
-    ? `<label>Speed (${imperial ? 'ft/s' : 'm/s'}) <input id="run-speed" type="number" step="any" value="${typed('speed', speedValue(run.speed_m_s, lengthUnit))}"></label>` : '';
+  const typed = (field, fallback) => (st.draft && st.draft[field] != null ? esc(st.draft[field]) : fallback);
   return `<div class="sheet" role="dialog" aria-label="Edit Run" data-run="${esc(run.run_id)}">
     <h3>${esc(run.zone_name)}, Run ${esc(run.n)} of ${esc(run.of)}</h3>
-    <label>Height (${imperial ? 'in' : 'mm'}) <input id="run-height" type="number" step="any" value="${st.draft ? esc(st.draft.height) : h}"></label>
-    <label>Angle (°) <input id="run-angle" type="number" step="any" value="${st.draft ? esc(st.draft.angle) : num(run.angle_deg)}"></label>
-    ${spacing}${speed}
+    <label>Height (${lengthUnit === 'mi' ? 'in' : 'mm'}) <input id="run-height" type="number" step="any" value="${typed('height', h)}"></label>
+    <label>Angle (°) <input id="run-angle" type="number" step="any" value="${typed('angle', num(run.angle_deg))}"></label>
+    ${runSettingInputsHtml(run, lengthUnit, (field) => `id="run-${field}"`, st.draft)}
     ${(st.warnings || []).map((w) => `<p class="warn">${esc(NOTES[w] || w)}</p>`).join('')}
     ${st.error ? `<p class="warn" id="run-error">${esc(st.error)}</p>` : ''}
     <div class="btns"><button data-act="save-run">Save</button>
@@ -761,17 +752,31 @@ function runSheetHtml(run, lengthUnit, state) {
     <button data-act="close-sheet">Close</button></div></div>`;
 }
 
-// One Spacing or speed input as the settings value to send, null when it is
-// unchanged from what the Run stores (compared as shown, so a value the unit
-// round trip would nudge is never resent untouched), or { error }. `raw` is the
-// input's text, undefined when the Run has no such input.
-function runSettingValue(raw, stored, shown, toSi, noun) {
-  if (raw === undefined) return { value: null };
-  const text = raw == null ? '' : String(raw).trim();
-  const typed = text === '' ? NaN : Number(text);
-  if (!Number.isFinite(typed) || typed <= 0) return { error: `Enter a ${noun} above zero.` };
-  if (stored != null && typed === shown(stored)) return { value: null };
-  return { value: toSi(typed) };
+// The raw text of a Run's edit inputs, `find(field)` giving the input for
+// height, angle, spacing or speed. A field is undefined when its input is not
+// there: a Run that does not store Spacing or speed is not offered them.
+function readRunFields(find) {
+  const fields = {};
+  for (const field of ['height', 'angle', ...RUN_SETTINGS.map((s) => s.field)]) {
+    const el = find(field);
+    fields[field] = el ? el.value : undefined;
+  }
+  return fields;
+}
+
+// The Spacing and speed the user changed on a Run, as a `settings` override, or
+// { error }. Only a value that differs, as shown, from the Run's stored one goes
+// in, so one left alone is never resent and a unit round trip cannot nudge it.
+function runSettingsChange(d, stored, lengthUnit) {
+  const settings = {};
+  for (const s of RUN_SETTINGS) {
+    if (d[s.field] === undefined) continue;
+    const text = d[s.field] == null ? '' : String(d[s.field]).trim();
+    const typed = text === '' ? NaN : Number(text);
+    if (!Number.isFinite(typed) || typed <= 0) return { error: `Enter a ${s.field} above zero.` };
+    if (stored[s.key] == null || typed !== s.show(stored[s.key], lengthUnit)) settings[s.key] = s.toSi(typed, lengthUnit);
+  }
+  return { settings };
 }
 
 // edit_run fields from the sheet's raw inputs, or { error }. `stored` is the
@@ -781,19 +786,11 @@ function runEditPayload(d, lengthUnit, stored) {
   const angle = d.angle === '' || d.angle == null ? NaN : Number(d.angle);
   if (!Number.isFinite(height) || height <= 0) return { error: 'Enter a height above zero.' };
   if (!Number.isFinite(angle)) return { error: 'Enter an angle in degrees.' };
-  const have = stored || {};
-  const spacing = runSettingValue(d.spacing, have.spacing_cm, (cm) => spacingValue(cm, lengthUnit),
-    (v) => spacingToCm(v, lengthUnit), 'spacing');
-  if (spacing.error) return { error: spacing.error };
-  const speed = runSettingValue(d.speed, have.speed_m_s, (ms) => speedValue(ms, lengthUnit),
-    (v) => speedToMs(v, lengthUnit), 'speed');
-  if (speed.error) return { error: speed.error };
+  const change = runSettingsChange(d, stored || {}, lengthUnit);
+  if (change.error) return { error: change.error };
   const mm = lengthUnit === 'mi' ? height * 25.4 : height;
   const payload = { height_mm: Math.round(mm * 10) / 10, angle_deg: angle };
-  const settings = {};
-  if (spacing.value != null) settings.spacing_cm = spacing.value;
-  if (speed.value != null) settings.speed_m_s = speed.value;
-  if (Object.keys(settings).length) payload.settings = settings;
+  if (Object.keys(change.settings).length) payload.settings = change.settings;
   return { payload };
 }
 
@@ -829,6 +826,16 @@ const spacingValue = (cm, lengthUnit) => (lengthUnit === 'mi' ? num(cm / 2.54) :
 const speedValue = (ms, lengthUnit) => (lengthUnit === 'mi' ? num(ms / 0.3048) : num(ms));
 const spacingToCm = (v, lengthUnit) => (lengthUnit === 'mi' ? Math.round(v * 2.54 * 10) / 10 : v);
 const speedToMs = (v, lengthUnit) => (lengthUnit === 'mi' ? Math.round(v * 0.3048 * 100) / 100 : v);
+const spacingUnit = (lengthUnit) => (lengthUnit === 'mi' ? 'in' : 'cm');
+const speedUnit = (lengthUnit) => (lengthUnit === 'mi' ? 'ft/s' : 'm/s');
+
+// Spacing and speed as the panel handles them, wherever they are typed: the
+// input field, the Run's settings key, the label, and the display and SI
+// conversions above.
+const RUN_SETTINGS = [
+  { field: 'spacing', key: 'spacing_cm', label: 'Spacing', unit: spacingUnit, show: spacingValue, toSi: spacingToCm },
+  { field: 'speed', key: 'speed_m_s', label: 'Speed', unit: speedUnit, show: speedValue, toSi: speedToMs },
+];
 
 const EDIT_WARNINGS = {
   height_increases: 'This makes the Run taller than the one before it, so the Plan no longer steps down.',
@@ -881,16 +888,16 @@ function spacingSpeedNote(run, lengthUnit) {
   return parts.length ? ` <span class="spacing-speed">${parts.join(', ')}</span>` : '';
 }
 
-// The Spacing and speed inputs of one pending Run in a Plan card, pre-filled
-// from its stored values; none for a value the Run does not store.
-function runSettingInputsHtml(run, lengthUnit) {
-  const s = run.settings || {};
-  const imperial = lengthUnit === 'mi';
-  const spacing = hasStored(s.spacing_cm)
-    ? `<label>Spacing (${imperial ? 'in' : 'cm'}) <input type="number" step="any" class="edit-spacing" data-run="${esc(run.id)}" value="${spacingValue(s.spacing_cm, lengthUnit)}"></label>` : '';
-  const speed = hasStored(s.speed_m_s)
-    ? `<label>Speed (${imperial ? 'ft/s' : 'm/s'}) <input type="number" step="any" class="edit-speed" data-run="${esc(run.id)}" value="${speedValue(s.speed_m_s, lengthUnit)}"></label>` : '';
-  return spacing + speed;
+// The Spacing and speed inputs of one Run, pre-filled with what was typed
+// (`typed`, by field) or else the Run's stored value, and none for a value the
+// Run does not store. `stored` holds spacing_cm / speed_m_s; `attrs(field)` is
+// the markup that finds the input again (an id in the Run sheet, a class and
+// the Run in a Plan card).
+function runSettingInputsHtml(stored, lengthUnit, attrs, typed) {
+  return RUN_SETTINGS.filter((s) => stored[s.key] != null).map((s) => {
+    const value = typed && typed[s.field] != null ? esc(typed[s.field]) : s.show(stored[s.key], lengthUnit);
+    return `<label>${s.label} (${s.unit(lengthUnit)}) <input type="number" step="any" ${attrs(s.field)} value="${value}"></label>`;
+  }).join('');
 }
 
 function planCardsHtml(view, lengthUnit) {
@@ -902,7 +909,7 @@ function planCardsHtml(view, lengthUnit) {
       const pend = r.status === 'pending';
       const edit = pend ? `<label>Height <input type="number" step="any" class="edit-height" data-run="${esc(r.id)}" value="${heightValue(r.height_mm, lengthUnit)}"></label>
           <label>Angle <input type="number" step="any" class="edit-angle" data-run="${esc(r.id)}" value="${num(r.angle_deg)}"></label>
-          ${runSettingInputsHtml(r, lengthUnit)}
+          ${runSettingInputsHtml(r.settings || {}, lengthUnit, (field) => `class="edit-${field}" data-run="${esc(r.id)}"`)}
           <button data-act="edit-run" data-run="${esc(r.id)}">Save</button>
           <button data-act="delete-run" data-run="${esc(r.id)}">Delete</button>`
         : `${fmtHeight(r.height_mm, lengthUnit)} at ${fmtDeg(r.angle_deg)} <span class="tag">${esc(r.status)}</span>`;
@@ -1029,13 +1036,13 @@ function spacingSpeedHtml(d, zones, lengthUnit, limits) {
   const spacingDefault = z.spacing_cm_default ?? (spacingLimits && spacingLimits.default);
   const speedDefault = z.speed_m_s_default ?? (speedLimits && speedLimits.default);
   const placeholder = (v, show) => (v == null ? '' : ` placeholder="${esc(show(v, lengthUnit))}"`);
-  const spacingUnit = lengthUnit === 'mi' ? 'in' : 'cm', speedUnit = lengthUnit === 'mi' ? 'ft/s' : 'm/s';
+  const spacingLabel = spacingUnit(lengthUnit), speedLabel = speedUnit(lengthUnit);
   const range = (lim, show, unit) => (lim ? ` ${show(lim.min, lengthUnit)} to ${show(lim.max, lengthUnit)} ${unit}` : '');
   const rangeText = limits
-    ? `Spacing${range(spacingLimits, spacingValue, spacingUnit)}, speed${range(speedLimits, speedValue, speedUnit)}; `
+    ? `Spacing${range(spacingLimits, spacingValue, spacingLabel)}, speed${range(speedLimits, speedValue, speedLabel)}; `
       + 'blank uses the default (the Finishing set\'s, on the Finishing Run). ' : '';
-  return `<p><label>Spacing (${spacingUnit}, optional) <input type="number" step="any" id="np-spacing"${placeholder(spacingDefault, spacingValue)} value="${esc(d.spacing)}"></label>
-    <label>Speed (${speedUnit}, optional) <input type="number" step="any" id="np-speed"${placeholder(speedDefault, speedValue)} value="${esc(d.speed)}"></label>
+  return `<p><label>Spacing (${spacingLabel}, optional) <input type="number" step="any" id="np-spacing"${placeholder(spacingDefault, spacingValue)} value="${esc(d.spacing)}"></label>
+    <label>Speed (${speedLabel}, optional) <input type="number" step="any" id="np-speed"${placeholder(speedDefault, speedValue)} value="${esc(d.speed)}"></label>
     <span class="hint">${rangeText}Applies to every Run of the Plan, including the Finishing Run, and wins over the Finishing Run's own settings.</span></p>`;
 }
 
@@ -1581,11 +1588,9 @@ class GroundskeeperPanel extends HTMLElement {
             break;
           }
           case 'edit-run': {
-            const value = (c) => { const el = root.querySelector(`.${c}[data-run="${run_id}"]`); return el ? el.value : undefined; };
             const run = ((this._scheduleView || {}).runs || []).find((r) => r.id === run_id) || {};
-            const { payload, error } = runEditPayload({
-              height: value('edit-height'), angle: value('edit-angle'),
-              spacing: value('edit-spacing'), speed: value('edit-speed') }, unit, run.settings);
+            const { payload, error } = runEditPayload(
+              readRunFields((field) => root.querySelector(`.edit-${field}[data-run="${run_id}"]`)), unit, run.settings);
             if (error) { this._notice = error; this._render(); break; }
             this._scheduleCmd('edit_run', { run_id, ...payload });
             break;
@@ -1994,12 +1999,9 @@ class GroundskeeperPanel extends HTMLElement {
             break;
           }
           case 'save-run': {
-            const value = (sel) => { const el = root.querySelector(sel); return el ? el.value : undefined; };
             const row = ((this._now || {}).up_next || []).find((r) => r.run_id === run_id) || {};
-            const { payload, error } = runEditPayload({
-              height: value('#run-height'), angle: value('#run-angle'),
-              spacing: value('#run-spacing'), speed: value('#run-speed') }, this._lengthUnit(),
-              { spacing_cm: row.spacing_cm, speed_m_s: row.speed_m_s });
+            const { payload, error } = runEditPayload(
+              readRunFields((field) => root.querySelector(`#run-${field}`)), this._lengthUnit(), row);
             if (error) { this._sheet.error = error; this._render(); break; }
             try {
               const res = await this._hass.connection.sendMessagePromise({
@@ -2106,12 +2108,8 @@ class GroundskeeperPanel extends HTMLElement {
 
   _render() {
     this._readGateDraft(this.shadowRoot); // keep typing across pushed re-renders
-    const rh = this.shadowRoot.querySelector('#run-height');
-    if (this._sheet && rh) {
-      const rs = this.shadowRoot.querySelector('#run-spacing'), rv = this.shadowRoot.querySelector('#run-speed');
-      this._sheet.draft = {
-        height: rh.value, angle: this.shadowRoot.querySelector('#run-angle').value,
-        spacing: rs ? rs.value : undefined, speed: rv ? rv.value : undefined };
+    if (this._sheet && this.shadowRoot.querySelector('#run-height')) {
+      this._sheet.draft = readRunFields((field) => this.shadowRoot.querySelector(`#run-${field}`));
     }
     if (this._tab === 'schedule') this._readPlanDraft(this.shadowRoot);
     if (this._tab === 'checks') this._readCustomDraft(this.shadowRoot);
