@@ -539,7 +539,7 @@ const REASONS = {
   unavailable: 'Mower unavailable',
   unknown_state: 'Mower state unknown',
   job_active: 'The Mower already has a job running',
-  new_error: 'The Mower reported an error',
+  new_error: 'The Mower still shows an error',
   device_non_work_hours: 'Outside the Mower\'s own work hours',
   bearing_unset: 'Zone bearing not set',
   zone_missing: 'The Zone is missing',

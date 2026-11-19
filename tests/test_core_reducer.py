@@ -165,15 +165,73 @@ def test_failing_check_blocks_start_and_names_reason(snapshot, zone, check, reas
     assert not [e for e in fx if isinstance(e, StartRunEffect)]
 
 
-def test_new_error_while_waiting_blocks_and_old_error_is_deduped():
-    state = waiting_state()
-    err = NewError("2748", "blocked", at(-100))
-    state, _ = step(state, SignalReceived(at(1), err))
+def start_requests(fx):
+    return [e for e in fx if isinstance(e, StartRunEffect)]
+
+
+# A Mower error is evidence, not a verdict (issue #110): between Runs it blocks
+# the Schedule only while the snapshot reads `error`.
+def test_error_between_runs_with_an_idle_mower_does_not_block_the_run():
+    state = waiting_state(snapshot=IDLE_OFF_JOB)
+    state, _ = step(state, SignalReceived(at(1), NewError("2748", "blocked", at(0))))
+    assert state["state"]["waiting_on"] == []
+    state, fx = step(state, TimerFired(at(61)))
+    assert len(start_requests(fx)) == 1
+    assert run_status(state) == ["starting"]
+
+
+def test_error_between_runs_blocks_while_the_mower_reads_error_and_clears_by_observation():
+    state = waiting_state(snapshot=ERROR_ACTIVITY)
+    state, _ = step(state, SignalReceived(at(1), NewError("2748", "blocked", at(0))))
     assert {"check": "mower_ready", "reason": "new_error"} in state["state"]["waiting_on"]
     assert "stability" not in state["state"]["deadlines"]
-    # same time again changes nothing
-    again, _ = step(state, SignalReceived(at(2), err))
+    state, fx = step(state, TimerFired(at(500)))
+    assert not start_requests(fx)
+    # The Mower stops reading `error`: no Pause, Resume, Start or Cancel needed.
+    state, _ = step(state, SnapshotReceived(at(600), IDLE_OFF_JOB))
+    assert state["state"]["waiting_on"] == []
+    assert state["state"]["deadlines"]["stability"] == at(660).isoformat()
+    state, fx = step(state, TimerFired(at(659)))
+    assert not start_requests(fx)
+    state, fx = step(state, TimerFired(at(660)))
+    assert len(start_requests(fx)) == 1
+
+
+def test_mower_reading_error_inside_the_stability_window_restarts_the_window():
+    state = waiting_state(snapshot=IDLE_OFF_JOB)  # window armed at 0, due at 60
+    state, fx_signal = step(state, SignalReceived(at(1), NewError("2748", "blocked", at(0))))
+    state, fx_error = step(state, SnapshotReceived(at(30), ERROR_ACTIVITY))
+    assert {"check": "mower_ready", "reason": "new_error"} in state["state"]["waiting_on"]
+    # One error, one notice: the Check failing later must not send it again.
+    assert len(events(fx_signal, "check_timeout") + events(fx_error, "check_timeout")) == 1
+    assert "stability" not in state["state"]["deadlines"]
+    state, fx = step(state, TimerFired(at(61)))
+    assert not start_requests(fx)
+    state, _ = step(state, SnapshotReceived(at(100), IDLE_OFF_JOB))
+    state, fx = step(state, TimerFired(at(159)))
+    assert not start_requests(fx)
+    state, fx = step(state, TimerFired(at(160)))
+    assert len(start_requests(fx)) == 1
+
+
+def test_a_latched_blocking_error_from_an_older_store_no_longer_blocks():
+    state = waiting_state(snapshot=IDLE_OFF_JOB)
+    state["state"]["blocking_error"] = {
+        "code": "2748", "message": "blocked", "time": at(-100).isoformat()
+    }
+    state, _ = step(state, SnapshotReceived(at(5), IDLE_OFF_JOB))
+    assert state["state"]["waiting_on"] == []
+    state, fx = step(state, TimerFired(at(61)))
+    assert len(start_requests(fx)) == 1
+
+
+def test_an_old_error_between_runs_is_deduped():
+    state = waiting_state(snapshot=ERROR_ACTIVITY)
+    err = NewError("2748", "blocked", at(-100))
+    state, _ = step(state, SignalReceived(at(1), err))
+    again, fx = step(state, SignalReceived(at(2), err))
     assert again == state
+    assert not events(fx, "check_timeout")
 
 
 def test_failing_check_resets_stability_window():
@@ -663,12 +721,20 @@ def no_abort(fx):
     assert not [e for e in fx if isinstance(e, AbortRunEffect)]
 
 
-# A NewError is evidence, not a verdict (issue #96): while the snapshot still
-# reads `mowing` with a live job the Mower is working through it, so the Run
-# stays `mowing`. Any other snapshot fails the Run as before.
-NOT_MOWING_WITH_A_JOB = [
+# A NewError is evidence, not a verdict (issues #96, #110): while the snapshot
+# still reads `mowing`, or `paused` (not for a recharge), with a live job the
+# Mower may carry on, so the Run stays `mowing`. Any other snapshot fails the
+# Run as before.
+NOT_ON_A_LIVE_JOB = [
     pytest.param(replace(MOWING, activity=LawnMowerActivity.ERROR), id="activity_error"),
-    pytest.param(replace(MOWING, activity=LawnMowerActivity.PAUSED), id="paused"),
+    pytest.param(
+        replace(MOWING, activity=LawnMowerActivity.PAUSED, job_active=False),
+        id="paused_no_live_job",
+    ),
+    pytest.param(
+        replace(MOWING, activity=LawnMowerActivity.PAUSED, recharging=True),
+        id="paused_mid_job_recharge",
+    ),
     pytest.param(replace(MOWING, activity=LawnMowerActivity.RETURNING), id="returning"),
     pytest.param(replace(MOWING, job_active=False), id="no_live_job"),
     pytest.param(replace(MOWING, available=False), id="unavailable"),
@@ -679,8 +745,8 @@ NOT_MOWING_WITH_A_JOB = [
 
 
 @pytest.mark.parametrize("code", ["2741", "1003", "9999", "unknown"])
-@pytest.mark.parametrize("snapshot", NOT_MOWING_WITH_A_JOB)
-def test_new_error_while_mower_not_mowing_with_a_job_fails_run_with_no_command(
+@pytest.mark.parametrize("snapshot", NOT_ON_A_LIVE_JOB)
+def test_new_error_while_mower_not_on_a_live_job_fails_run_with_no_command(
     code, snapshot
 ):
     state = mowing_state()
@@ -735,6 +801,33 @@ def test_new_error_while_still_mowing_is_tolerated_and_recorded():
         "seen_at": at(481).isoformat(),
     }
     assert "error" not in state["state"]["runs"][0]  # nothing failed the Run
+
+
+PAUSED_ON_JOB = replace(MOWING, activity=LawnMowerActivity.PAUSED)
+
+
+def test_new_error_while_mower_paused_on_a_live_job_is_tolerated_and_recorded():
+    """Issue #110: a paused Mower with its job still live is not a stopped one.
+    The on-hold rule decides if the pause lasts; the error does not fail the Run."""
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(480), PAUSED_ON_JOB))
+    error = NewError("1008", "Robot is locked", at(481))
+    state, fx = step(state, SignalReceived(at(482), error))
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert state["state"]["active_run_id"] == "p1-r1"
+    assert state["state"]["prompts"] == []
+    assert not [e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect))]
+    assert not events(fx, "prompt_sent")
+    assert not events(fx, "run_status_changed")
+    [event] = events(fx, "error_tolerated")
+    assert event.payload["code"] == "1008"
+    [note] = state["state"]["runs"][0]["tolerated_errors"]
+    assert note["code"] == "1008"
+    assert "error" not in state["state"]["runs"][0]
+    state, _ = step(state, SignalReceived(at(500), ZoneTaskComplete("11111111")))
+    [archived] = state["history"]["runs"]
+    assert archived["tolerated_errors"][0]["code"] == "1008"
 
 
 def test_tolerated_error_is_replayed_neither_as_event_nor_note():
@@ -904,6 +997,7 @@ def test_signals_while_not_mowing_do_not_fail_the_waiting_schedule():
 
 
 IDLE_OFF_JOB = replace(DOCKED, activity=LawnMowerActivity.IDLE, job_active=False)
+ERROR_ACTIVITY = replace(DOCKED, activity=LawnMowerActivity.ERROR)
 
 
 def test_idle_without_job_stable_60s_fails_stopped_off_dock_no_command():

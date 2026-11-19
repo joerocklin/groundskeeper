@@ -10,9 +10,17 @@ from homeassistant.components.lawn_mower import LawnMowerActivity
 
 from custom_components.groundskeeper.adapter import (
     Movement,
+    NewError,
     SelfCheckReason,
 )
-from custom_components.groundskeeper.core import SnapshotReceived, TimerFired
+from custom_components.groundskeeper.core import (
+    AbortRunEffect,
+    ResumeRunEffect,
+    SignalReceived,
+    SnapshotReceived,
+    StartRunEffect,
+    TimerFired,
+)
 from tests.test_core_reducer import (
     MOWING,
     at,
@@ -107,6 +115,37 @@ def test_stall_clock_is_paused_while_on_hold_and_rearmed_on_return():
     state, _ = step(state, SnapshotReceived(at(300), MOWING))
     state, _ = step(state, TimerFired(at(360)))
     assert state["state"]["deadlines"]["stall"] == at(360 + 3600).isoformat()
+
+
+def test_error_while_paused_is_tolerated_then_the_pause_holds_and_clears_by_itself():
+    """Issue #110: the error keeps the Run alive, the existing hold rule holds a
+    pause that lasts, and the hold clears when the Mower runs again. The director
+    sends no command at any step; Resume stays a user answer."""
+    state = mowing_state()
+    effects = []
+    state, fx = step(state, SnapshotReceived(at(100), PAUSED))
+    effects += fx
+    state, fx = step(state, SignalReceived(at(110), NewError("1008", "Robot is locked", at(105))))
+    effects += fx
+    assert run_status(state) == ["mowing"]
+    assert [e.payload["code"] for e in events(fx, "error_tolerated")] == ["1008"]
+    state, fx = step(state, TimerFired(at(160)))  # the 60 s stable pause, from t=100
+    effects += fx
+    assert run_status(state) == ["on_hold"]
+    assert state["state"]["runs"][0]["on_hold_reason"] == "external_pause"
+    (prompt,) = hold_prompts(state)
+    assert prompt["actions"] == ["resume", "end_run"]
+    state, fx = step(state, SnapshotReceived(at(300), MOWING))
+    effects += fx
+    state, fx = step(state, TimerFired(at(360)))
+    effects += fx
+    assert run_status(state) == ["mowing"]
+    assert hold_prompts(state) == []
+    assert state["state"]["schedule"]["status"] == "running"
+    assert not [
+        e for e in effects
+        if isinstance(e, (ResumeRunEffect, StartRunEffect, AbortRunEffect))
+    ]
 
 
 def test_no_clock_fails_an_on_hold_run():
