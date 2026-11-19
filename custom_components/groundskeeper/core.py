@@ -1623,12 +1623,16 @@ class _Machine:
             self._cancel_deadline(key)
             self.s["check_notified"].append(check)
             policy = rec["policy"] if rec["type"] != TYPE_MOWER_READY else "notify"
+            about_error: dict[str, Any] = {}
+            if "new_error" in why:  # the notice says which error, and that it blocks
+                about_error = {"error": dict(self.s["blocking_error"]), "blocking": True}
             self._emit(
                 "check_timeout",
                 check_id=check,
                 name=rec["name"],
                 policy=policy,
                 reasons=list(why),
+                **about_error,
             )
             if policy == POLICY_PAUSE:
                 self._cancel_deadline(DEADLINE_STABILITY)
@@ -2146,6 +2150,8 @@ class _Machine:
             name=rec["name"],
             policy="notify",
             reasons=["new_error"],
+            error=dict(self.s["blocking_error"]),
+            blocking=False,
         )
 
     def _mowing_or_paused_on_a_live_job(self) -> bool:

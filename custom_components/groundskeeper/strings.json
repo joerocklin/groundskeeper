@@ -364,6 +364,18 @@
     "prompt_check_waiting": {
       "message": "{name} is blocking the Schedule: {reasons}"
     },
+    "prompt_headline_mower_error": {
+      "message": "Mower reported an error"
+    },
+    "prompt_mower_error": {
+      "message": "Error {code}: {message}"
+    },
+    "prompt_mower_error_blocking": {
+      "message": "The Mower still reads error, so the Schedule waits."
+    },
+    "prompt_mower_error_not_blocking": {
+      "message": "The Mower no longer reads error, so the Schedule goes on."
+    },
     "prompt_channel_error_tolerated": {
       "message": "Groundskeeper: Mower errors"
     },

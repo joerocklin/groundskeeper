@@ -248,12 +248,13 @@ def test_leaving_waiting_clears_check_state():
 
 
 @pytest.mark.parametrize(
-    "snapshot",
-    [DOCKED, replace(DOCKED, activity=LawnMowerActivity.ERROR)],
+    ("snapshot", "blocking"),
+    [(DOCKED, False), (replace(DOCKED, activity=LawnMowerActivity.ERROR), True)],
     ids=["error_no_longer_blocking", "error_blocking"],
 )
-def test_mower_ready_notifies_immediately_on_error_and_never_pauses(snapshot):
-    """The notice does not depend on the error still blocking (issue #110)."""
+def test_mower_ready_notifies_immediately_on_error_and_never_pauses(snapshot, blocking):
+    """The notice does not depend on the error still blocking (issue #110), and
+    carries the error and whether it blocks, so the phone can say so."""
     env = env_with()
     state, _ = start(env, snapshot)
     state, fx = step(state, SignalReceived(at(1), NewError("2748", "blocked", at(0))), env)
@@ -261,6 +262,10 @@ def test_mower_ready_notifies_immediately_on_error_and_never_pauses(snapshot):
     assert event.payload["check_id"] == "mower_ready"
     assert event.payload["policy"] == "notify"
     assert event.payload["reasons"] == ["new_error"]
+    assert event.payload["error"] == {
+        "code": "2748", "message": "blocked", "time": at(0).isoformat()
+    }
+    assert event.payload["blocking"] is blocking
     assert state["state"]["schedule"]["status"] == "waiting"
 
 

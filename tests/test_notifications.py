@@ -396,6 +396,51 @@ async def test_check_timeout_event_becomes_a_check_wait_notice(
     assert re.fullmatch(r"mowdir_[0-9a-f]{10}_check_timeout_wet_grass", note["data"]["tag"])
 
 
+@pytest.mark.parametrize(
+    ("blocking", "status_line"),
+    [
+        (True, "The Mower still reads error, so the Schedule waits."),
+        (False, "The Mower no longer reads error, so the Schedule goes on."),
+    ],
+    ids=["blocking", "not_blocking"],
+)
+async def test_mower_error_between_runs_notice_names_the_error_and_the_schedule(
+    hass, director, phones, blocking, status_line
+) -> None:
+    """Issue #110: the notice says which error and what the Schedule does."""
+    entry, _, _ = director
+    d = async_get_director(hass, entry.entry_id)
+    await d.notifier.async_handle(
+        "check_timeout",
+        {"check_id": "mower_ready", "name": "Mower ready", "policy": "notify",
+         "reasons": ["new_error"], "blocking": blocking,
+         "error": {"code": "2748", "message": "blocked",
+                   "time": "2026-11-17T21:00:00+00:00"}},
+    )
+    [note] = sent(phones[PIXEL])
+    assert note["title"] == "Example Mower: Mower reported an error"
+    assert note["message"].splitlines() == ["Error 2748: blocked", status_line]
+    assert re.fullmatch(r"mowdir_[0-9a-f]{10}_check_timeout_mower_ready", note["data"]["tag"])
+    assert "actions" not in note["data"]  # a notice, never a Prompt
+
+
+async def test_mower_error_between_runs_reaches_the_phone_from_the_mower(
+    hass, director, phones
+) -> None:
+    """End to end: a Schedule waiting with the Mower idle gets one error notice."""
+    entry, mower, _ = director
+    await add_plan(hass, start=True)
+    when = datetime(2026, 11, 17, 21, 0, tzinfo=timezone.utc)
+    mower.emit_signal(NewError("2748", "blocked", when))
+    await hass.async_block_till_done()
+    [note] = sent(phones[PIXEL])
+    assert note["title"] == "Example Mower: Mower reported an error"
+    assert note["message"].splitlines() == [
+        "Error 2748: blocked",
+        "The Mower no longer reads error, so the Schedule goes on.",
+    ]
+
+
 async def test_error_while_still_mowing_is_a_plain_notice_and_the_run_goes_on(
     hass, director, phones, freezer
 ) -> None:
