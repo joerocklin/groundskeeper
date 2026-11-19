@@ -235,6 +235,9 @@ class Notifier:
 
     async def _check_timeout(self, payload: dict[str, Any]) -> None:
         strings = await async_prompt_strings(self._hass)
+        if (error := payload.get("error")) is not None:
+            await self._mower_error(payload, error, strings)
+            return
         await self.async_notice(
             "check_waits",
             "check_timeout",
@@ -243,6 +246,28 @@ class Notifier:
                 strings["prompt_check_waiting"].format(
                     name=payload["name"], reasons=", ".join(payload.get("reasons", []))
                 )
+            ],
+            subject=payload["check_id"],
+        )
+
+    async def _mower_error(
+        self, payload: dict[str, Any], error: dict[str, Any], strings: dict[str, str]
+    ) -> None:
+        """The Mower reported an error between Runs (issue #110).
+
+        Sent whether or not the error still blocks the Schedule; the second
+        line says which. A notice on the Check's own toggle, never a Prompt.
+        """
+        status = "blocking" if payload["blocking"] else "not_blocking"
+        await self.async_notice(
+            "check_waits",
+            "check_timeout",
+            strings["prompt_headline_mower_error"],
+            [
+                strings["prompt_mower_error"].format(
+                    code=error["code"], message=error["message"]
+                ),
+                strings[f"prompt_mower_error_{status}"],
             ],
             subject=payload["check_id"],
         )
