@@ -905,6 +905,21 @@ async def test_extras_schema_declares_the_mammotion_settings(hass: HomeAssistant
     assert schema["ride_boundary_distance"].default == 0.0
 
 
+async def test_obstacle_detection_offers_the_luba_2_latest_firmware_list(
+    hass: HomeAssistant,
+) -> None:
+    """Off is code 1 on a Luba 2 at firmware 1.12.0 or later, then Standard (10) and
+    Sensitive (11); the default is one of the offered options."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    adapter = make_adapter(hass, entry)
+
+    field = {f.key: f for f in adapter.limits.extras_schema}["ultra_wave"]
+    options = [(o["value"], o["label"]) for o in field.selector.config["options"]]
+    assert options == [("1", "Off"), ("10", "Standard"), ("11", "Sensitive")]
+    assert field.default in {value for value, _ in options}
+
+
 # -- metadata (spec §3.8, §15) ------------------------------------------------
 
 

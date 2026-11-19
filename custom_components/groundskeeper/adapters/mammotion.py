@@ -193,17 +193,18 @@ _EXTRAS_SCHEMA: tuple[ExtrasField, ...] = (
     _int_field("channel_mode", "Cutting path mode", 0, 3, 0),
     _int_field("toward_included_angle", "Double-grid angle", -180, 180, 90),
     ExtrasField(
-        # DetectionStrategy values only; a free number would allow invalid codes.
+        # PyMammotion's `DetectionStrategy` codes, limited to the list a Luba 2 on
+        # firmware 1.12.0 or later offers in the Mammotion app, where 1 is the off
+        # position. Older firmware and the Luba 1 offer other lists; a free number
+        # would allow invalid codes.
         key="ultra_wave",
         label="Obstacle detection",
         selector=selector.SelectSelector(
             selector.SelectSelectorConfig(
                 options=[
-                    selector.SelectOptionDict(value="0", label="Off"),
-                    selector.SelectOptionDict(value="1", label="Ultra wave"),
-                    selector.SelectOptionDict(value="2", label="Radio wave"),
-                    selector.SelectOptionDict(value="10", label="Ultra wave + camera"),
-                    selector.SelectOptionDict(value="11", label="Ultra wave + radio"),
+                    selector.SelectOptionDict(value="1", label="Off"),
+                    selector.SelectOptionDict(value="10", label="Standard"),
+                    selector.SelectOptionDict(value="11", label="Sensitive"),
                 ],
                 mode=selector.SelectSelectorMode.DROPDOWN,
             )
