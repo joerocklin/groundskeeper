@@ -15,7 +15,7 @@ deadlines (spec §19); HA tests drive them with phacc
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -30,6 +30,7 @@ from custom_components.groundskeeper.adapter import (
     Channel,
     CommandResult,
     ExtrasField,
+    NOGO_LAPS_ROLE,
     Limits,
     Movement,
     MowerAdapter,
@@ -113,6 +114,26 @@ DEFAULT_LIMITS = Limits(
     min_start_battery_pct=15,
     recharge_battery_pct=None,
     resume_battery_pct=None,
+)
+
+# The default limits plus an adapter-owned No-go laps extra (0-4, whole numbers),
+# keyed unlike any real adapter's so nothing can lean on the key.
+NOGO_LIMITS = replace(
+    DEFAULT_LIMITS,
+    extras_schema=(
+        *DEFAULT_LIMITS.extras_schema,
+        ExtrasField(
+            key="nogo_passes",
+            label="No-go passes",
+            selector=selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=4, step=1, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            default=0,
+            role=NOGO_LAPS_ROLE,
+        ),
+    ),
 )
 
 DEFAULT_SNAPSHOT = Snapshot(

@@ -814,6 +814,13 @@ function scheduleTableHtml(view, lengthUnit) {
   return `<table class="schedule"><tr><th>#</th><th>Zone</th><th>Run</th><th>Height</th><th>Angle</th><th>Status</th><th></th></tr>${rows}</table>`;
 }
 
+// A Run's stored No-go laps, shown only above zero. `key` is the adapter's own
+// name for the setting, handed over by the Schedule view.
+function nogoLapsNote(run, key) {
+  const laps = key ? ((run.settings || {}).extras || {})[key] : null;
+  return laps > 0 ? ` <span class="nogo-laps">No-go laps: ${esc(laps)}</span>` : '';
+}
+
 function planCardsHtml(view, lengthUnit) {
   const cards = (view.plans || []).map((p) => {
     const runs = (view.runs || []).filter((r) => r.plan_id === p.id);
@@ -826,7 +833,7 @@ function planCardsHtml(view, lengthUnit) {
           <button data-act="edit-run" data-run="${esc(r.id)}">Save</button>
           <button data-act="delete-run" data-run="${esc(r.id)}">Delete</button>`
         : `${fmtHeight(r.height_mm, lengthUnit)} at ${fmtDeg(r.angle_deg)} <span class="tag">${esc(r.status)}</span>`;
-      return `<li>Run ${esc(r.index)} of ${esc(r.of)}: ${edit}</li>`;
+      return `<li>Run ${esc(r.index)} of ${esc(r.of)}: ${edit}${nogoLapsNote(r, view.nogo_laps_key)}</li>`;
     }).join('');
     const warns = (p.angle_warnings || []).map((w) => `<p class="warn">${esc(w)}</p>`).join('');
     const note = p.note === 'angles_redrawn_for_range'
@@ -840,8 +847,33 @@ function planCardsHtml(view, lengthUnit) {
   return cards || '<section class="card"><p class="empty">No Plans yet.</p></section>';
 }
 
+// One `settings` override from several sources: scalars win left to right, the
+// `extras` of each are merged key by key. Nothing in, nothing out ({}).
+function mergeSettings(...parts) {
+  const out = {};
+  for (const part of parts) {
+    if (!part) continue;
+    const { extras, ...rest } = part;
+    Object.assign(out, rest);
+    if (extras) out.extras = { ...(out.extras || {}), ...extras };
+  }
+  return out;
+}
+
+// The picked Zone's No-go laps state: 'offered' (at least one No-go area), 'none'
+// (known to have none) or 'unknown' (its No-go areas did not load); null when
+// no Zone is picked or the adapter has no such setting.
+function nogoLapsState(d, zones, nogo) {
+  const z = nogo && (zones || []).find((x) => x.id === d.zone);
+  if (!z) return null;
+  if (!Array.isArray(z.nogo_areas)) return 'unknown';
+  return z.nogo_areas.length ? 'offered' : 'none';
+}
+
 // Websocket fields for preview_plan / add_plan from the New Plan form, or { error }.
-function newPlanPayload(d, lengthUnit) {
+// `zones` and `nogo` (the Zones view's No-go laps descriptor) decide whether a
+// No-go laps value is sent; both are optional.
+function newPlanPayload(d, lengthUnit, zones, nogo) {
   if (!d.zone) return { error: 'Pick a Zone.' };
   const start = Number(d.start), end = Number(d.end);
   if (d.start === '' || d.end === '' || d.start == null || d.end == null || Number.isNaN(start) || Number.isNaN(end)) {
@@ -854,7 +886,40 @@ function newPlanPayload(d, lengthUnit) {
   if (d.base_angle !== '' && d.base_angle != null) payload.base_angle = Number(d.base_angle);
   if (d.finishing === 'on') payload.finishing = true;
   if (d.finishing === 'off') payload.finishing = false;
+  // Only an offered input counts: a stale value never goes out for a Zone without one.
+  let nogoSettings = null;
+  if (nogoLapsState(d, zones, nogo) === 'offered' && d.nogo_laps !== '' && d.nogo_laps != null) {
+    const laps = Number(d.nogo_laps);
+    if (Number.isNaN(laps)) return { error: 'No-go laps must be a number.' };
+    nogoSettings = { extras: { [nogo.key]: laps } };
+  }
+  const settings = mergeSettings(nogoSettings);
+  if (Object.keys(settings).length) payload.settings = settings;
   return { payload };
+}
+
+// The draft after the form was read: picking another Zone discards the value
+// entered for the previous one.
+function readPlanDraft(prev, read) {
+  const next = { ...prev, ...read };
+  if (read.zone !== prev.zone) next.nogo_laps = '';
+  return next;
+}
+
+function nogoLapsHtml(d, zones, nogo) {
+  const state = nogoLapsState(d, zones, nogo);
+  if (state === 'unknown') {
+    return '<p class="hint" id="np-nogo-unknown">No-go areas are not known yet for this Zone, so No-go laps cannot be set.</p>';
+  }
+  if (state === 'none') {
+    return '<p class="hint" id="np-nogo-none">This Zone has no No-go areas, so No-go laps would have no effect.</p>';
+  }
+  if (state !== 'offered') return '';
+  const z = zones.find((x) => x.id === d.zone);
+  return `<p><label>No-go laps (optional) <input type="number" step="1" min="${esc(nogo.min)}" max="${esc(nogo.max)}"
+      id="np-nogo-laps" placeholder="${esc(z.nogo_laps_default)}" value="${esc(d.nogo_laps)}"></label>
+    <span class="hint">Laps around each No-go area, ${esc(nogo.min)} to ${esc(nogo.max)}; blank uses the default.
+    Applies to every Run of the Plan, including the Finishing Run, and overrides the Finishing set.</span></p>`;
 }
 
 function previewHtml(pv, lengthUnit) {
@@ -867,7 +932,7 @@ function previewHtml(pv, lengthUnit) {
   return `<table class="preview"><tr><th>Run</th><th>Height</th><th>Angle</th><th>Estimated time</th></tr>${rows}</table>${prov}${warns}`;
 }
 
-function newPlanFormHtml(d, zones, preview, lengthUnit) {
+function newPlanFormHtml(d, zones, preview, lengthUnit, nogo) {
   const opts = zones.filter((z) => !z.missing && !z.hidden)
     .map((z) => `<option value="${esc(z.id)}"${z.id === d.zone ? ' selected' : ''}>${esc(z.name)}</option>`).join('');
   const hu = lengthUnit === 'mi' ? 'in' : 'mm';
@@ -879,6 +944,7 @@ function newPlanFormHtml(d, zones, preview, lengthUnit) {
     <p><label>Max cut (%, optional) <input type="number" step="any" id="np-max-cut" value="${esc(d.max_cut)}"></label>
     <label>Base angle (optional) <input type="number" step="any" id="np-base-angle" value="${esc(d.base_angle)}"></label>
     <label>Finishing <select id="np-finishing">${fin('default', 'Default')}${fin('on', 'On')}${fin('off', 'Off')}</select></label></p>
+    ${nogoLapsHtml(d, zones, nogo)}
     ${d.error ? `<p class="warn" id="np-error">${esc(d.error)}</p>` : ''}
     <p><button data-act="preview-plan">Preview</button> <button data-act="add-plan">Add Plan</button></p>
     ${preview ? previewHtml(preview, lengthUnit) : ''}</section>`;
@@ -1129,7 +1195,7 @@ class GroundskeeperPanel extends HTMLElement {
     this._zoneId = null;
     this._gateDraft = null; // Gate being created or edited, with its picked Channels
     this._scheduleView = { schedule: {}, plans: [], runs: [] };
-    this._planDraft = { zone: '', start: '', end: '', max_cut: '', base_angle: '', finishing: 'default' };
+    this._planDraft = { zone: '', start: '', end: '', max_cut: '', base_angle: '', finishing: 'default', nogo_laps: '' };
     this._planPreview = null;
     this._checksView = null;
     this._customDraft = blankCustomDraft();
@@ -1347,16 +1413,17 @@ class GroundskeeperPanel extends HTMLElement {
   _readPlanDraft(root) {
     const el = (id) => root.querySelector(id);
     if (!el('#np-zone')) return;
-    Object.assign(this._planDraft, {
+    const laps = el('#np-nogo-laps');
+    this._planDraft = readPlanDraft(this._planDraft, {
       zone: el('#np-zone').value, start: el('#np-start').value, end: el('#np-end').value,
       max_cut: el('#np-max-cut').value, base_angle: el('#np-base-angle').value,
-      finishing: el('#np-finishing').value,
+      finishing: el('#np-finishing').value, nogo_laps: laps ? laps.value : '',
     });
   }
 
   async _planCmd(kind) {
     const d = this._planDraft;
-    const { payload, error } = newPlanPayload(d, this._lengthUnit());
+    const { payload, error } = newPlanPayload(d, this._lengthUnit(), this._zoneView.zones, this._zoneView.nogo_laps);
     d.error = error || null;
     if (error) { this._render(); return; }
     try {
@@ -1380,14 +1447,19 @@ class GroundskeeperPanel extends HTMLElement {
     const view = this._scheduleView;
     const notice = this._notice ? `<p class="warn" id="schedule-notice">${esc(this._notice)}</p>` : '';
     return `<section class="card"><h2>Schedule</h2>${notice}${scheduleTableHtml(view, unit)}</section>
-      ${newPlanFormHtml(this._planDraft, this._zoneView.zones || [], this._planPreview, unit)}
+      ${newPlanFormHtml(this._planDraft, this._zoneView.zones || [], this._planPreview, unit, this._zoneView.nogo_laps)}
       ${planCardsHtml(view, unit)}`;
   }
 
   _wireSchedule(root) {
     const unit = this._lengthUnit();
-    root.querySelectorAll('#np-zone,#np-start,#np-end,#np-max-cut,#np-base-angle,#np-finishing').forEach((el) => {
-      el.addEventListener('change', () => { this._readPlanDraft(root); this._planPreview = null; });
+    root.querySelectorAll('#np-zone,#np-start,#np-end,#np-max-cut,#np-base-angle,#np-finishing,#np-nogo-laps').forEach((el) => {
+      el.addEventListener('change', () => {
+        this._readPlanDraft(root);
+        this._planPreview = null;
+        // The No-go laps input depends on the picked Zone.
+        if (el.id === 'np-zone') this._render();
+      });
     });
     root.querySelectorAll('[data-act]').forEach((el) => {
       el.addEventListener('click', () => {
