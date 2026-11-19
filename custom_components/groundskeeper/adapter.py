@@ -226,11 +226,16 @@ class Zone:
 
     `polygon` is a GeoJSON geometry (WGS84) or None until fetched -
     geometry never blocks setup (issue #11).
+
+    `nogo_areas` are the Zone's No-go areas, each a GeoJSON geometry like
+    `polygon`. An empty list means the Zone has none; None means unknown
+    (its geometry is not loaded yet), which is not the same as none.
     """
 
     native_ref: str
     name: str
     polygon: dict[str, Any] | None = None
+    nogo_areas: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True, slots=True)

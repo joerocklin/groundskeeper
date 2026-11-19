@@ -45,3 +45,22 @@ async def test_diagnostics_without_mower_device(hass: HomeAssistant) -> None:
     entry.add_to_hass(hass)
     data = await async_get_config_entry_diagnostics(hass, entry)
     assert data == {"error": "no adapter for this Mower"}
+
+
+async def test_diagnostics_reveal_no_zone_geometry_so_no_nogo_areas(hass: HomeAssistant) -> None:
+    """Zone polygons are not in the download, and neither are No-go areas (#49)."""
+    from tests.mammotion_states import (
+        install_zone_switches,
+        register_fake_mammotion_services,
+    )
+
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    install_zone_switches(hass, entry, mower, NAME)
+    register_fake_mammotion_services(hass)  # the map, obstacles included, is on hand
+
+    text = json.dumps(await async_get_config_entry_diagnostics(hass, entry))
+
+    # (A Mammotion setting is called `obstacle_laps`; the map's geometry is not.)
+    for word in ("nogo_areas", "polygon", "Polygon", "coordinates", "parent_hash"):
+        assert word not in text, word

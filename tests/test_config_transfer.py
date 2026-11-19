@@ -165,3 +165,31 @@ def test_import_drops_invalid_gate_positions() -> None:
     data["config"]["gates"][0]["positions"] = {"c1": 1.7, "c2": "x"}
     plan = plan_import(data, target_zones=TARGET, registry_id_of=to_registry_id)
     assert plan.config["gates"][0]["positions"] == {}
+
+
+# -- No-go areas travel like the polygon (issue #117) --------------------------
+
+
+def test_export_carries_a_zones_nogo_areas_as_it_does_its_polygon() -> None:
+    cfg = config()
+    cfg["zones"][0].update(polygon=[1], nogo_areas=[[2]])
+    out = build_export(cfg, {}, entity_id_of=to_entity_id, include_history=False)
+    assert out["config"]["zones"][0]["polygon"] == [1]
+    assert out["config"]["zones"][0]["nogo_areas"] == [[2]]
+
+
+def test_import_takes_nogo_areas_from_the_mower_not_the_file_as_it_does_the_polygon() -> None:
+    cfg = config()
+    cfg["zones"][0].update(polygon=["file"], nogo_areas=[["file"]])
+    cfg["zones"][1].update(polygon=["file"], nogo_areas=[])
+    export = build_export(cfg, {}, entity_id_of=to_entity_id, include_history=False)
+    target = [
+        {"id": "T1", "native_ref": "n1", "name": "Front", "missing": False,
+         "polygon": [1], "nogo_areas": [["mower"]]},
+        # A Zone record written before No-go areas, so unknown on the Mower.
+        {"id": "T2", "native_ref": "n2", "name": "Back", "missing": False, "polygon": [2]},
+    ]
+    plan = plan_import(export, target_zones=target, registry_id_of=to_registry_id)
+    zones = {z["id"]: z for z in plan.config["zones"]}
+    assert zones["T1"]["polygon"] == [1] and zones["T1"]["nogo_areas"] == [["mower"]]
+    assert zones["T2"]["polygon"] == [2] and zones["T2"]["nogo_areas"] is None

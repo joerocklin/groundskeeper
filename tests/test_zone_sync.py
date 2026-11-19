@@ -1,5 +1,6 @@
 """Zone import and sync (spec §4.4, §4.6, §4.8) against FakeMower."""
 
+import json
 from dataclasses import replace
 
 from homeassistant.helpers import issue_registry as ir
@@ -17,6 +18,8 @@ from tests.fake_mower import FakeMower
 
 POLY = {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}
 PATH = {"type": "LineString", "coordinates": [[0, 0], [0.5, 0.2], [1, 1]]}
+HOLE = {"type": "Polygon", "coordinates": [[[0.2, 0.2], [0.4, 0.2], [0.4, 0.4], [0.2, 0.2]]]}
+HOLE_2 = {"type": "Polygon", "coordinates": [[[0.5, 0.5], [0.6, 0.5], [0.6, 0.6], [0.5, 0.5]]]}
 
 
 def _ids():
@@ -79,6 +82,61 @@ def test_polygon_arrives_later_without_blocking() -> None:
     known = [_zone("z1", "a", "Front", polygon=None)]
     out = reconcile_zones(known, [Zone("a", "Front", POLY)], _ids())
     assert out[0]["polygon"] == POLY
+
+
+def test_a_new_zone_stores_its_nogo_areas() -> None:
+    out = reconcile_zones([], [Zone("a", "Front", POLY, [HOLE])], _ids())
+    assert out[0]["nogo_areas"] == [HOLE]
+
+
+def test_a_new_zone_with_unknown_nogo_areas_stores_unknown_not_none() -> None:
+    out = reconcile_zones([], [Zone("a", "Front")], _ids())
+    assert out[0]["nogo_areas"] is None
+
+
+def test_nogo_areas_follow_the_map_when_one_is_added_or_removed() -> None:
+    known = [_zone("z1", "a", "Front", nogo_areas=[HOLE])]
+    added = reconcile_zones(known, [Zone("a", "Front", POLY, [HOLE, HOLE_2])], _ids())
+    assert added[0]["nogo_areas"] == [HOLE, HOLE_2]
+    removed = reconcile_zones(added, [Zone("a", "Front", POLY, [HOLE_2])], _ids())
+    assert removed[0]["nogo_areas"] == [HOLE_2]
+
+
+def test_a_zone_whose_last_nogo_area_is_removed_reads_none_not_stale() -> None:
+    known = [_zone("z1", "a", "Front", nogo_areas=[HOLE])]
+    out = reconcile_zones(known, [Zone("a", "Front", POLY, [])], _ids())
+    assert out[0]["nogo_areas"] == []
+
+
+def test_a_refresh_without_geometry_keeps_the_last_known_nogo_areas() -> None:
+    known = [_zone("z1", "a", "Front", nogo_areas=[HOLE])]
+    out = reconcile_zones(known, [Zone("a", "Front")], _ids())  # fetch failed
+    assert out[0]["nogo_areas"] == [HOLE]
+
+
+def test_rebinding_to_a_new_ref_refetches_nogo_areas_as_the_polygon_is() -> None:
+    known = [_zone("z1", "a", "Front", nogo_areas=[HOLE])]
+    # The new ref's geometry is not loaded yet: the old ref's areas must not
+    # be kept as if they were the new Zone's.
+    pending = reconcile_zones(known, [Zone("b", "Front")], _ids())
+    assert pending[0]["polygon"] is None and pending[0]["nogo_areas"] is None
+    loaded = reconcile_zones(known, [Zone("b", "Front", POLY, [HOLE_2])], _ids())
+    assert loaded[0]["nogo_areas"] == [HOLE_2]
+
+
+def test_a_record_written_before_nogo_areas_read_unknown_until_the_next_sync() -> None:
+    old = _zone("z1", "a", "Front")
+    assert "nogo_areas" not in old
+    out = reconcile_zones([old], [Zone("a", "Front")], _ids())
+    assert out[0]["nogo_areas"] is None
+    out = reconcile_zones([old], [Zone("a", "Front", POLY, [HOLE])], _ids())
+    assert out[0]["nogo_areas"] == [HOLE]
+
+
+def test_a_missing_zone_keeps_its_nogo_areas() -> None:
+    known = [_zone("z1", "a", "Front", nogo_areas=[HOLE])]
+    out = reconcile_zones(known, [], _ids())
+    assert out[0]["missing"] is True and out[0]["nogo_areas"] == [HOLE]
 
 
 def test_channels_reconcile_by_end_zones_across_ref_change() -> None:
@@ -396,3 +454,124 @@ async def test_zone_view_serves_channel_paths_and_they_persist(hass) -> None:
     assert [c["path"] for c in view["channels"]] == [PATH, PATH]
     stored = await entry.runtime_data.async_load()
     assert all(c["path"] == PATH for c in stored["config"]["channels"])
+
+
+# -- No-go areas (issue #117) --------------------------------------------------
+
+
+async def test_sync_stores_each_zones_nogo_areas_and_unknown_without_geometry(hass) -> None:
+    entry, sync = await _attached(hass, FakeMower())
+    front, back = await sync.async_zones()
+    assert len(front["nogo_areas"]) == 1 and front["nogo_areas"][0]["type"] == "Polygon"
+    assert back["nogo_areas"] is None  # geometry not loaded: unknown, not none
+    stored = (await entry.runtime_data.async_load())["config"]["zones"]
+    assert [z["nogo_areas"] is None for z in stored] == [False, True]
+
+
+async def test_a_map_update_adding_or_removing_a_nogo_area_changes_the_stored_zone(
+    hass,
+) -> None:
+    mower = FakeMower()
+    _, sync = await _attached(hass, mower)
+    front, back = mower.zones
+
+    mower.zones = (replace(front, nogo_areas=[HOLE, HOLE_2]), back)
+    mower.emit_signal(ZonesChanged())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert (await sync.async_zones())[0]["nogo_areas"] == [HOLE, HOLE_2]
+
+    mower.zones = (replace(front, nogo_areas=[HOLE_2]), back)
+    mower.emit_signal(ZonesChanged())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert (await sync.async_zones())[0]["nogo_areas"] == [HOLE_2]
+
+    mower.zones = (replace(front, nogo_areas=[]), back)
+    mower.emit_signal(ZonesChanged())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert (await sync.async_zones())[0]["nogo_areas"] == []  # none, not stale
+
+
+async def test_a_rebound_zone_refetches_its_nogo_areas_from_the_new_ref(hass) -> None:
+    mower = FakeMower()
+    _, sync = await _attached(hass, mower)
+    front, back = mower.zones
+    zid = (await sync.async_zones())[0]["id"]
+
+    # Map rebuild: new hash, same name. The areas follow the new ref...
+    mower.zones = (replace(front, native_ref="11111111x", nogo_areas=[HOLE_2]), back)
+    await sync.async_sync()
+    rebound = (await sync.async_zones())[0]
+    assert (rebound["id"], rebound["native_ref"]) == (zid, "11111111x")
+    assert rebound["nogo_areas"] == [HOLE_2]
+
+    # ...and while the next ref's geometry is not loaded, the old ones are not
+    # kept as if they were its own.
+    mower.zones = (
+        replace(front, native_ref="11111111y", polygon=None, nogo_areas=None),
+        back,
+    )
+    await sync.async_sync()
+    pending = (await sync.async_zones())[0]
+    assert pending["native_ref"] == "11111111y" and pending["nogo_areas"] is None
+
+
+async def test_nogo_areas_leave_the_stored_bearing_and_angle_range_untouched(hass) -> None:
+    mower, sync, _ = await _with_polygon(hass)
+
+    def angles() -> str:
+        return json.dumps(
+            [{k: z[k] for k in ("bearing", "angle_range")} for z in sync._data["config"]["zones"]],
+            sort_keys=True,
+        )
+
+    before = angles()
+    centre_hole = {"type": "Polygon", "coordinates": [rect(4, 4, 0)]}  # inside the lawn
+    mower.zones = (replace(mower.zones[0], nogo_areas=[centre_hole]), mower.zones[1])
+    await sync.async_sync()
+    assert (await sync.async_zones())[0]["nogo_areas"] == [centre_hole]
+    assert angles() == before  # byte for byte, basis included
+
+
+async def test_zone_view_carries_the_nogo_areas_unknown_as_none(hass, hass_ws_client) -> None:
+    await _attached(hass, FakeMower())
+    entry_id = hass.config_entries.async_entries(DOMAIN)[0].entry_id
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "groundskeeper/get_zones", "entry_id": entry_id})
+    msg = await ws.receive_json()
+    front, back = msg["result"]["zones"]
+    assert len(front["nogo_areas"]) == 1
+    assert back["nogo_areas"] is None
+
+
+async def test_a_store_written_before_nogo_areas_loads_and_reads_unknown(
+    hass, hass_storage
+) -> None:
+    from custom_components.groundskeeper.store import (
+        STORAGE_VERSION,
+        STORAGE_VERSION_MINOR,
+        empty_store_data,
+    )
+    from custom_components.groundskeeper.zone_sync import ZoneSync
+
+    entry = _entry(hass)
+    key = f"groundskeeper.{entry.entry_id}"
+    data = empty_store_data()
+    data["config"]["zones"] = [_zone("z1", "11111111", "Front Lawn")]  # no nogo_areas
+    hass_storage[key] = {
+        "version": STORAGE_VERSION,
+        "minor_version": STORAGE_VERSION_MINOR,
+        "key": key,
+        "data": data,
+    }
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    store = entry.runtime_data
+    sync = ZoneSync(hass, entry.entry_id, FakeMower(), store)
+
+    view = await sync.async_zone_view()
+    assert not store.safe_idle
+    assert [(z["id"], z["nogo_areas"]) for z in view["zones"]] == [("z1", None)]
+
+    await sync.async_sync()  # the next sync fills it in
+    zone = next(z for z in await sync.async_zones() if z["id"] == "z1")
+    assert len(zone["nogo_areas"]) == 1

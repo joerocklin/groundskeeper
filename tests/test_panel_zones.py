@@ -174,3 +174,24 @@ def test_zone_list_rows() -> None:
     assert 'data-act="toggle-hidden"' in html
     assert "missing" in html
     assert 'data-act="refresh-zones"' in html
+
+
+def test_zone_list_shows_each_zones_nogo_area_count() -> None:
+    html = call("zoneListHtml", [
+        zone(id="z1", name="Front", nogo_areas=[SQUARE, SQUARE, SQUARE]),
+        zone(id="z2", name="Back", nogo_areas=[SQUARE]),
+        zone(id="z3", name="Clear", nogo_areas=[]),  # known to have none
+    ], "z1")
+
+    def row(name: str) -> str:
+        return next(r for r in html.split("<li ") if f">{name}<" in r)
+
+    assert "No-go areas: 3" in row("Front")
+    assert "No-go areas: 1" in row("Back")
+    assert "No-go areas: 0" in row("Clear")
+
+
+def test_zone_list_shows_no_count_for_a_zone_whose_nogo_areas_are_unknown() -> None:
+    unknown = zone(id="z1", name="Front", nogo_areas=None)  # geometry not loaded
+    old = zone(id="z2", name="Old")  # a record from before No-go areas: no key
+    assert "No-go" not in call("zoneListHtml", [unknown, old], "z1")

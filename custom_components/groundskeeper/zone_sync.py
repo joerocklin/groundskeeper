@@ -7,7 +7,13 @@ the per-Mower "missing Zones" Repairs issue current.
 
 A Director Zone is a plain dict (JSON for the Store):
 
-    id, native_ref, name, hidden, missing, polygon, bearing, angle_range
+    id, native_ref, name, hidden, missing, polygon, nogo_areas, bearing,
+    angle_range
+
+`nogo_areas` is the Zone's No-go areas as GeoJSON geometries: a list (empty
+means none) or None when unknown, which is also how a record written before
+it existed reads. They are read from the Mower and refreshed wherever
+`polygon` is; they feed nothing else yet.
 
 `bearing` and `angle_range` are the records of `zone_angles`; they are filled
 in by `ZoneSync` after every reconcile.
@@ -87,8 +93,14 @@ def reconcile_zones(
             if rebind:
                 z["native_ref"] = lz.native_ref
                 z["polygon"] = None  # changed ref: refetch the polygon
+                z["nogo_areas"] = None  # ...and its No-go areas
             if lz.polygon is not None:
                 z["polygon"] = lz.polygon
+            if lz.nogo_areas is not None:
+                z["nogo_areas"] = lz.nogo_areas  # [] is "none", not stale
+            else:
+                # Geometry not loaded: keep the last known, else unknown.
+                z["nogo_areas"] = z.get("nogo_areas")
         result.append(z)
     for lz in new_listed:
         result.append(
@@ -99,6 +111,7 @@ def reconcile_zones(
                 "hidden": False,
                 "missing": False,
                 "polygon": lz.polygon,
+                "nogo_areas": lz.nogo_areas,
             }
         )
     return result
@@ -230,8 +243,13 @@ class ZoneSync:
     async def async_zone_view(self) -> dict:
         """Zones (with estimated angle times) and Channels for the panel."""
         cfg = await self._config()
+        # A record written before No-go areas existed has no `nogo_areas`:
+        # the view says unknown (None) outright so the panel never shows 0.
         zones = await self._hass.async_add_executor_job(
-            lambda: [{**z, "estimates": angle_estimates(z)} for z in cfg["zones"]]
+            lambda: [
+                {**z, "nogo_areas": z.get("nogo_areas"), "estimates": angle_estimates(z)}
+                for z in cfg["zones"]
+            ]
         )
         return {"zones": zones, "channels": list(cfg["channels"])}
 

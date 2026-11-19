@@ -54,6 +54,18 @@ DEFAULT_ZONES: tuple[Zone, ...] = (
                  [13.4050, 52.5200]]
             ],
         },
+        # One No-go area inside it. Backyard's geometry is not loaded, so its
+        # No-go areas are unknown (None), which is not the same as none ([]).
+        nogo_areas=[
+            {
+                "type": "Polygon",
+                "coordinates": [
+                    [[13.4052, 52.5202], [13.4053, 52.5202],
+                     [13.4053, 52.5203], [13.4052, 52.5203],
+                     [13.4052, 52.5202]]
+                ],
+            }
+        ],
     ),
     Zone(native_ref="22222222", name="Backyard", polygon=None),
 )

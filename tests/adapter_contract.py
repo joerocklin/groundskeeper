@@ -202,6 +202,20 @@ class _AdapterContract:
         assert tasks and all(isinstance(t, NativeTask) for t in tasks)
         assert all(t.task_id and t.name for t in tasks)
 
+    async def test_nogo_areas_are_known_exactly_when_the_zone_geometry_is(
+        self, mower: MowerAdapter
+    ) -> None:
+        """A Zone's No-go areas are GeoJSON geometries like its polygon, or None
+        (unknown). A Zone whose geometry is not loaded is unknown, never "none"
+        (an empty list); a Zone whose geometry is loaded is always known."""
+        zones = await mower.list_zones()
+        for zone in zones:
+            if zone.polygon is None:
+                assert zone.nogo_areas is None, zone.name
+            else:
+                assert isinstance(zone.nogo_areas, list), zone.name
+                assert all(isinstance(area, dict) for area in zone.nogo_areas)
+
     async def test_lifecycle_and_metadata(self, mower: MowerAdapter) -> None:
         """start/close run; metadata is strings or None; redact is a list."""
         await mower.async_start()
