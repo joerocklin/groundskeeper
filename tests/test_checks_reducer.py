@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timezone
 
 import pytest
+from homeassistant.components.lawn_mower import LawnMowerActivity
 
 from custom_components.groundskeeper.adapter import NewError
 from custom_components.groundskeeper.checks import (
@@ -246,12 +247,20 @@ def test_leaving_waiting_clears_check_state():
     assert state["state"]["check_clocks"] == {}
 
 
-def test_mower_ready_notifies_immediately_on_error_and_never_pauses():
+@pytest.mark.parametrize(
+    "snapshot",
+    [DOCKED, replace(DOCKED, activity=LawnMowerActivity.ERROR)],
+    ids=["error_no_longer_blocking", "error_blocking"],
+)
+def test_mower_ready_notifies_immediately_on_error_and_never_pauses(snapshot):
+    """The notice does not depend on the error still blocking (issue #110)."""
     env = env_with()
-    state, _ = start(env)
+    state, _ = start(env, snapshot)
     state, fx = step(state, SignalReceived(at(1), NewError("2748", "blocked", at(0))), env)
     (event,) = events(fx, "check_timeout")
     assert event.payload["check_id"] == "mower_ready"
+    assert event.payload["policy"] == "notify"
+    assert event.payload["reasons"] == ["new_error"]
     assert state["state"]["schedule"]["status"] == "waiting"
 
 

@@ -20,6 +20,7 @@ from custom_components.groundskeeper.adapter import (
 from custom_components.groundskeeper.core import (
     AbortRunEffect,
     Reconcile,
+    ResumeRunEffect,
     SnapshotReceived,
     StartRunEffect,
     TimerFired,
@@ -130,18 +131,53 @@ def test_mowing_newer_error_while_live_mower_is_still_mowing_is_tolerated():
     assert commands(fx) == []
 
 
+def test_mowing_newer_error_while_the_mower_is_paused_on_a_live_job_is_tolerated():
+    """The same rule as a live signal (issue #110): a paused Mower with its
+    job still live is held by the on-hold rule, not failed by the error."""
+    state = fresh_stall(mowing_state())
+    state["state"]["last_error_time"] = at(50).isoformat()
+    error = NewError("1004", "stuck", at(5000))
+    paused = replace(LIVE, activity=LawnMowerActivity.PAUSED)
+    state, fx = reconcile(state, paused, signals=[error])
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert run_of(state)["tolerated_errors"][0]["code"] == "1004"
+    assert [e.payload["code"] for e in events(fx, "error_tolerated")] == ["1004"]
+    assert not events(fx, "prompt_sent")
+    assert commands(fx) == []
+
+
+def test_waiting_newer_error_does_not_block_a_mower_that_does_not_read_error():
+    """Between Runs the same rule as a live signal (issue #110): the restart
+    brings back the missed error, and an idle Mower still starts the Run."""
+    state = waiting_state(snapshot=DOCKED)
+    error = NewError("1004", "stuck", at(5000))
+    state, fx = reconcile(state, DOCKED, signals=[error])
+    assert state["state"]["waiting_on"] == []
+    assert [e.payload["check_id"] for e in events(fx, "check_timeout")] == ["mower_ready"]
+    assert not [e for e in fx if isinstance(e, ResumeRunEffect)]
+
+
 @pytest.mark.parametrize(
     "snapshot",
     [
         replace(LIVE, activity=LawnMowerActivity.ERROR),
         replace(LIVE, job_active=False),
-        replace(LIVE, activity=LawnMowerActivity.PAUSED),
+        replace(LIVE, activity=LawnMowerActivity.PAUSED, job_active=False),
+        replace(LIVE, activity=LawnMowerActivity.PAUSED, recharging=True),
         replace(LIVE, available=False),
         None,
     ],
-    ids=["activity_error", "no_live_job", "paused", "unavailable", "no_snapshot"],
+    ids=[
+        "activity_error",
+        "no_live_job",
+        "paused_no_live_job",
+        "paused_mid_job_recharge",
+        "unavailable",
+        "no_snapshot",
+    ],
 )
-def test_mowing_newer_error_fails_without_command_unless_the_mower_is_mowing(snapshot):
+def test_mowing_newer_error_fails_without_command_unless_mowing_or_paused_on_a_live_job(snapshot):
     state = fresh_stall(mowing_state())
     state["state"]["last_error_time"] = at(50).isoformat()
     error = NewError("1004", "stuck", at(5000))

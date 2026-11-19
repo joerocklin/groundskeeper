@@ -903,7 +903,9 @@ def evaluate_checks(
                     reasons.append("unknown_state")
                 if snapshot.job_active:
                     reasons.append("job_active")
-                if blocking_error is not None:
+                # A Mower error is evidence, not a verdict (issue #110): the
+                # recorded error blocks only while the Mower reads `error`.
+                if blocking_error is not None and snapshot.activity is LawnMowerActivity.ERROR:
                     reasons.append("new_error")
                 if snapshot.self_check is SelfCheckReason.DEVICE_NON_WORK_HOURS:
                     reasons.append("device_non_work_hours")
@@ -2088,18 +2090,21 @@ class _Machine:
                 # An error is evidence, not a verdict (issue #96): a Mower can
                 # log one, recover and keep mowing, and failing the Run then
                 # offers Retry on a Mower still on the job. No code is special;
-                # the snapshot decides. Mowing on a live job: record it, and
-                # the stop rules end the Run if the Mower really stops.
-                # Anything else is a stopped Mower (usually locked in `error`):
-                # fail the Run, no command (spec §7.3).
-                if self._mowing_with_live_job():
+                # the snapshot decides. Mowing, or paused (issue #110), on a
+                # live job: record it, and the stop and on-hold rules decide if
+                # the Mower really stops. Anything else is a stopped Mower
+                # (usually locked in `error`): fail the Run, no command
+                # (spec §7.3).
+                if self._mowing_or_paused_on_a_live_job():
                     self._tolerate_error(run, error)
                 else:
                     run["error"] = error
                     self._fail_run(run, "error", abort=False)
             elif self.status == ScheduleStatus.WAITING:
                 self.s["blocking_error"] = error
+                emitted = len(self.effects)
                 self._evaluate()
+                self._notify_error_between_runs(emitted)
         elif isinstance(signal, ZoneTaskAborted):
             run = self._mowing_run()
             if run is not None and signal.zone == run.get("native_ref"):
@@ -2111,14 +2116,47 @@ class _Machine:
             if run is not None and self._is_external_job(run, signal):
                 self._fail_run(run, "superseded", abort=False)
 
-    def _mowing_with_live_job(self) -> bool:
-        """The latest snapshot says the Mower is mowing and on a live job."""
+    def _notify_error_between_runs(self, since: int) -> None:
+        """Tell the phones the Mower reported an error, whether or not it blocks.
+
+        While the Mower still reads `error` the `mower_ready` Check fails and
+        its clock sends this notice (timeout 0); `since` is where this
+        reduction's effects started. When the error no longer blocks the Check
+        passes, no clock runs, and the notice is sent here, in the same shape
+        (issue #110). The Check is then marked notified, as the clock marks
+        it, so the same error is not announced again if the Mower later reads
+        `error` inside this wait.
+        """
+        rec = next((r for r in self.env.checks if r["type"] == TYPE_MOWER_READY), None)
+        if rec is None:
+            return
+        if any(
+            isinstance(effect, EmitEvent)
+            and effect.type == "check_timeout"
+            and effect.payload["check_id"] == rec["id"]
+            and "new_error" in effect.payload["reasons"]
+            for effect in self.effects[since:]
+        ):
+            return
+        if rec["id"] not in self.s["check_notified"]:
+            self.s["check_notified"].append(rec["id"])
+        self._emit(
+            "check_timeout",
+            check_id=rec["id"],
+            name=rec["name"],
+            policy="notify",
+            reasons=["new_error"],
+        )
+
+    def _mowing_or_paused_on_a_live_job(self) -> bool:
+        """The latest snapshot says the Mower is mowing, or paused (not for a
+        mid-job recharge), on a live job: one the Mower may carry on by itself.
+        """
         snapshot = self._snapshot()
-        return (
-            snapshot is not None
-            and snapshot.available
-            and snapshot.activity is LawnMowerActivity.MOWING
-            and snapshot.job_active
+        if snapshot is None or not snapshot.available or not snapshot.job_active:
+            return False
+        return snapshot.activity is LawnMowerActivity.MOWING or (
+            snapshot.activity is LawnMowerActivity.PAUSED and not snapshot.recharging
         )
 
     def _tolerate_error(self, run: dict[str, Any], error: dict[str, Any]) -> None:
