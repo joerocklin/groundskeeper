@@ -2232,9 +2232,8 @@ class _Machine:
         """A job start the director did not command (spec §8.5): a different
         `job_ref` than the one recorded at the `mowing` transition, or, with
         no `job_ref` either side, a different Zone. A start that names no
-        Zone is unknown, not a different one: the Mower resuming its own
-        job after a mid-job recharge starts at the dock, where `work_area`
-        reads `Not working` (issue #139)."""
+        Zone is unknown, not a different one: the Mower reports no Zone at
+        the dock or in transit (issue #139)."""
         if signal.job_ref is not None and run.get("job_ref") is not None:
             return signal.job_ref != run["job_ref"]
         if signal.zone is None:

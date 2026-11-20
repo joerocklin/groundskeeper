@@ -574,6 +574,10 @@ async def test_task_signal_after_sensor_recreated(hass: HomeAssistant) -> None:
     assert recorder.signals == [ZoneTaskComplete(side), ZoneTaskComplete(side)]
 
 
+def _job_started(recorder: _Recorder) -> list[JobStarted]:
+    return [s for s in recorder.signals if isinstance(s, JobStarted)]
+
+
 async def test_job_started_on_mowing_transition(hass: HomeAssistant) -> None:
     """A transition into `mowing` emits JobStarted (job_ref None; the core
     decides externality from its own command log)."""
@@ -583,7 +587,7 @@ async def test_job_started_on_mowing_transition(hass: HomeAssistant) -> None:
     set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
     await hass.async_block_till_done()
 
-    started = [s for s in recorder.signals if isinstance(s, JobStarted)]
+    started = _job_started(recorder)
     assert len(started) == 1
     assert started[0].job_ref is None
     assert started[0].started_at.tzinfo is not None
@@ -591,11 +595,7 @@ async def test_job_started_on_mowing_transition(hass: HomeAssistant) -> None:
     # Staying mowing does not re-emit.
     set_entity(hass, entry, mower, NAME, "sensor:progress", "5", {})
     await hass.async_block_till_done()
-    assert len([s for s in recorder.signals if isinstance(s, JobStarted)]) == 1
-
-
-def _job_started(recorder: _Recorder) -> list[JobStarted]:
-    return [s for s in recorder.signals if isinstance(s, JobStarted)]
+    assert len(_job_started(recorder)) == 1
 
 
 @pytest.mark.parametrize(
@@ -686,6 +686,29 @@ async def test_mode_dropping_out_mid_job_and_returning_is_not_a_job_start(
     await hass.async_block_till_done()
 
     assert len(_job_started(recorder)) == 1
+
+
+async def test_adapter_built_while_recharging_mid_job_does_not_emit_on_the_resume(
+    hass: HomeAssistant,
+) -> None:
+    """A restart while the Mower sits at the dock mid-job recharge: the job
+    began before the adapter was built, so the resume that follows is not a
+    start (the #139 scenario across a restart)."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "paused", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_CHARGING_PAUSE", {})
+    set_entity(hass, entry, mower, NAME, "binary_sensor:charging", "on", {})
+    adapter = make_adapter(hass, entry)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+
+    set_entity(hass, entry, mower, NAME, "binary_sensor:charging", "off", {})
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+
+    assert _job_started(recorder) == []
 
 
 async def test_adapter_built_while_mowing_with_mode_unreadable_does_not_emit(

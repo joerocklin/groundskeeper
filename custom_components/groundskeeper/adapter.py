@@ -172,7 +172,7 @@ class ZoneTaskAborted:
 
 @dataclass(frozen=True, slots=True)
 class JobStarted:
-    """A job began on the Mower.
+    """A job started on the Mower.
 
     Emitted when a job begins, not when a live job resumes after a pause or a
     mid-job recharge (issue #139).
