@@ -6,7 +6,7 @@ simulated `mobile_app_notification_action` events. Nothing real is called.
 
 import re
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from homeassistant.components.lawn_mower import LawnMowerActivity
@@ -485,7 +485,9 @@ async def test_error_after_the_mower_stopped_still_fails_the_run_with_a_prompt(
     await hass.async_block_till_done()
     mower.emit_snapshot(replace(MOWING, activity=LawnMowerActivity.ERROR))
     await hass.async_block_till_done()
-    mower.emit_signal(NewError("1008", "Robot is locked", datetime(2026, 11, 16, 21, 0, tzinfo=timezone.utc)))
+    # Fresh: stamped after the last reading of mowing (an older one is tolerated, #135).
+    stamped = datetime.now(timezone.utc) + timedelta(seconds=1)
+    mower.emit_signal(NewError("1008", "Robot is locked", stamped))
     await hass.async_block_till_done()
     d = async_get_director(hass, entry.entry_id)
     assert [r["status"] for r in d.data["state"]["runs"]] == ["failed"]

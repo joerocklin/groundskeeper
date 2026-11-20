@@ -175,7 +175,7 @@ def test_waiting_newer_error_does_not_block_a_mower_that_does_not_read_error():
         "no_snapshot",
     ],
 )
-def test_mowing_newer_error_fails_without_command_unless_mowing_or_paused_on_a_live_job(snapshot):
+def test_mowing_newer_error_fails_without_command_unless_mowing_paused_or_docked_on_a_live_job(snapshot):
     state = fresh_stall(mowing_state())
     state["state"]["last_error_time"] = at(50).isoformat()
     error = NewError("1004", "stuck", at(5000))

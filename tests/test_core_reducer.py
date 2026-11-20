@@ -724,7 +724,7 @@ def no_abort(fx):
 # A NewError is evidence, not a verdict (issues #96, #110, #135): while the
 # snapshot still reads `mowing`, `paused` or `docked` (a mid-job recharge too)
 # with a live job the Mower may carry on, so the Run stays `mowing`. Any other
-# snapshot fails a fresh error as before (a mid-job recharge moved out: #135).
+# snapshot fails a fresh error.
 NOT_ON_A_LIVE_JOB = [
     pytest.param(replace(MOWING, activity=LawnMowerActivity.ERROR), id="activity_error"),
     pytest.param(
