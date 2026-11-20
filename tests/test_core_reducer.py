@@ -721,19 +721,15 @@ def no_abort(fx):
     assert not [e for e in fx if isinstance(e, AbortRunEffect)]
 
 
-# A NewError is evidence, not a verdict (issues #96, #110): while the snapshot
-# still reads `mowing`, or `paused` (not for a recharge), with a live job the
-# Mower may carry on, so the Run stays `mowing`. Any other snapshot fails the
-# Run as before.
+# A NewError is evidence, not a verdict (issues #96, #110, #135): while the
+# snapshot still reads `mowing`, `paused` or `docked` (a mid-job recharge too)
+# with a live job the Mower may carry on, so the Run stays `mowing`. Any other
+# snapshot fails a fresh error as before (a mid-job recharge moved out: #135).
 NOT_ON_A_LIVE_JOB = [
     pytest.param(replace(MOWING, activity=LawnMowerActivity.ERROR), id="activity_error"),
     pytest.param(
         replace(MOWING, activity=LawnMowerActivity.PAUSED, job_active=False),
         id="paused_no_live_job",
-    ),
-    pytest.param(
-        replace(MOWING, activity=LawnMowerActivity.PAUSED, recharging=True),
-        id="paused_mid_job_recharge",
     ),
     pytest.param(replace(MOWING, activity=LawnMowerActivity.RETURNING), id="returning"),
     pytest.param(replace(MOWING, job_active=False), id="no_live_job"),
