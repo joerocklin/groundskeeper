@@ -311,9 +311,9 @@ class MammotionAdapter:
         # Whether the live job has already been announced as a `JobStarted`.
         # Seeded from state so a restart mid-job (mowing or paused) does not
         # announce a job that began before the adapter was built.
-        self._job_announced = self._job_active(
-            self._state("sensor", "activity_mode")
-        ) or self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
+        self._job_announced = (
+            self._job_active(self._state("sensor", "activity_mode")) or self._is_mowing()
+        )
         self._source_version: str | None = None
 
     # -- discovery ---------------------------------------------------------
@@ -657,6 +657,10 @@ class MammotionAdapter:
             del self._seen_task_states[zone]
 
     @callback
+    def _is_mowing(self) -> bool:
+        return self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
+
+    @callback
     def _check_job_started(self) -> None:
         """JobStarted when a job begins: the Mower is `mowing` on a job that
         was not live before. A resume after a pause or a mid-job recharge is
@@ -665,15 +669,14 @@ class MammotionAdapter:
         The `lawn_mower` and `activity_mode` entities update separately and
         in either order, so the start is the first moment both hold for a
         job, whichever changed last. The job counts as announced until it
-        stops being live. The core decides externality (ticket 06 §5a)."""
+        stops being live."""
         mode = self._state("sensor", "activity_mode")
         if mode in (None, STATE_UNAVAILABLE, STATE_UNKNOWN):
             return  # a dropout of the reading says nothing about the job
         if not self._job_active(mode):
             self._job_announced = False
             return
-        mowing = self._state("lawn_mower", "mower") == str(LawnMowerActivity.MOWING)
-        if mowing and not self._job_announced:
+        if self._is_mowing() and not self._job_announced:
             self._job_announced = True
             self._emit_signal(
                 JobStarted(job_ref=None, zone=self._zone_ref(), started_at=dt_util.utcnow())

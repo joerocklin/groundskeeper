@@ -28,6 +28,7 @@ from custom_components.groundskeeper.core import (
     CommandOutcome,
     Env,
     PlanStatus,
+    ResumeRunEffect,
     RetryRun,
     SignalReceived,
     SkipPlan,
@@ -990,7 +991,9 @@ def test_resume_after_a_mid_job_recharge_with_no_zone_is_not_an_external_job():
     assert state["state"]["active_run_id"] == "p1-r1"
     assert state["state"]["prompts"] == []
     assert not events(fx, "prompt_sent")
-    assert not [e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect))]
+    assert not [
+        e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect, ResumeRunEffect))
+    ]
 
 
 def test_resume_signal_arriving_before_the_snapshot_shows_the_resume_is_not_external():
@@ -998,12 +1001,16 @@ def test_resume_signal_arriving_before_the_snapshot_shows_the_resume_is_not_exte
     signal is handled while the snapshot still reads the recharge (#139)."""
     state = mowing_state()
     state, _ = step(state, SnapshotReceived(at(400), RECHARGING))
-    state, fx = step(state, SignalReceived(at(501), JobStarted(None, None, at(500))))
+    state, signal_fx = step(state, SignalReceived(at(501), JobStarted(None, None, at(500))))
     assert run_status(state) == ["mowing"]
-    state, _ = step(state, SnapshotReceived(at(501), MOWING))
+    state, snapshot_fx = step(state, SnapshotReceived(at(501), MOWING))
     assert run_status(state) == ["mowing"]
     assert state["state"]["schedule"]["status"] == "running"
-    assert not [e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect))]
+    assert not [
+        e
+        for e in signal_fx + snapshot_fx
+        if isinstance(e, (AbortRunEffect, StartRunEffect, ResumeRunEffect))
+    ]
 
 
 def test_job_started_with_a_different_job_ref_is_external_even_without_a_zone():
