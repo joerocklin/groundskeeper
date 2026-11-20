@@ -85,7 +85,7 @@ A condition that must hold before the next Run may start, such as sufficient bat
 _Avoid_: Gate (a physical barrier), precondition, self-check (the Mower's own diagnostic)
 
 **Mower error**:
-An error code the Mower itself reports. It is evidence, not a verdict: whether it stops a Run or holds the Schedule depends on what the Mower does next, and it stops nothing once the Mower is working again.
+An error code the Mower itself reports. It is evidence, not a verdict: whether it stops a Run or holds the Schedule depends on what the Mower does next, and it stops nothing once the Mower is working again. An error stamped before the last reading that showed the Mower mowing is superseded by that reading, however late Home Assistant saw it. A Mower paused or docked on a live job, recharging or not, has not stopped.
 _Avoid_: Fault, Anomaly (a fingerprint the director detects, not a code the Mower reports)
 
 **Anomaly**:

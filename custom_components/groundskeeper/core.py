@@ -9,8 +9,8 @@ state is saved.
 `core_state` is the JSON dict of the three Store sections the reducer owns:
 
     state    schedule, plans, runs, active_run_id, deadlines, intent,
-             command_log, snapshot, last_error_time, blocking_error,
-             waiting_on
+             command_log, snapshot, last_error_time, last_mowing_at,
+             blocking_error, waiting_on
     learned  per-Zone duration samples
     history  finished Runs and the inputs of Plans that left the Schedule
 
@@ -666,6 +666,9 @@ def normalise_core_state(data: Mapping[str, Any]) -> dict[str, Any]:
     state.setdefault("command_log", [])
     state.setdefault("snapshot", None)
     state.setdefault("last_error_time", None)
+    # When a snapshot last read `mowing` on a live job (issue #135): an error
+    # stamped before it is superseded. Older Stores have no such time.
+    state.setdefault("last_mowing_at", None)
     state.setdefault("blocking_error", None)
     state.setdefault("waiting_on", [])
     state.setdefault("check_clocks", {})  # Check id -> {"since"} for this wait
@@ -1011,6 +1014,7 @@ class _Machine:
                 )
             case SnapshotReceived():
                 self.s["snapshot"] = snapshot_to_dict(event.snapshot)
+                self._note_mowing(event.snapshot)
                 self._evaluate()
             case SignalReceived():
                 self._signal(event.signal)
@@ -1347,6 +1351,7 @@ class _Machine:
                 )
         else:
             self.s["snapshot"] = snapshot_to_dict(snapshot)
+            self._note_mowing(snapshot)
         for signal in event.signals:  # missed errors, external jobs
             self._signal(signal)
         run = active_run(self.s)
@@ -2094,12 +2099,15 @@ class _Machine:
                 # An error is evidence, not a verdict (issue #96): a Mower can
                 # log one, recover and keep mowing, and failing the Run then
                 # offers Retry on a Mower still on the job. No code is special;
-                # the snapshot decides. Mowing, or paused (issue #110), on a
-                # live job: record it, and the stop and on-hold rules decide if
-                # the Mower really stops. Anything else is a stopped Mower
-                # (usually locked in `error`): fail the Run, no command
-                # (spec §7.3).
-                if self._mowing_or_paused_on_a_live_job():
+                # the snapshot and the error's own time decide. Record it, and
+                # the stop and on-hold rules decide if the Mower really stops,
+                # when the error is older than the last reading that showed the
+                # Mower mowing (issue #135: that reading superseded it, however
+                # late Home Assistant saw it), or the Mower is mowing, paused
+                # (issue #110) or docked, recharging or not (issue #135), on a
+                # live job. Anything else is a stopped Mower (usually locked in
+                # `error`): fail the Run, no command (spec §7.3).
+                if self._error_superseded(signal.time) or self._may_carry_on_a_live_job():
                     self._tolerate_error(run, error)
                 else:
                     run["error"] = error
@@ -2154,15 +2162,43 @@ class _Machine:
             blocking=False,
         )
 
-    def _mowing_or_paused_on_a_live_job(self) -> bool:
-        """The latest snapshot says the Mower is mowing, or paused (not for a
-        mid-job recharge), on a live job: one the Mower may carry on by itself.
+    def _note_mowing(self, snapshot: Snapshot) -> None:
+        """Remember when a snapshot last read `mowing` on a live job.
+
+        Only a snapshot input moves it, never a timer tick: the adapter pushes
+        changes, so this is the last time the Mower really showed it was mowing.
+        """
+        if (
+            snapshot.available
+            and snapshot.job_active
+            and snapshot.activity is LawnMowerActivity.MOWING
+        ):
+            self.s["last_mowing_at"] = iso(self.now)
+
+    def _error_superseded(self, error_time: datetime) -> bool:
+        """The error is stamped before the last reading that showed the Mower
+        mowing, so it is not what the Mower is doing now (issue #135).
+
+        `error_time` is the Mower's own stamp and the reading time is Home
+        Assistant's arrival time: clock skew can make a fresh error look old.
+        The cost is bounded, the Run then fails up to 60 s later through the
+        `error` or `stopped_off_dock` rules.
+        """
+        last = self.s["last_mowing_at"]
+        return last is not None and error_time < parse(last)
+
+    def _may_carry_on_a_live_job(self) -> bool:
+        """The latest snapshot says the Mower is mowing, paused or docked (a
+        mid-job recharge included) on a live job: one the Mower may carry on by
+        itself. `returning`, `error`, idle and unknown do not qualify.
         """
         snapshot = self._snapshot()
         if snapshot is None or not snapshot.available or not snapshot.job_active:
             return False
-        return snapshot.activity is LawnMowerActivity.MOWING or (
-            snapshot.activity is LawnMowerActivity.PAUSED and not snapshot.recharging
+        return snapshot.activity in (
+            LawnMowerActivity.MOWING,
+            LawnMowerActivity.PAUSED,
+            LawnMowerActivity.DOCKED,
         )
 
     def _tolerate_error(self, run: dict[str, Any], error: dict[str, Any]) -> None:
