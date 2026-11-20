@@ -40,7 +40,11 @@ from custom_components.groundskeeper.adapters.mammotion import ERROR_SETTLE_S
 from custom_components.groundskeeper.const import DOMAIN
 from custom_components.groundskeeper.heights import HeightError
 from custom_components.groundskeeper.plans import build_plan
-from custom_components.groundskeeper.run_settings import nogo_laps_setting
+from custom_components.groundskeeper.run_settings import (
+    SettingsError,
+    nogo_laps_setting,
+    validate_overrides,
+)
 from tests.conftest import make_mammotion_mower
 from tests.mammotion_states import (
     add_zone_switch,
@@ -857,7 +861,7 @@ async def test_a_height_below_the_entitys_minimum_is_refused(hass: HomeAssistant
     )
     limits = make_adapter(hass, entry).limits
 
-    def plan(height: int):
+    def build(height: int):
         return build_plan(
             zone={"id": "z1", "name": "Side yard", "angle_range": {"angle_range": "full"}},
             config={},
@@ -868,9 +872,9 @@ async def test_a_height_below_the_entitys_minimum_is_refused(hass: HomeAssistant
             now=datetime(2026, 11, 19, 12, 0, tzinfo=UTC),
         )
 
-    with pytest.raises(HeightError):
-        plan(51)
-    assert plan(55).runs[0]["height_mm"] == 55
+    with pytest.raises(HeightError, match=r"51 mm is outside the device limits \(55-100 mm"):
+        build(51)
+    assert build(55).runs[0]["height_mm"] == 55
 
 
 async def test_limits_follow_a_different_device(hass: HomeAssistant) -> None:
@@ -908,6 +912,14 @@ async def test_spacing_and_speed_limits_follow_their_entities(hass: HomeAssistan
     limits = make_adapter(hass, entry).limits
     assert (limits.spacing_min_cm, limits.spacing_max_cm) == (25.0, 30.0)
     assert (limits.speed_min_m_s, limits.speed_max_m_s) == (0.3, 0.5)
+
+    # ...and an override outside those ranges is refused, never clamped,
+    # even though the old defaults (20-35 cm, 0.2-0.6 m/s) would have allowed it.
+    with pytest.raises(SettingsError, match=r"spacing 22 cm is outside the device limits \(25-30 cm\)"):
+        validate_overrides(limits, {"spacing_cm": 22})
+    with pytest.raises(SettingsError, match=r"speed 0.55 m/s is outside the device limits \(0.3-0.5 m/s\)"):
+        validate_overrides(limits, {"speed_m_s": 0.55})
+    validate_overrides(limits, {"spacing_cm": 27, "speed_m_s": 0.4})  # inside: accepted
 
 
 async def test_limits_fall_back_to_the_service_range_without_the_entities(
