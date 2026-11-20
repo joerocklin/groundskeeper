@@ -38,6 +38,8 @@ from custom_components.groundskeeper.adapter import Movement, Snapshot
 from custom_components.groundskeeper.adapters import ADAPTER_REGISTRY
 from custom_components.groundskeeper.adapters.mammotion import ERROR_SETTLE_S
 from custom_components.groundskeeper.const import DOMAIN
+from custom_components.groundskeeper.heights import HeightError
+from custom_components.groundskeeper.plans import build_plan
 from custom_components.groundskeeper.run_settings import nogo_laps_setting
 from tests.conftest import make_mammotion_mower
 from tests.mammotion_states import (
@@ -838,6 +840,39 @@ async def test_limits_come_from_the_entities(hass: HomeAssistant) -> None:
     assert (limits.recharge_battery_pct, limits.resume_battery_pct) == (20, 50)
 
 
+async def test_a_height_below_the_entitys_minimum_is_refused(hass: HomeAssistant) -> None:
+    """#133: Home Assistant's number entity advertises its range as `min`,
+    `max` and `step`. A Luba 2 reports a 55 mm minimum, so a 51 mm Plan has to
+    be refused (the Mower would not go that low), and 55 mm accepted."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(
+        hass,
+        entry,
+        mower,
+        NAME,
+        "number:blade_height",
+        "60",
+        {"min": 55, "max": 100, "step": 1, "unit_of_measurement": "mm"},
+    )
+    limits = make_adapter(hass, entry).limits
+
+    def plan(height: int):
+        return build_plan(
+            zone={"id": "z1", "name": "Side yard", "angle_range": {"angle_range": "full"}},
+            config={},
+            limits=limits,
+            start=height,
+            end=height,
+            origin="service",
+            now=datetime(2026, 11, 19, 12, 0, tzinfo=UTC),
+        )
+
+    with pytest.raises(HeightError):
+        plan(51)
+    assert plan(55).runs[0]["height_mm"] == 55
+
+
 async def test_limits_follow_a_different_device(hass: HomeAssistant) -> None:
     """A standard (non-H) variant's number entity gives 25-70 mm; the
     adapter must report that instead."""
@@ -850,10 +885,45 @@ async def test_limits_follow_a_different_device(hass: HomeAssistant) -> None:
         NAME,
         "number:blade_height",
         "30",
-        {"min_value": 25, "max_value": 70, "step": 1, "unit_of_measurement": "mm"},
+        {"min": 25, "max": 70, "step": 5, "unit_of_measurement": "mm"},
     )
     adapter = make_adapter(hass, entry)
-    assert (adapter.limits.height_min_mm, adapter.limits.height_max_mm) == (25, 70)
+    limits = adapter.limits
+    assert (limits.height_min_mm, limits.height_max_mm, limits.height_step_mm) == (25, 70, 5)
+
+
+async def test_spacing_and_speed_limits_follow_their_entities(hass: HomeAssistant) -> None:
+    """#133: Spacing and speed are bounded by their own number entities'
+    `min` and `max`, not by the 20-35 cm and 0.2-0.6 m/s defaults."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(
+        hass, entry, mower, NAME, "number:path_spacing", "25",
+        {"min": 25, "max": 30, "step": 1, "unit_of_measurement": "cm"},
+    )
+    set_entity(
+        hass, entry, mower, NAME, "number:working_speed", "0.4",
+        {"min": 0.3, "max": 0.5, "step": 0.1, "unit_of_measurement": "m/s"},
+    )
+    limits = make_adapter(hass, entry).limits
+    assert (limits.spacing_min_cm, limits.spacing_max_cm) == (25.0, 30.0)
+    assert (limits.speed_min_m_s, limits.speed_max_m_s) == (0.3, 0.5)
+
+
+async def test_limits_fall_back_to_the_service_range_without_the_entities(
+    hass: HomeAssistant,
+) -> None:
+    """A missing number entity leaves the documented service range standing
+    in (spec §3.6); it is never a per-Mower constant."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    for key in ("blade_height", "path_spacing", "working_speed"):
+        entity_id = er.async_get(hass).async_get_entity_id("number", "mammotion", f"{NAME}_{key}")
+        hass.states.async_remove(entity_id)
+    limits = make_adapter(hass, entry).limits
+    assert (limits.height_min_mm, limits.height_max_mm, limits.height_step_mm) == (15, 100, 1)
+    assert (limits.spacing_min_cm, limits.spacing_max_cm) == (20.0, 35.0)
+    assert (limits.speed_min_m_s, limits.speed_max_m_s) == (0.2, 0.6)
 
 
 async def test_smart_recharge_and_resume_are_none(hass: HomeAssistant) -> None:

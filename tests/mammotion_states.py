@@ -41,6 +41,12 @@ def baseline_states(name: str = "Luba-SERIAL1") -> dict[str, tuple[str, dict[str
 
     ExampleSite reports blade height in inches (`3.1496 in` = 80 mm); the blade
     number entity carries the H-variant device limits 55-100 mm step 1.
+
+    Number entities advertise their range as `min`, `max` and `step`, the
+    attributes Home Assistant's NumberEntity exposes (#133). The 55-100 mm
+    blade height is as recorded on 2026-11-15 and 2026-11-19 (per #133); the Spacing
+    and speed ranges here are the documented defaults, not yet read from a
+    real entity.
     """
     del name  # keys only; friendly names are not asserted
     return {
@@ -60,18 +66,18 @@ def baseline_states(name: str = "Luba-SERIAL1") -> dict[str, tuple[str, dict[str
         "switch:rain_detection_mower_on_off": ("on", {}),
         "number:blade_height": (
             "55",
-            {"min_value": 55, "max_value": 100, "step": 1, "unit_of_measurement": "mm"},
+            {"min": 55, "max": 100, "step": 1, "unit_of_measurement": "mm"},
         ),
         "number:path_spacing": (
             "20",
-            {"min_value": 20, "max_value": 35, "step": 1, "unit_of_measurement": "cm"},
+            {"min": 20, "max": 35, "step": 1, "unit_of_measurement": "cm"},
         ),
         "number:working_speed": (
             "0.2",
-            {"min_value": 0.2, "max_value": 0.6, "step": 0.1, "unit_of_measurement": "m/s"},
+            {"min": 0.2, "max": 0.6, "step": 0.1, "unit_of_measurement": "m/s"},
         ),
-        "number:recharge_level": ("20", {"min_value": 15, "max_value": 30, "step": 1}),
-        "number:resume_level": ("50", {"min_value": 40, "max_value": 100, "step": 1}),
+        "number:recharge_level": ("20", {"min": 15, "max": 30, "step": 1}),
+        "number:resume_level": ("50", {"min": 40, "max": 100, "step": 1}),
         "switch:smart_recharge_level": ("off", {}),
         "switch:smart_resume_level": ("off", {}),
     }

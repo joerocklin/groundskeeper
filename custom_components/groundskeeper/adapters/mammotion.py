@@ -668,23 +668,25 @@ class MammotionAdapter:
     def limits(self) -> Limits:
         """Device limits, read from the number entities (spec §3.6).
 
-        The `number.*` attributes carry the device limits (the H variant
-        reports 55-100 mm step 1); when an entity is missing the
+        A Home Assistant number entity advertises its range as the `min`,
+        `max` and `step` attributes (the Luba 2 blade height reports
+        55-100 mm step 1). Reading any other name finds nothing and silently
+        leaves the defaults standing (#133). When an entity is missing the
         documented service range stands in, never a per-Mower constant.
         """
         height = self._number_attrs("blade_height")
         spacing = self._number_attrs("path_spacing")
         speed = self._number_attrs("working_speed")
         return Limits(
-            height_min_mm=int(height.get("min_value", 15)),
-            height_max_mm=int(height.get("max_value", 100)),
+            height_min_mm=int(height.get("min", 15)),
+            height_max_mm=int(height.get("max", 100)),
             height_step_mm=int(height.get("step", 1)),
             has_height_readback=True,  # the blade_height sensor is the readback
             height_readback_resolution_mm=_HEIGHT_READBACK_MM,
-            spacing_min_cm=float(spacing.get("min_value", 20)),
-            spacing_max_cm=float(spacing.get("max_value", 35)),
-            speed_min_m_s=float(speed.get("min_value", 0.2)),
-            speed_max_m_s=float(speed.get("max_value", 0.6)),
+            spacing_min_cm=float(spacing.get("min", 20)),
+            spacing_max_cm=float(spacing.get("max", 35)),
+            speed_min_m_s=float(speed.get("min", 0.2)),
+            speed_max_m_s=float(speed.get("max", 0.6)),
             extras_schema=_EXTRAS_SCHEMA,
             min_start_battery_pct=_MIN_START_BATTERY_PCT,
             recharge_battery_pct=self._level("recharge_level", "smart_recharge_level"),
