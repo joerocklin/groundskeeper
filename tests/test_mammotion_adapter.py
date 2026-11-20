@@ -594,6 +594,136 @@ async def test_job_started_on_mowing_transition(hass: HomeAssistant) -> None:
     assert len([s for s in recorder.signals if isinstance(s, JobStarted)]) == 1
 
 
+def _job_started(recorder: _Recorder) -> list[JobStarted]:
+    return [s for s in recorder.signals if isinstance(s, JobStarted)]
+
+
+@pytest.mark.parametrize(
+    ("pause_activity", "pause_mode", "charging"),
+    [
+        pytest.param("paused", "MODE_PAUSE", "off", id="paused"),
+        pytest.param("paused", "MODE_CHARGING_PAUSE", "on", id="mid_job_recharge"),
+        pytest.param("returning", "MODE_RETURNING", "off", id="returning_to_dock"),
+    ],
+)
+async def test_resume_with_the_job_live_throughout_is_not_a_job_start(
+    hass: HomeAssistant, pause_activity: str, pause_mode: str, charging: str
+) -> None:
+    """Issue #139: a pause or recharge and the resume that follows, with the
+    job live the whole time, is one job. `mowing` again is not a start."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+    assert len(_job_started(recorder)) == 1  # the job beginning
+
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", pause_activity, {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", pause_mode, {})
+    set_entity(hass, entry, mower, NAME, "binary_sensor:charging", charging, {})
+    set_entity(hass, entry, mower, NAME, "sensor:work_area", "Not working", {})
+    await hass.async_block_till_done()
+
+    set_entity(hass, entry, mower, NAME, "binary_sensor:charging", "off", {})
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+
+    assert len(_job_started(recorder)) == 1  # still only the first
+
+
+@pytest.mark.parametrize("activity_first", [True, False], ids=["activity_first", "mode_first"])
+async def test_new_job_emits_exactly_one_job_started_whichever_entity_updates_first(
+    hass: HomeAssistant, activity_first: bool
+) -> None:
+    """The `lawn_mower` and `activity_mode` entities update separately and in
+    either order; a new job (live job false, then true while `mowing`) is one
+    start, and staying `mowing` does not re-emit."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+
+    first = ("lawn_mower:mower", "mowing"), ("sensor:activity_mode", "MODE_WORKING")
+    for key, state in first if activity_first else reversed(first):
+        set_entity(hass, entry, mower, NAME, key, state, {})
+        await hass.async_block_till_done()
+
+    assert len(_job_started(recorder)) == 1
+    set_entity(hass, entry, mower, NAME, "sensor:progress", "5", {})
+    await hass.async_block_till_done()
+    assert len(_job_started(recorder)) == 1
+
+
+async def test_job_after_a_finished_job_is_a_new_start(hass: HomeAssistant) -> None:
+    """The job ends (the mode leaves the active set) and another begins."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "docked", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_READY", {})
+    await hass.async_block_till_done()
+    assert len(_job_started(recorder)) == 1
+
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+    assert len(_job_started(recorder)) == 2
+
+
+@pytest.mark.parametrize("gap", ["unavailable", "unknown"])
+async def test_mode_dropping_out_mid_job_and_returning_is_not_a_job_start(
+    hass: HomeAssistant, gap: str
+) -> None:
+    """A dropout of the `activity_mode` reading says nothing about the job:
+    the job is not over, so its return is not a new start."""
+    _, recorder, entry, mower = await _adapter_with_sink(hass)
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+    assert len(_job_started(recorder)) == 1
+
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", gap, {})
+    await hass.async_block_till_done()
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+
+    assert len(_job_started(recorder)) == 1
+
+
+async def test_adapter_built_while_mowing_with_mode_unreadable_does_not_emit(
+    hass: HomeAssistant,
+) -> None:
+    """A restart while the `activity_mode` entity is still unavailable: the
+    Mower is `mowing`, so the job began before the adapter was built."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "unavailable", {})
+    adapter = make_adapter(hass, entry)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    await hass.async_block_till_done()
+
+    assert _job_started(recorder) == []
+
+
+async def test_adapter_built_mid_job_does_not_emit_job_started(hass: HomeAssistant) -> None:
+    """A Home Assistant restart mid-job builds the adapter while the Mower is
+    already `mowing` on a live job: its first state event is not a start."""
+    entry, mower = await make_director_entry(hass)
+    install_baseline(hass, entry, mower, NAME)
+    set_entity(hass, entry, mower, NAME, "lawn_mower:mower", "mowing", {})
+    set_entity(hass, entry, mower, NAME, "sensor:activity_mode", "MODE_WORKING", {})
+    adapter = make_adapter(hass, entry)
+    recorder = _Recorder()
+    adapter.subscribe(recorder)
+
+    set_entity(hass, entry, mower, NAME, "sensor:progress", "5", {})
+    await hass.async_block_till_done()
+
+    assert _job_started(recorder) == []
+
+
 async def test_zones_changed_on_registry_and_rekey(hass: HomeAssistant) -> None:
     """A Zone switch appearing, and a map rebuild re-keying the hash set,
     both emit ZonesChanged."""

@@ -974,6 +974,45 @@ def test_job_started_matching_recorded_job_ref_is_our_own():
     assert run_status(state) == ["mowing"]
 
 
+RECHARGING = replace(MOWING, activity=LawnMowerActivity.PAUSED, recharging=True)
+
+
+def test_resume_after_a_mid_job_recharge_with_no_zone_is_not_an_external_job():
+    """Issue #139: the Mower docks mid-job, charges and resumes its own job.
+    At the dock `work_area` reads `Not working`, so the resume's JobStarted
+    carries no Zone: unknown, not a mismatch. The Run carries on."""
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(400), RECHARGING))
+    state, _ = step(state, SnapshotReceived(at(500), MOWING))
+    state, fx = step(state, SignalReceived(at(501), JobStarted(None, None, at(500))))
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert state["state"]["active_run_id"] == "p1-r1"
+    assert state["state"]["prompts"] == []
+    assert not events(fx, "prompt_sent")
+    assert not [e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect))]
+
+
+def test_resume_signal_arriving_before_the_snapshot_shows_the_resume_is_not_external():
+    """The adapter emits `JobStarted` before it publishes the snapshot, so the
+    signal is handled while the snapshot still reads the recharge (#139)."""
+    state = mowing_state()
+    state, _ = step(state, SnapshotReceived(at(400), RECHARGING))
+    state, fx = step(state, SignalReceived(at(501), JobStarted(None, None, at(500))))
+    assert run_status(state) == ["mowing"]
+    state, _ = step(state, SnapshotReceived(at(501), MOWING))
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert not [e for e in fx if isinstance(e, (AbortRunEffect, StartRunEffect))]
+
+
+def test_job_started_with_a_different_job_ref_is_external_even_without_a_zone():
+    state = mowing_state()
+    state, fx = step(state, SignalReceived(at(500), JobStarted("j2", None, at(499))))
+    failed_with(state, "superseded")
+    no_abort(fx)
+
+
 def test_job_started_while_starting_is_the_directors_own_start():
     state = starting_state()
     state, _ = step(state, SignalReceived(at(62), JobStarted("j1", "11111111", at(62))))

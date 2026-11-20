@@ -172,10 +172,15 @@ class ZoneTaskAborted:
 
 @dataclass(frozen=True, slots=True)
 class JobStarted:
-    """A job started on the Mower.
+    """A job began on the Mower.
 
-    Neutral: the core decides whether the start was external by its own
-    command log (design ticket 06 §5a).
+    Emitted when a job begins, not when a live job resumes after a pause or a
+    mid-job recharge (issue #139).
+
+    The core decides whether the start was external (design ticket 06 §5a):
+    a `job_ref` that differs from the Run's, when both sides have one, or a
+    known `zone` that differs from the Run's. A `zone` of None is unknown,
+    never a mismatch: the Mower reports no Zone at the dock or in transit.
     """
 
     job_ref: str | None
