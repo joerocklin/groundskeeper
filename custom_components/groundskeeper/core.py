@@ -2099,16 +2099,22 @@ class _Machine:
                 # An error is evidence, not a verdict (issue #96): a Mower can
                 # log one, recover and keep mowing, and failing the Run then
                 # offers Retry on a Mower still on the job. No code is special;
-                # the snapshot and the error's own time decide. Record it, and
-                # the stop and on-hold rules decide if the Mower really stops,
-                # when the error is older than the last reading that showed the
-                # Mower mowing (issue #135: that reading superseded it, however
-                # late Home Assistant saw it), or the Mower is mowing, paused
-                # (issue #110) or docked, recharging or not (issue #135), on a
-                # live job. Anything else is a stopped Mower (usually locked in
-                # `error`): fail the Run, no command (spec §7.3).
+                # the snapshot and the error's own time decide. Two things
+                # tolerate it: the error is older than the last reading that
+                # showed the Mower mowing (issue #135: that reading superseded
+                # it, however late Home Assistant saw it), or the Mower is
+                # mowing, paused (issue #110) or docked, recharging or not
+                # (issue #135), on a live job. Either way record it, and the
+                # stop and on-hold rules decide if the Mower really stops.
+                # Anything else is a stopped Mower (usually locked in `error`):
+                # fail the Run, no command (spec §7.3).
                 if self._error_superseded(signal.time) or self._may_carry_on_a_live_job():
                     self._tolerate_error(run, error)
+                    # A Mower that already reads `error` pushes no more
+                    # snapshots, so start its 60 s window now, not at the next
+                    # evaluation (the stall clock holds on `error` activity).
+                    if (snapshot := self._snapshot()) is not None:
+                        self._fail_if_errored_after_tolerance(run, snapshot)
                 else:
                     run["error"] = error
                     self._fail_run(run, "error", abort=False)
@@ -2168,11 +2174,7 @@ class _Machine:
         Only a snapshot input moves it, never a timer tick: the adapter pushes
         changes, so this is the last time the Mower really showed it was mowing.
         """
-        if (
-            snapshot.available
-            and snapshot.job_active
-            and snapshot.activity is LawnMowerActivity.MOWING
-        ):
+        if snapshot.available and self._mowing_live(snapshot):
             self.s["last_mowing_at"] = iso(self.now)
 
     def _error_superseded(self, error_time: datetime) -> bool:
@@ -2185,7 +2187,9 @@ class _Machine:
         `error` or `stopped_off_dock` rules.
         """
         last = self.s["last_mowing_at"]
-        return last is not None and error_time < parse(last)
+        if last is None or error_time.tzinfo is None:
+            return False  # nothing to compare with, or a stamp with no zone
+        return error_time < parse(last)
 
     def _may_carry_on_a_live_job(self) -> bool:
         """The latest snapshot says the Mower is mowing, paused or docked (a

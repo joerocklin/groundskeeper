@@ -18,11 +18,11 @@ from custom_components.groundskeeper.adapter import Movement, NewError
 from custom_components.groundskeeper.core import (
     AbortRunEffect,
     ResumeRunEffect,
+    RetryRun,
     SignalReceived,
     SnapshotReceived,
     StartRunEffect,
     TimerFired,
-    RetryRun,
     initial_core_state,
     normalise_core_state,
     snapshot_to_dict,
@@ -37,12 +37,11 @@ from tests.test_core_reducer import (
     events,
     failed_with,
     mowing_state,
-    no_abort,
     run_status,
     step,
 )
 from tests.test_on_hold import RECHARGING
-from tests.test_reconcile import LIVE, LOAD, commands, fresh_stall, reconcile, run_of
+from tests.test_reconcile import LIVE, LOAD, fresh_stall, reconcile, run_of
 
 CHARGING_ON_JOB = replace(
     MOWING, activity=LawnMowerActivity.PAUSED, recharging=True, battery=2
@@ -50,6 +49,8 @@ CHARGING_ON_JOB = replace(
 DOCKED_ON_JOB = replace(MOWING, activity=LawnMowerActivity.DOCKED)
 DOCKED_CHARGING_ON_JOB = replace(DOCKED_ON_JOB, recharging=True, battery=20)
 LOCKED = replace(MOWING, activity=LawnMowerActivity.ERROR)
+# What a restart reads when the Mower sits on the charger mid-job in the Zone.
+RESTART_CHARGING = replace(LIVE, activity=LawnMowerActivity.PAUSED, recharging=True, battery=2)
 STALE_ERROR = NewError("2748", "Angle position sensor of lift motor disconnected", at(1500))
 
 
@@ -61,6 +62,22 @@ def no_command(fx):
 
 def mowing_at(progress):
     return replace(MOWING, progress=progress, movement=Movement(progress_pct=progress))
+
+
+def last_mowing(state):
+    return state["state"]["last_mowing_at"]
+
+
+def assert_tolerated(state, fx, code):
+    """The Run stays `mowing` with the error recorded: no failure, no prompt, no command."""
+    assert run_status(state) == ["mowing"]
+    assert state["state"]["schedule"]["status"] == "running"
+    assert state["state"]["prompts"] == []
+    assert not events(fx, "prompt_sent")
+    assert [e.payload["code"] for e in events(fx, "error_tolerated")] == [code]
+    assert state["state"]["runs"][0]["tolerated_errors"][-1]["code"] == code
+    assert "error" not in state["state"]["runs"][0]
+    no_command(fx)
 
 
 def front_yard_2026_11_19(*, error_first):
@@ -91,16 +108,8 @@ def front_yard_2026_11_19(*, error_first):
 @pytest.mark.parametrize("error_first", [False, True], ids=["charger_first", "error_first"])
 def test_stale_error_on_the_charger_keeps_the_run_mowing_until_the_job_closes(error_first):
     state, fx = front_yard_2026_11_19(error_first=error_first)
-    assert run_status(state) == ["mowing"]
-    assert state["state"]["schedule"]["status"] == "running"
-    assert state["state"]["prompts"] == []
-    assert not events(fx, "prompt_sent")
-    no_command(fx)
-    [event] = events(fx, "error_tolerated")
-    assert event.payload["code"] == "2748"
-    [note] = state["state"]["runs"][0]["tolerated_errors"]
-    assert note["time"] == at(1500).isoformat()
-    assert "error" not in state["state"]["runs"][0]
+    assert_tolerated(state, fx, "2748")
+    assert state["state"]["runs"][0]["tolerated_errors"][0]["time"] == at(1500).isoformat()
     # The job closes: docked, no live job. The Run is done one window later.
     state, fx = step(state, SnapshotReceived(at(5000), DOCKED))
     assert run_status(state) == ["mowing"]
@@ -123,14 +132,7 @@ def test_fresh_error_while_paused_or_docked_on_a_live_job_is_tolerated(snapshot)
     state = mowing_state()
     state["state"]["snapshot"] = snapshot_to_dict(snapshot)
     state, fx = step(state, SignalReceived(at(500), NewError("1008", "boom", at(499))))
-    assert run_status(state) == ["mowing"]
-    assert state["state"]["schedule"]["status"] == "running"
-    assert state["state"]["prompts"] == []
-    [event] = events(fx, "error_tolerated")
-    assert event.payload["code"] == "1008"
-    assert state["state"]["runs"][0]["tolerated_errors"][0]["code"] == "1008"
-    assert "error" not in state["state"]["runs"][0]
-    no_command(fx)
+    assert_tolerated(state, fx, "1008")
 
 
 def test_fresh_error_while_returning_on_a_live_job_still_fails_the_run():
@@ -178,6 +180,14 @@ def test_error_with_no_mowing_reading_ever_still_fails_the_run():
     failed_with(state, "error")
 
 
+def test_an_error_stamp_without_a_time_zone_is_not_compared_and_follows_the_other_rules():
+    state = mowing_state()
+    state["state"]["snapshot"] = snapshot_to_dict(LOCKED)
+    naive = NewError("1003", "boom", at(60).replace(tzinfo=None))
+    state, _ = step(state, SignalReceived(at(500), naive))
+    failed_with(state, "error")
+
+
 def test_error_stamped_at_the_last_mowing_reading_is_not_older_than_it():
     state = mowing_state()
     state["state"]["snapshot"] = snapshot_to_dict(LOCKED)
@@ -192,14 +202,14 @@ def test_stale_error_while_the_mower_reads_error_fails_the_run_after_the_error_w
     state, fx = step(state, SignalReceived(at(510), NewError("1008", "Robot is locked", at(300))))
     assert run_status(state) == ["mowing"]
     assert len(events(fx, "error_tolerated")) == 1
-    state, _ = step(state, TimerFired(at(520)))  # arms the 60 s `error` window
-    assert state["state"]["deadlines"]["error_stable"] == at(580).isoformat()
-    state, _ = step(state, TimerFired(at(570)))
+    # The window starts when the error is seen: a locked Mower pushes no more snapshots.
+    assert state["state"]["deadlines"]["error_stable"] == at(570).isoformat()
+    state, _ = step(state, TimerFired(at(569)))
     assert run_status(state) == ["mowing"]
-    state, fx = step(state, TimerFired(at(581)))
+    state, fx = step(state, TimerFired(at(571)))
     failed_with(state, "error")
     assert state["state"]["runs"][0]["error"]["code"] == "1008"
-    no_abort(fx)
+    no_command(fx)
 
 
 def test_stale_error_then_idle_without_a_live_job_fails_stopped_off_dock():
@@ -237,10 +247,6 @@ def test_tolerated_error_on_the_charger_still_holds_the_run_when_the_battery_nev
 
 
 # -- the last reading of mowing (persisted) ---------------------------------------
-
-
-def last_mowing(state):
-    return state["state"]["last_mowing_at"]
 
 
 def test_a_mowing_reading_on_a_live_job_records_its_time():
@@ -297,32 +303,21 @@ def test_a_retry_does_not_reset_it():
 
 # -- after a restart (reconcile replays signals through the same rules) -----------
 
-CHARGING = replace(LIVE, activity=LawnMowerActivity.PAUSED, recharging=True, battery=2)
-
-
 def test_restart_replayed_stale_error_on_the_charger_follows_the_live_rule():
     """Stamped before the last reading of mowing: superseded, the Run goes on."""
     state = fresh_stall(mowing_state())
     state["state"]["last_error_time"] = at(50).isoformat()
     state["state"]["last_mowing_at"] = at(4000).isoformat()
-    state, fx = reconcile(state, replace(CHARGING, activity=LawnMowerActivity.ERROR),
-                          signals=[NewError("2748", "lift", at(3000))])
-    assert run_status(state) == ["mowing"]
-    assert state["state"]["schedule"]["status"] == "running"
-    assert run_of(state)["tolerated_errors"][0]["code"] == "2748"
-    assert [e.payload["code"] for e in events(fx, "error_tolerated")] == ["2748"]
-    assert not events(fx, "prompt_sent")
-    assert commands(fx) == []
+    state, fx = reconcile(state, RESTART_CHARGING, signals=[NewError("2748", "lift", at(3000))])
+    assert_tolerated(state, fx, "2748")
 
 
 def test_restart_replayed_fresh_error_while_recharging_on_a_live_job_is_tolerated():
     state = fresh_stall(mowing_state())
     state["state"]["last_error_time"] = at(50).isoformat()
     state["state"]["last_mowing_at"] = at(4000).isoformat()
-    state, fx = reconcile(state, CHARGING, signals=[NewError("2748", "lift", at(5000))])
-    assert run_status(state) == ["mowing"]
-    assert [e.payload["code"] for e in events(fx, "error_tolerated")] == ["2748"]
-    assert commands(fx) == []
+    state, fx = reconcile(state, RESTART_CHARGING, signals=[NewError("2748", "lift", at(5000))])
+    assert_tolerated(state, fx, "2748")
 
 
 def test_restart_replayed_fresh_error_with_the_mower_locked_still_fails():
@@ -332,7 +327,7 @@ def test_restart_replayed_fresh_error_with_the_mower_locked_still_fails():
     state, fx = reconcile(state, replace(LIVE, activity=LawnMowerActivity.ERROR),
                           signals=[NewError("2748", "lift", at(5000))])
     assert run_of(state)["status"] == "failed"
-    assert commands(fx) == []
+    no_command(fx)
 
 
 def test_a_live_mowing_snapshot_at_the_restart_is_a_reading_of_mowing():
